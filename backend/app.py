@@ -1,7 +1,7 @@
 from fastapi import FastAPI, HTTPException, Depends, status, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, ForeignKey, Text, Boolean
 from sqlalchemy.orm import declarative_base, sessionmaker, Session, relationship
 from pydantic import BaseModel, Field
@@ -26,9 +26,16 @@ REGEX_PATTERNS = {
     'quantity_unit': re.compile(r'([\d,]+\.?\d*)\s*([A-Za-z]*)'),
 }
 
-# Database setup
-SQLALCHEMY_DATABASE_URL = "sqlite:///./fruit_vegetable_costs.db"
-engine = create_engine(SQLALCHEMY_DATABASE_URL, connect_args={"check_same_thread": False})
+# Database setup - Support both SQLite (local) and PostgreSQL (production)
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./fruit_vegetable_costs.db")
+
+# Handle connection args based on database type
+if DATABASE_URL.startswith("postgresql"):
+    # PostgreSQL doesn't need check_same_thread
+    engine = create_engine(DATABASE_URL)
+else:
+    # SQLite needs check_same_thread=False for FastAPI
+    engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
@@ -1175,7 +1182,7 @@ async def get_monthly_report(month: str, db: Session = Depends(get_db)):
 # Export endpoints
 @app.get("/api/export/{month}/csv")
 async def export_monthly_csv(month: str, db: Session = Depends(get_db)):
-    """Export monthly report as CSV"""
+    """Export monthly report as CSV - Returns file directly for Render compatibility"""
     engine = CostAllocationEngine(db)
     # Build maps from DB so report has data
     products = db.query(Product).filter(Product.is_active == True).all()
@@ -1187,12 +1194,16 @@ async def export_monthly_csv(month: str, db: Session = Depends(get_db)):
     # Create DataFrame
     df = pd.DataFrame(report['products'])
     
-    # Save to CSV
-    csv_path = f"static/exports/report_{month}.csv"
-    os.makedirs(os.path.dirname(csv_path), exist_ok=True)
-    df.to_csv(csv_path, index=False)
+    # Return as direct download (no file saved to disk - Render filesystem is ephemeral)
+    output = io.StringIO()
+    df.to_csv(output, index=False)
+    output.seek(0)
     
-    return {"download_url": f"/static/exports/report_{month}.csv"}
+    return StreamingResponse(
+        iter([output.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": f"attachment; filename=report_{month}.csv"}
+    )
 
 @app.get("/api/export/{month}/xlsx")
 async def export_monthly_xlsx(month: str, db: Session = Depends(get_db)):
@@ -1285,17 +1296,22 @@ async def export_monthly_xlsx(month: str, db: Session = Depends(get_db)):
         summary_rows.append({'metric': f'cost_{category}', 'value': amount})
     summary_df = pd.DataFrame(summary_rows)
     
-    # Save to Excel
-    xlsx_path = f"static/exports/report_{month}.xlsx"
-    os.makedirs(os.path.dirname(xlsx_path), exist_ok=True)
-    with pd.ExcelWriter(xlsx_path, engine='xlsxwriter') as writer:
+    # Return as direct download (no file saved to disk - Render filesystem is ephemeral)
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
         summary_df.to_excel(writer, index=False, sheet_name='Summary')
         products_df.to_excel(writer, index=False, sheet_name='Products (Raw)')
         # Sheet name exactly as requested
         products_formatted_df.to_excel(writer, index=False, sheet_name='Product-wise Allocation Results')
         allocations_df.to_excel(writer, index=False, sheet_name='Allocations')
     
-    return {"download_url": f"/static/exports/report_{month}.xlsx"}
+    output.seek(0)
+    
+    return StreamingResponse(
+        output,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename=report_{month}.xlsx"}
+    )
 
 # Excel Upload endpoints
 @app.post("/api/upload-excel")
