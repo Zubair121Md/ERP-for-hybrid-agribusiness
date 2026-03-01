@@ -149,10 +149,10 @@ function displayDashboardStats(stats) {
                 <span class="stat-title">Total Revenue</span>
                 <i class="fas fa-chart-line stat-icon"></i>
             </div>
-            <div class="stat-value">₹${formatNumber(stats.total_revenue)}</div>
+            <div class="stat-value">₹${formatNumber(stats.total_revenue || 0)}</div>
             <div class="stat-change positive">
                 <i class="fas fa-arrow-up"></i>
-                +${stats.profit_margin.toFixed(1)}% margin
+                +${(stats.profit_margin || 0).toFixed(1)}% margin
             </div>
         </div>
         
@@ -161,7 +161,7 @@ function displayDashboardStats(stats) {
                 <span class="stat-title">Total Costs</span>
                 <i class="fas fa-dollar-sign stat-icon"></i>
             </div>
-            <div class="stat-value">₹${formatNumber(stats.total_costs)}</div>
+            <div class="stat-value">₹${formatNumber(stats.total_costs || 0)}</div>
             <div class="stat-change">
                 <i class="fas fa-info-circle"></i>
                 All categories
@@ -173,10 +173,10 @@ function displayDashboardStats(stats) {
                 <span class="stat-title">Net Profit</span>
                 <i class="fas fa-trophy stat-icon"></i>
             </div>
-            <div class="stat-value">₹${formatNumber(stats.total_profit)}</div>
-            <div class="stat-change ${stats.total_profit >= 0 ? 'positive' : 'negative'}">
-                <i class="fas fa-${stats.total_profit >= 0 ? 'arrow-up' : 'arrow-down'}"></i>
-                ${stats.profit_margin.toFixed(1)}% margin
+            <div class="stat-value">₹${formatNumber(stats.total_profit || 0)}</div>
+            <div class="stat-change ${(stats.total_profit || 0) >= 0 ? 'positive' : 'negative'}">
+                <i class="fas fa-${(stats.total_profit || 0) >= 0 ? 'arrow-up' : 'arrow-down'}"></i>
+                ${(stats.profit_margin || 0).toFixed(1)}% margin
             </div>
         </div>
     `;
@@ -242,14 +242,19 @@ function displayTopProducts(products) {
     `;
     
     products.forEach(product => {
+        const revenue = product.revenue || 0;
+        const totalCost = product.total_cost || 0;
+        const profit = product.profit || 0;
+        const profitMargin = product.profit_margin || 0;
+        
         tableHTML += `
             <tr>
-                <td><strong>${product.product_name}</strong></td>
-                <td><span class="badge ${product.source === 'inhouse' ? 'badge-success' : 'badge-info'}">${product.source}</span></td>
-                <td>₹${formatNumber(product.revenue)}</td>
-                <td>₹${formatNumber(product.total_cost)}</td>
-                <td class="${product.profit >= 0 ? 'text-success' : 'text-danger'}">₹${formatNumber(product.profit)}</td>
-                <td>${product.profit_margin.toFixed(1)}%</td>
+                <td><strong>${product.product_name || 'Unknown'}</strong></td>
+                <td><span class="badge ${product.source === 'inhouse' ? 'badge-success' : 'badge-info'}">${product.source || 'unknown'}</span></td>
+                <td>₹${formatNumber(revenue)}</td>
+                <td>₹${formatNumber(totalCost)}</td>
+                <td class="${profit >= 0 ? 'text-success' : 'text-danger'}">₹${formatNumber(profit)}</td>
+                <td>${profitMargin.toFixed(1)}%</td>
             </tr>
         `;
     });
@@ -358,7 +363,14 @@ async function loadProducts() {
         showLoading('products-table');
         
         const response = await fetch(`${API_BASE}/products/`);
+        if (!response.ok) {
+            throw new Error(`Products API returned ${response.status}`);
+        }
         const products = await response.json();
+        
+        if (!Array.isArray(products)) {
+            throw new Error('Invalid products data received');
+        }
         
         displayProducts(products);
         
@@ -1149,7 +1161,10 @@ function generateCSVContent(sales, costs) {
 
 // Utility functions
 function formatNumber(num) {
-    return new Intl.NumberFormat('en-IN').format(num.toFixed(2));
+    if (num === undefined || num === null || isNaN(num)) {
+        return '0.00';
+    }
+    return new Intl.NumberFormat('en-IN').format(Number(num).toFixed(2));
 }
 
 function showLoading(containerId) {

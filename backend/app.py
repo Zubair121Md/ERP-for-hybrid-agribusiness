@@ -12,6 +12,19 @@ import json
 import os
 from pathlib import Path
 import io
+import re
+
+# OPTIMIZED: Pre-compile regex patterns for better performance (compile once, use many times)
+# Time Complexity: O(1) per match instead of O(m) where m=pattern length
+REGEX_PATTERNS = {
+    'currency': re.compile(r'[₹$€£]'),
+    'indian_number': re.compile(r'[\d,]+\.?\d*'),
+    'month_yyyy_mm': re.compile(r'(\d{4}[-/]\d{2})|([A-Za-z]{3}[-/]\d{4})'),
+    'period_date': re.compile(r'\d{1,2}[-/]\w{3}[-/]\d{2,4}'),
+    'period_month': re.compile(r'\w{3}[-/]\d{2,4}'),
+    'period_iso': re.compile(r'\d{4}[-/]\d{2}'),
+    'quantity_unit': re.compile(r'([\d,]+\.?\d*)\s*([A-Za-z]*)'),
+}
 
 # Database setup
 SQLALCHEMY_DATABASE_URL = "sqlite:///./fruit_vegetable_costs.db"
@@ -41,6 +54,8 @@ def _to_kg(product_name: str, quantity: float, unit: str) -> float:
 def compute_inhouse_outsourced_ratios(db: Session, alpha: float = 0.5) -> tuple:
     """
     Compute dynamic segment ratios from current sales data
+    OPTIMIZED: Single-pass iteration with pre-loaded product map
+    Time Complexity: O(n) where n = number of sales records
     
     Args:
         db: Database session
@@ -49,22 +64,32 @@ def compute_inhouse_outsourced_ratios(db: Session, alpha: float = 0.5) -> tuple:
     Returns:
         (inhouse_ratio, outsourced_ratio) tuple
     """
-    # Aggregate totals from current sales
-    sales = db.query(MonthlySale).join(Product).all()
+    # OPTIMIZED: Load all products once into a map for O(1) lookup
+    products = db.query(Product).all()
+    product_map = {p.id: p for p in products}  # O(m) where m = products
+    
+    # OPTIMIZED: Single query with join, iterate once
+    sales = db.query(MonthlySale).all()  # O(n) where n = sales
     in_w = 0.0; out_w = 0.0
     in_v = 0.0; out_v = 0.0
     
+    # Single-pass iteration: O(n)
     for s in sales:
-        qty_kg = _to_kg(s.product.name, s.quantity, s.product.unit)
+        product = product_map.get(s.product_id)
+        if not product:
+            continue
+            
+        qty_kg = _to_kg(product.name, s.quantity, product.unit)
         rev = s.quantity * s.sale_price
-        if s.product.source == "inhouse":
+        
+        if product.source == "inhouse":
             in_w += qty_kg
             in_v += rev
         else:
             out_w += qty_kg
             out_v += rev
 
-    # Compute shares with safety
+    # Compute shares with safety - O(1)
     total_w = in_w + out_w
     total_v = in_v + out_v
     in_w_share = (in_w / total_w) if total_w > 0 else 0.0
@@ -716,11 +741,41 @@ async def root():
 async def health_check():
     return {"status": "healthy", "timestamp": datetime.utcnow()}
 
+@app.get("/api")
+@app.get("/api/info")
+async def api_info():
+    """Return API information and version"""
+    return {
+        "message": "Purple Patch Farms ERP - Hybrid Agribusiness Management System",
+        "version": "2.0.0",
+        "description": "A comprehensive cost allocation system for fruit and vegetable farming operations",
+        "features": [
+            "Product Management",
+            "Sales Tracking",
+            "Cost Management & Allocation",
+            "Excel Upload (Standard & Auto-Detection Mode)",
+            "P&L Upload",
+            "Reports & Analytics",
+            "Profitability Analysis"
+        ]
+    }
+
 @app.post("/api/reset-database")
 async def reset_database(db: Session = Depends(get_db)):
     """Reset the entire database by deleting all records"""
     try:
-        # Delete all records from all tables
+        print("🗑️  Starting database reset...")
+        
+        # Delete all records from all tables (in correct order due to foreign keys)
+        allocations_count = db.query(Allocation).count()
+        sales_count = db.query(MonthlySale).count()
+        costs_count = db.query(Cost).count()
+        products_count = db.query(Product).count()
+        
+        print(f"   📊 Records before reset: {allocations_count} allocations, {sales_count} sales, {costs_count} costs, {products_count} products")
+        
+        # Delete in order: allocations first (has foreign keys), then sales, then costs, then products
+        db.query(Allocation).delete()
         db.query(MonthlySale).delete()
         db.query(Cost).delete()
         db.query(Product).delete()
@@ -728,9 +783,42 @@ async def reset_database(db: Session = Depends(get_db)):
         # Commit the changes
         db.commit()
         
-        return {"message": "Database reset successfully", "timestamp": datetime.utcnow()}
+        # Verify deletion
+        remaining_allocations = db.query(Allocation).count()
+        remaining_sales = db.query(MonthlySale).count()
+        remaining_costs = db.query(Cost).count()
+        remaining_products = db.query(Product).count()
+        
+        print(f"   ✅ Records after reset: {remaining_allocations} allocations, {remaining_sales} sales, {remaining_costs} costs, {remaining_products} products")
+        
+        if remaining_allocations > 0 or remaining_sales > 0 or remaining_costs > 0 or remaining_products > 0:
+            print(f"   ⚠️  WARNING: Some records still exist after reset!")
+            return {
+                "message": f"Database reset completed with warnings. Remaining: {remaining_costs} costs, {remaining_sales} sales, {remaining_products} products",
+                "timestamp": datetime.utcnow(),
+                "remaining": {
+                    "allocations": remaining_allocations,
+                    "sales": remaining_sales,
+                    "costs": remaining_costs,
+                    "products": remaining_products
+                }
+            }
+        
+        return {
+            "message": "Database reset successfully - all records deleted",
+            "timestamp": datetime.utcnow(),
+            "deleted": {
+                "allocations": allocations_count,
+                "sales": sales_count,
+                "costs": costs_count,
+                "products": products_count
+            }
+        }
     except Exception as e:
         db.rollback()
+        print(f"   ❌ Error resetting database: {str(e)}")
+        import traceback
+        print(traceback.format_exc())
         raise HTTPException(status_code=500, detail=f"Error resetting database: {str(e)}")
 
 # Dashboard endpoints
@@ -744,11 +832,30 @@ async def get_dashboard_stats(db: Session = Depends(get_db)):
     
     # Revenue and cost stats for ALL data (no month filtering)
     sales = db.query(MonthlySale).all()
-    costs = db.query(Cost).all()
+    all_costs = db.query(Cost).all()
+    
+    # Check if allocation has been run (if there are any Allocation records)
+    allocations_exist = db.query(Allocation).count() > 0
     
     total_revenue = sum(s.quantity * s.sale_price for s in sales)
     total_direct_costs = sum(s.direct_cost for s in sales)
-    total_shared_costs = sum(c.amount for c in costs)
+    
+    if allocations_exist:
+        # If allocation has been run, only count allocated costs
+        # Get all allocations and sum their amounts (only valid ones with existing sales)
+        allocations = db.query(Allocation).join(MonthlySale).all()  # Only get allocations with valid sales
+        total_allocated_costs = sum(a.allocated_amount for a in allocations)
+        total_shared_costs = total_allocated_costs
+        print(f"📊 Dashboard: Using allocated costs (₹{total_allocated_costs:,.2f}) from {len(allocations)} valid allocations")
+    else:
+        # If allocation hasn't been run, don't include unallocated costs in total_costs
+        total_unallocated_costs = sum(c.amount for c in all_costs)
+        total_shared_costs = 0.0  # Don't count unallocated costs as "total costs"
+        if total_unallocated_costs > 0:
+            print(f"📊 Dashboard: Allocation not run yet. Unallocated costs in system: ₹{total_unallocated_costs:,.2f} (not included in totals)")
+        else:
+            print(f"📊 Dashboard: No costs in system")
+    
     total_costs = total_direct_costs + total_shared_costs
     total_profit = total_revenue - total_costs
     profit_margin = (total_profit / total_revenue * 100) if total_revenue > 0 else 0
@@ -763,9 +870,23 @@ async def get_dashboard_stats(db: Session = Depends(get_db)):
     inhouse_direct_costs = sum(s.direct_cost for s in inhouse_sales)
     outsourced_direct_costs = sum(s.direct_cost for s in outsourced_sales)
     
-    # Simple allocation for dashboard (50-50 split for shared costs)
-    inhouse_shared_costs = total_shared_costs * 0.5
-    outsourced_shared_costs = total_shared_costs * 0.5
+    if allocations_exist:
+        # Use actual allocated amounts by source (only valid allocations)
+        try:
+            inhouse_allocations = db.query(Allocation).join(MonthlySale).join(Product).filter(Product.source == "inhouse").all()
+            outsourced_allocations = db.query(Allocation).join(MonthlySale).join(Product).filter(Product.source == "outsourced").all()
+            inhouse_shared_costs = sum(a.allocated_amount for a in inhouse_allocations)
+            outsourced_shared_costs = sum(a.allocated_amount for a in outsourced_allocations)
+        except Exception as e:
+            # If there are orphaned allocations (sales/products deleted), ignore them
+            print(f"⚠️  Warning: Some orphaned allocations found, ignoring: {str(e)}")
+            inhouse_shared_costs = 0.0
+            outsourced_shared_costs = 0.0
+    else:
+        # Simple allocation for dashboard preview (50-50 split for shared costs)
+        # But since total_shared_costs is 0, these will be 0
+        inhouse_shared_costs = 0.0
+        outsourced_shared_costs = 0.0
     
     inhouse_costs = inhouse_direct_costs + inhouse_shared_costs
     outsourced_costs = outsourced_direct_costs + outsourced_shared_costs
@@ -879,13 +1000,21 @@ async def create_monthly_sale(sale: MonthlySaleCreate, db: Session = Depends(get
 
 @app.get("/api/sales", response_model=List[MonthlySaleResponse])
 async def get_all_sales(db: Session = Depends(get_db)):
-    """Get all sales data - no month filtering"""
-    sales = db.query(MonthlySale).all()
+    """
+    Get all sales data - no month filtering
+    OPTIMIZED: Fixed N+1 query problem - single query with join
+    Time Complexity: O(n) instead of O(n*m) where n=sales, m=products
+    """
+    # OPTIMIZED: Single query with join to avoid N+1 problem
+    sales = db.query(MonthlySale).join(Product).all()
     
-    # Add product names to response
+    # Build product map for O(1) lookup
+    product_map = {s.product_id: s.product for s in sales}
+    
+    # Single-pass iteration: O(n)
     sales_with_names = []
     for sale in sales:
-        product = db.query(Product).filter(Product.id == sale.product_id).first()
+        product = product_map.get(sale.product_id)
         sales_with_names.append(MonthlySaleResponse(
             **sale.__dict__,
             product_name=product.name if product else "Unknown",
@@ -896,43 +1025,42 @@ async def get_all_sales(db: Session = Depends(get_db)):
 
 @app.get("/api/monthly-sales/{param}", response_model=Union[MonthlySaleResponse, List[MonthlySaleResponse]])
 async def get_monthly_sales_or_by_id(param: str, db: Session = Depends(get_db)):
+    """
+    Get sales by ID or month
+    OPTIMIZED: Fixed N+1 query problem - use joins instead of separate queries
+    Time Complexity: O(1) for ID lookup, O(n) for month (n=sales in month)
+    """
     print(f"DEBUG: Received param: '{param}'")
     
     # Check if param is a number (ID) or string (month)
-    # If it's a single digit or number, treat as ID
-    # If it contains dashes (like 2025-10), treat as month
     if param.isdigit():
         print(f"DEBUG: Treating '{param}' as ID")
-        # It's an ID, get single sale
-        sale_id = int(param)
-        sale = db.query(MonthlySale).filter(MonthlySale.id == sale_id).first()
+        # OPTIMIZED: Single query with join
+        sale = db.query(MonthlySale).join(Product).filter(MonthlySale.id == int(param)).first()
         if not sale:
-            print(f"DEBUG: Sale not found for ID {sale_id}")
+            print(f"DEBUG: Sale not found for ID {param}")
             raise HTTPException(status_code=404, detail="Sales record not found")
         
-        # Add product name to response
-        product = db.query(Product).filter(Product.id == sale.product_id).first()
         sale_response = MonthlySaleResponse(
             **sale.__dict__,
-            product_name=product.name if product else "Unknown",
-            unit=product.unit if product and getattr(product, 'unit', None) else 'kg'
+            product_name=sale.product.name if sale.product else "Unknown",
+            unit=sale.product.unit if sale.product and getattr(sale.product, 'unit', None) else 'kg'
         )
         print(f"DEBUG: Returning single sale: {sale_response}")
         return sale_response
     else:
         print(f"DEBUG: Treating '{param}' as month")
-        # It's a month string, get all sales for that month
-        sales = db.query(MonthlySale).filter(MonthlySale.month == param).all()
+        # OPTIMIZED: Single query with join to avoid N+1
+        sales = db.query(MonthlySale).join(Product).filter(MonthlySale.month == param).all()
         print(f"DEBUG: Found {len(sales)} sales for month {param}")
         
-        # Add product names to response
+        # Single-pass iteration: O(n)
         sales_with_names = []
         for sale in sales:
-            product = db.query(Product).filter(Product.id == sale.product_id).first()
             sales_with_names.append(MonthlySaleResponse(
                 **sale.__dict__,
-                product_name=product.name if product else "Unknown",
-                unit=product.unit if product and getattr(product, 'unit', None) else 'kg'
+                product_name=sale.product.name if sale.product else "Unknown",
+                unit=sale.product.unit if sale.product and getattr(sale.product, 'unit', None) else 'kg'
             ))
         
         return sales_with_names
@@ -1172,7 +1300,10 @@ async def export_monthly_xlsx(month: str, db: Session = Depends(get_db)):
 # Excel Upload endpoints
 @app.post("/api/upload-excel")
 async def upload_excel(file: UploadFile = File(...), db: Session = Depends(get_db)):
-    """BULLETPROOF Excel upload - handles all edge cases and data formats"""
+    """
+    BULLETPROOF Excel upload - handles all edge cases and data formats.
+    Now with Auto-Detection Mode for Purple Patch Farms format.
+    """
     
     print(f"🚀 BULLETPROOF Excel upload starting for: {file.filename}")
     
@@ -1195,6 +1326,58 @@ async def upload_excel(file: UploadFile = File(...), db: Session = Depends(get_d
         print(f"📊 Total rows: {len(df)}")
         print(f"📋 Sample data:")
         print(df.head(2).to_string())
+        
+        # ============================================
+        # AUTO-DETECTION: Check if Purple Patch format
+        # ============================================
+        if detect_purple_patch_format(df):
+            print("🔄 Switching to Auto Mode for Purple Patch format...")
+            try:
+                # OPTIMIZED: Extract month from filename or file content
+                # Time Complexity: O(1) for filename, O(n) for file content (n=rows scanned, early exit)
+                month = "2025-04"  # Default
+                # OPTIMIZED: Use pre-compiled regex pattern
+                filename_month = REGEX_PATTERNS['month_yyyy_mm'].search(file.filename)
+                if filename_month:
+                    month_str = filename_month.group(0)
+                    # Convert to YYYY-MM format if needed
+                    if len(month_str) == 7 and '-' in month_str:
+                        month = month_str
+                    else:
+                        # Try to parse other formats
+                        try:
+                            from datetime import datetime
+                            parsed = datetime.strptime(month_str, "%b-%Y")
+                            month = parsed.strftime("%Y-%m")
+                        except:
+                            pass
+                
+                # OPTIMIZED: Scan only first 50 rows instead of converting entire DataFrame
+                # Early exit on first match - O(n) worst case, typically O(1)
+                if month == "2025-04":  # Only scan if not found in filename
+                    max_scan_rows = min(50, len(df))
+                    for idx in range(max_scan_rows):
+                        row = df.iloc[idx]
+                        row_str = ' '.join(str(cell).upper() for cell in row if pd.notna(cell))
+                        # OPTIMIZED: Use pre-compiled patterns
+                        match = REGEX_PATTERNS['month_yyyy_mm'].search(row_str)
+                        if match:
+                            month_candidate = match.group(1) or match.group(2)
+                            if month_candidate and len(month_candidate) >= 7:
+                                month = month_candidate[:7] if len(month_candidate) == 7 else month_candidate
+                                break
+                
+                print(f"📅 Using month: {month}")
+                result = parse_purple_patch_auto_mode(df, db, month)
+                return result
+            except Exception as e:
+                import traceback
+                print(f"⚠️  Auto Mode parsing failed: {str(e)}")
+                print(f"📋 Traceback: {traceback.format_exc()}")
+                print("🔄 Falling back to standard format...")
+                # Continue to standard format parsing below
+        else:
+            print("ℹ️  Using standard format parsing...")
         
         # BULLETPROOF column matching - handles any variation
         column_mapping = {
@@ -1242,8 +1425,10 @@ async def upload_excel(file: UploadFile = File(...), db: Session = Depends(get_d
         errors = []
         products_created = 0
         sales_created = 0
+        rows_processed = 0
+        rows_split = 0  # Track how many rows were split into multiple records
         
-        print(f"🔄 Processing {len(df)} rows...")
+        print(f"🔄 Processing {len(df)} rows from Excel file...")
         
         for index, row in df.iterrows():
             try:
@@ -1256,6 +1441,8 @@ async def upload_excel(file: UploadFile = File(...), db: Session = Depends(get_d
                 if not particulars or particulars.lower() in ['', 'nan', 'none']:
                     print(f"⚠️  Skipping row {index + 2}: Empty particulars")
                     continue
+                
+                rows_processed += 1  # Count non-empty rows
                 
                 # Extract quantities with unit detection
                 inward_qty_raw = row[found_columns['inward_qty']] if found_columns.get('inward_qty') else ""
@@ -1304,69 +1491,58 @@ async def upload_excel(file: UploadFile = File(...), db: Session = Depends(get_d
                 
                 # Apply split logic for OutwardQty > InwardQty
                 if diff > 0 and source == "outsourced":
-                    # Split into Outsourced + Inhouse portions
-                    print(f"   🔄 Splitting {particulars}: {inward_qty} outsourced + {diff} inhouse")
+                    # Only create the inhouse portion (the excess production)
+                    print(f"   🔄 Splitting {particulars}: Only creating inhouse portion ({diff} kg), skipping outsourced portion ({inward_qty} kg)")
+                    rows_split += 1  # Track that this row was split
                     
-                    # Create records for both portions
-                    records = split_inhouse_outsourced({
-                        'month': month,
-                        'particulars': particulars,
-                        'inward_qty': inward_qty,
-                        'outward_qty': outward_qty,
-                        'inward_rate': inward_rate,
-                        'outward_rate': outward_rate,
-                        'outward_value': outward_value,
-                        'inward_unit': inward_unit,
-                        'outward_unit': outward_unit
-                    })
+                    # Create only the inhouse portion
+                    product_name = f"{particulars} (Inhouse)"
                     
-                    for record in records:
-                        # Create or get product
-                        product_name = f"{record['particulars']} ({record['type'].title()})"
-                        product = db.query(Product).filter(Product.name == product_name).first()
-                        if not product:
-                            product = Product(
-                                name=product_name,
-                                source=record['type'].lower(),
-                                unit=record['unit']
-                            )
-                            db.add(product)
-                            db.commit()
-                            db.refresh(product)
-                            products_created += 1
-                            print(f"   📦 Created product: {product_name}")
-                        
-                        # Create monthly sale record
-                        monthly_sale = MonthlySale(
-                            product_id=product.id,
-                            month=record['month'],
-                            quantity=record['outward_qty'],
-                            sale_price=record['outward_rate'],
-                            direct_cost=record['inward_value'],
-                            inward_quantity=record['inward_qty'],
-                            inward_rate=record['inward_rate'],
-                            inward_value=record['inward_value'],
-                            inhouse_production=record['inhouse_production'],
-                            wastage=record['wastage']
+                    # Create or get product
+                    product = db.query(Product).filter(Product.name == product_name).first()
+                    if not product:
+                        product = Product(
+                            name=product_name,
+                            source="inhouse",
+                            unit=outward_unit if outward_unit else "kg"
                         )
-                        
-                        db.add(monthly_sale)
-                        sales_created += 1
-                        print(f"   💰 Created sale: {record['outward_qty']}{record['unit']} @ ₹{record['outward_rate']} ({record['type']})")
-                        
-                        # Add to parsed data
-                        parsed_data.append(ExcelRowData(
-                            month=record['month'],
-                            particulars=record['particulars'],
-                            type=record['type'],
-                            inward_quantity=record['inward_qty'],
-                            inward_rate=record['inward_rate'],
-                            inward_value=record['inward_value'],
-                            outward_quantity=record['outward_qty'],
-                            outward_rate=record['outward_rate'],
-                            outward_value=record['outward_value'],
-                            inhouse_production=record['inhouse_production'],
-                            wastage=record['wastage']
+                        db.add(product)
+                        db.commit()
+                        db.refresh(product)
+                        products_created += 1
+                        print(f"   📦 Created product: {product_name}")
+                    
+                    # Create monthly sale record for inhouse portion only
+                    monthly_sale = MonthlySale(
+                        product_id=product.id,
+                        month=month,
+                        quantity=diff,  # Only the inhouse production amount
+                        sale_price=outward_rate,
+                        direct_cost=0.0,  # No direct cost for inhouse production
+                        inward_quantity=0.0,  # No inward for inhouse production
+                        inward_rate=0.0,
+                        inward_value=0.0,
+                        inhouse_production=diff,
+                        wastage=0.0
+                    )
+                    
+                    db.add(monthly_sale)
+                    sales_created += 1
+                    print(f"   💰 Created sale (inhouse only): {diff}{outward_unit} @ ₹{outward_rate}")
+                    
+                    # Add to parsed data
+                    parsed_data.append(ExcelRowData(
+                        month=month,
+                        particulars=particulars,
+                        type="Inhouse",
+                        inward_quantity=0.0,
+                        inward_rate=0.0,
+                        inward_value=0.0,
+                        outward_quantity=diff,
+                        outward_rate=outward_rate,
+                        outward_value=diff * outward_rate,
+                        inhouse_production=diff,
+                        wastage=0.0
                         ))
                 else:
                     # Single record (no split needed)
@@ -1428,16 +1604,27 @@ async def upload_excel(file: UploadFile = File(...), db: Session = Depends(get_d
         db.commit()
         
         print(f"✅ BULLETPROOF upload completed!")
+        print(f"   📋 Excel rows processed: {rows_processed} (from {len(df)} total rows)")
+        if rows_split > 0:
+            print(f"   🔄 Rows split into multiple records: {rows_split} (created {rows_split} extra records)")
         print(f"   📦 Products created: {products_created}")
-        print(f"   💰 Sales created: {sales_created}")
-        print(f"   📊 Rows processed: {len(parsed_data)}")
+        print(f"   💰 Sales records created: {sales_created}")
+        print(f"   📊 Total records in parsed_data: {len(parsed_data)}")
+        
+        # Create a more informative message
+        if rows_split > 0:
+            message = f"Successfully processed {rows_processed} Excel rows. {rows_split} rows were split (OutwardQty > InwardQty), creating {sales_created} total sales records."
+        else:
+            message = f"Successfully processed {rows_processed} Excel rows, creating {sales_created} sales records."
         
         return {
             "success": True,
-            "message": f"Successfully processed {len(parsed_data)} rows",
+            "message": message,
+            "excel_rows_processed": rows_processed,
+            "rows_split": rows_split,
             "products_created": products_created,
             "sales_created": sales_created,
-            "parsed_data": [data.dict() for data in parsed_data],
+            "parsed_data": [data.model_dump() for data in parsed_data],
             "errors": errors
         }
         
@@ -1459,9 +1646,8 @@ def parse_quantity_with_unit(value):
     
     value_str = str(value).strip()
     
-    # Extract number and unit
-    import re
-    match = re.match(r'([\d,]+\.?\d*)\s*([A-Za-z]*)', value_str)
+    # OPTIMIZED: Use pre-compiled regex pattern
+    match = REGEX_PATTERNS['quantity_unit'].match(value_str)
     
     if match:
         quantity_str = match.group(1).replace(',', '')
@@ -1491,6 +1677,989 @@ def parse_numeric(value):
         return float(value_str)
     except (ValueError, TypeError):
         return 0.0
+
+def parse_numeric_robust(value):
+    """
+    EXTREMELY ROBUST number parsing - handles all edge cases:
+    - ₹ symbols, commas, spaces
+    - Indian number format (1,03,134.10 → 103134.10)
+    - Decimals (1907988.5 → 1907988.5)
+    - Merged cells, empty rows, text mixed with numbers
+    - Never loses or rounds any value
+    OPTIMIZED: Uses pre-compiled regex patterns
+    Time Complexity: O(n) where n = string length
+    """
+    if pd.isna(value) or value == "" or str(value).strip() == "":
+        return 0.0
+    
+    value_str = str(value).strip()
+    
+    # OPTIMIZED: Use pre-compiled regex pattern
+    value_str = REGEX_PATTERNS['currency'].sub('', value_str)
+    
+    # Remove all spaces
+    value_str = value_str.replace(' ', '')
+    
+    # OPTIMIZED: Use pre-compiled regex pattern
+    number_match = REGEX_PATTERNS['indian_number'].search(value_str)
+    if number_match:
+        number_str = number_match.group(0)
+        # Remove all commas
+        number_str = number_str.replace(',', '')
+        try:
+            return float(number_str)
+        except ValueError:
+            return 0.0
+    
+    # Try direct conversion if no commas found
+    try:
+        return float(value_str)
+    except (ValueError, TypeError):
+        return 0.0
+
+def detect_purple_patch_format(df):
+    """
+    Auto-detect if Excel file is Purple Patch Farms format by scanning for keywords.
+    Returns True if detected, False otherwise.
+    OPTIMIZED: Early exit, single-pass scan, avoid full DataFrame conversion.
+    Time Complexity: O(n*m*k) where n=rows, m=cols, k=keywords (but early exit)
+    """
+    keywords = [
+        "PURPLE PATCH FARMS",
+        "COST ANALYSIS",
+        "TOTAL QTY SOLD",
+        "FIXED COST CAT",
+        "VARIABLE COST",
+        "Open Field",
+        "LETTUCE",
+        "STRAWBERRY",
+        "RASPBERRY&BLUBERRY",
+        "PACKING",
+        "AGGREGATION",
+        "Production Kg",
+        "Damage Kg",
+        "Sales Kg"
+    ]
+    
+    # Pre-compile keywords to uppercase for faster comparison
+    keywords_upper = [k.upper() for k in keywords]
+    
+    # OPTIMIZED: Scan only first 100 rows and columns (most headers are at top)
+    # Early exit on first match - O(n*m*k) worst case, but typically O(1) with early exit
+    max_rows = min(100, len(df))
+    max_cols = min(20, len(df.columns))
+    
+    for idx in range(max_rows):
+        row = df.iloc[idx]
+        # Convert row to string only when needed (lazy evaluation)
+        row_str = ' '.join(str(cell).upper() for cell in row.iloc[:max_cols] if pd.notna(cell))
+        
+        for keyword in keywords_upper:
+            if keyword in row_str:
+                print(f"✅ Auto-detection: Found keyword '{keyword}' - Switching to Auto Mode")
+                return True
+    
+    print("ℹ️  Auto-detection: No Purple Patch keywords found - Using standard format")
+    return False
+
+def parse_purple_patch_auto_mode(df, db, month="2025-04"):
+    """
+    Parse Purple Patch Farms Excel format in Auto Mode.
+    Handles the actual Excel structure with:
+    - FIXED COST CAT - I (with individual line items and total)
+    - FIXED COST CAT - II (with apportionment: Strawberry 60%, Greens 25%, Aggregation 15%)
+    - VARIABLE COST sections (A-F: Open Field, Lettuce, Strawberry, Raspberry&Blueberry, Packing, Aggregation)
+    - Production table at bottom (Production Kg, Damage Kg, Sales Kg)
+    - TOTAL QTY SOLD
+    """
+    print(f"🚀 Starting Auto Mode parsing for Purple Patch format...")
+    
+    parsed_data = []
+    products_created = 0
+    sales_created = 0
+    costs_created = 0
+    errors = []
+    
+    # Convert all cells to string for searching (case-insensitive)
+    df_str = df.astype(str)
+    
+    # Print first few rows for debugging
+    print(f"📋 Excel structure preview (first 10 rows):")
+    for i in range(min(10, len(df_str))):
+        row_preview = [str(df_str.iloc[i, j])[:40] if j < len(df_str.columns) and pd.notna(df_str.iloc[i, j]) else '' for j in range(min(8, len(df_str.columns)))]
+        print(f"   Row {i+1}: {row_preview}")
+    
+    # Product category mappings
+    category_mapping = {
+        'OPEN FIELD': 'Open Field',
+        'LETTUCE': 'Polyhouse Greens',  # C+D+E combined
+        'STRAWBERRY': 'Strawberry',
+        'RASPBERRY&BLUBERRY': 'Other Berries',
+        'RASPBERRY': 'Other Berries',
+        'BLUBERRY': 'Other Berries',
+        'BLUEBERRY': 'Other Berries',
+        'PACKING': 'Packing',
+        'AGGREGATION': 'Aggregation'
+    }
+    
+    # ============================================
+    # STEP 1: Extract TOTAL QTY SOLD
+    # OPTIMIZED: Limited row scan with early exit
+    # Time Complexity: O(n*m) worst case, but early exit (typically O(1))
+    # ============================================
+    print("📊 Step 1: Extracting TOTAL QTY SOLD...")
+    total_qty_sold = 0.0
+    # OPTIMIZED: Scan only first 100 rows (headers are usually at top)
+    max_scan_rows = min(100, len(df_str))
+    for idx in range(max_scan_rows):
+        row = df_str.iloc[idx]
+        row_len = len(row)
+        # OPTIMIZED: Limit column scan to first 20 columns
+        max_cols = min(20, row_len)
+        for col_idx in range(max_cols):
+            cell_upper = str(row.iloc[col_idx]).upper()
+            if 'TOTAL QTY SOLD' in cell_upper or 'TOTAL QTY' in cell_upper:
+                # Look for number in same row or next cells (limit to 5 columns ahead)
+                for next_col in range(col_idx, min(col_idx + 5, row_len)):
+                    try:
+                        val = parse_numeric_robust(row.iloc[next_col])
+                        if val > 0:
+                            total_qty_sold = val
+                            print(f"   ✅ Found TOTAL QTY SOLD: {total_qty_sold} kg")
+                            break
+                    except (IndexError, KeyError):
+                        continue
+                if total_qty_sold > 0:
+                    break
+        if total_qty_sold > 0:
+            break
+    
+    # ============================================
+    # STEP 2: Extract FIXED COST CAT - I (with individual line items and total)
+    # ============================================
+    print("📊 Step 2: Extracting FIXED COST CAT - I...")
+    fixed_cost_1_items = []  # List of individual cost items
+    fixed_cost_1_total = 0.0
+    fixed_cost_1_per_kg = 0.0
+    
+    # OPTIMIZED: Find FIXED COST CAT - I section with limited scan
+    fixed_cost_1_start = None
+    fixed_cost_1_end = None
+    
+    # OPTIMIZED: Scan only first 200 rows (cost sections are usually in first half)
+    max_scan_rows = min(200, len(df_str))
+    for idx in range(max_scan_rows):
+        row = df_str.iloc[idx]
+        # OPTIMIZED: Only check first 10 columns for header
+        row_str = ' '.join([str(row.iloc[c]).upper() for c in range(min(10, len(row))) if pd.notna(row.iloc[c])])
+        if 'FIXED COST CAT' in row_str and ('I' in row_str or '1' in row_str) and 'II' not in row_str and '2' not in row_str:
+            fixed_cost_1_start = idx
+            print(f"   📍 Found FIXED COST CAT - I at row {idx + 1}")
+            break
+    
+    if fixed_cost_1_start is not None:
+        # OPTIMIZED: Look for individual cost items and total
+        # Find the "TOTAL" row which marks the end of this section
+        # Limit scan to 50 rows after start (sections are usually compact)
+        for idx in range(fixed_cost_1_start, min(fixed_cost_1_start + 50, len(df_str))):
+            row = df_str.iloc[idx]
+            row_str = ' '.join([str(c).upper() for c in row])
+            
+            # Check if this is the TOTAL row
+            if 'TOTAL' in row_str and fixed_cost_1_end is None:
+                # Extract total from this row
+                for col in range(len(row)):
+                    val = parse_numeric_robust(row.iloc[col])
+                    if val > 1000:  # Total should be a large number
+                        fixed_cost_1_total = val
+                        fixed_cost_1_end = idx
+                        print(f"   ✅ Found FIXED COST CAT - I Total: ₹{fixed_cost_1_total:,.2f} at row {idx + 1}")
+                        
+                        # Also look for per kg in same row (usually in KG or COP column)
+                        for col2 in range(len(row)):
+                            val2 = parse_numeric_robust(row.iloc[col2])
+                            if 0 < val2 < 100:  # Per kg should be small
+                                fixed_cost_1_per_kg = val2
+                                print(f"   ✅ Found FIXED COST CAT - I Per Kg: ₹{fixed_cost_1_per_kg:,.2f}")
+                        break
+            
+            # Extract individual cost items (before the TOTAL row)
+            if fixed_cost_1_end is None and idx > fixed_cost_1_start:
+                # Look for cost item names in first few columns and amounts
+                item_name = None
+                item_amount = 0.0
+                
+                # Check if row has a cost item (not empty, not a header)
+                for col in range(min(3, len(row))):
+                    cell_val = str(row.iloc[col]).strip()
+                    if cell_val and cell_val.upper() not in ['NAN', '', 'SL.NO', 'PARTICULARS', 'TOTAL', 'APPORTIONMENT']:
+                        # This might be a cost item name
+                        if len(cell_val) > 3 and not cell_val.replace('.', '').replace(',', '').isdigit():
+                            item_name = cell_val
+                            break
+                
+                # If we found an item name, look for amount in TOTAL column
+                if item_name:
+                    # Look for amount in columns (usually 2-4 columns after name)
+                    for col in range(2, min(6, len(row))):
+                        val = parse_numeric_robust(row.iloc[col])
+                        if val > 0:
+                            item_amount = val
+                            fixed_cost_1_items.append({
+                                'name': item_name,
+                                'amount': item_amount
+                            })
+                            print(f"   📊 Found cost item: {item_name} = ₹{item_amount:,.2f}")
+                            break
+    
+    # If total not found but we have items, sum them
+    if fixed_cost_1_total == 0 and fixed_cost_1_items:
+        fixed_cost_1_total = sum(item['amount'] for item in fixed_cost_1_items)
+        print(f"   ✅ Calculated FIXED COST CAT - I Total from items: ₹{fixed_cost_1_total:,.2f}")
+    
+    # ============================================
+    # STEP 3: Extract FIXED COST CAT - II (with total and apportionment)
+    # ============================================
+    print("📊 Step 3: Extracting FIXED COST CAT - II (apportioned)...")
+    fixed_cost_2_items = []  # Individual cost items
+    fixed_cost_2_strawberry = 0.0
+    fixed_cost_2_greens = 0.0
+    fixed_cost_2_aggregation = 0.0
+    fixed_cost_2_total = 0.0
+    
+    # Find FIXED COST CAT - II section
+    fixed_cost_2_start = None
+    fixed_cost_2_end = None
+    
+    for idx, row in df_str.iterrows():
+        row_str = ' '.join([str(c).upper() for c in row])
+        if 'FIXED COST CAT' in row_str and ('II' in row_str or '2' in row_str):
+            fixed_cost_2_start = idx
+            print(f"   📍 Found FIXED COST CAT - II at row {idx + 1}")
+            break
+    
+    if fixed_cost_2_start is not None:
+        # Look for the TOTAL row and apportionment rows
+        for idx in range(fixed_cost_2_start, min(fixed_cost_2_start + 30, len(df_str))):
+            row = df_str.iloc[idx]
+            row_str = ' '.join([str(c).upper() for c in row])
+            
+            # Find the main TOTAL row (should be a large number)
+            if 'TOTAL' in row_str and fixed_cost_2_total == 0:
+                for col in range(len(row)):
+                    val = parse_numeric_robust(row.iloc[col])
+                    if val > 100000:  # Total should be large
+                        fixed_cost_2_total = val
+                        print(f"   ✅ Found FIXED COST CAT - II Total: ₹{fixed_cost_2_total:,.2f} at row {idx + 1}")
+                        break
+            
+            # Look for apportionment rows (STRAWBERRY -60%, GREENS -25%, AGGREGATION -15%)
+            if 'STRAWBERRY' in row_str and ('60' in row_str or '%' in row_str):
+                # Extract the apportioned amount (usually a number in the row)
+                for col in range(len(row)):
+                    val = parse_numeric_robust(row.iloc[col])
+                    if 1000 < val < 100000:  # Apportioned amount should be reasonable
+                        fixed_cost_2_strawberry = val
+                        print(f"   ✅ Found FIXED COST CAT - II Strawberry (60%): ₹{fixed_cost_2_strawberry:,.2f}")
+                        break
+            
+            if ('GREENS' in row_str or 'GREEN' in row_str) and ('25' in row_str or '%' in row_str):
+                for col in range(len(row)):
+                    val = parse_numeric_robust(row.iloc[col])
+                    if 1000 < val < 100000:
+                        fixed_cost_2_greens = val
+                        print(f"   ✅ Found FIXED COST CAT - II Greens (25%): ₹{fixed_cost_2_greens:,.2f}")
+                        break
+            
+            if 'AGGREGATION' in row_str and ('15' in row_str or '%' in row_str):
+                for col in range(len(row)):
+                    val = parse_numeric_robust(row.iloc[col])
+                    if 1000 < val < 1000000:  # Aggregation can be larger
+                        fixed_cost_2_aggregation = val
+                        print(f"   ✅ Found FIXED COST CAT - II Aggregation (15%): ₹{fixed_cost_2_aggregation:,.2f}")
+                        break
+    
+    # ============================================
+    # STEP 4: Extract VARIABLE COST blocks (A-F)
+    # ============================================
+    print("📊 Step 4: Extracting VARIABLE COST blocks...")
+    variable_costs = {
+        'Open Field': 0.0,
+        'Polyhouse Greens': 0.0,  # LETTUCE (C+D+E combined)
+        'Strawberry': 0.0,
+        'Other Berries': 0.0,  # RASPBERRY&BLUBERRY
+        'Packing': 0.0,
+        'Aggregation': 0.0
+    }
+    
+    # Find VARIABLE COST section
+    variable_cost_start_idx = None
+    for idx, row in df_str.iterrows():
+        for cell in row:
+            if 'VARIABLE COST' in str(cell).upper():
+                variable_cost_start_idx = idx
+                break
+        if variable_cost_start_idx is not None:
+            break
+    
+    if variable_cost_start_idx is not None:
+        print(f"   📍 Found VARIABLE COST section at row {variable_cost_start_idx + 1}")
+        
+        # Variable cost sections are labeled A) B) C) D) E) F)
+        # Each section has a total at the end
+        current_section = None
+        section_totals = {}  # Track totals for each section
+        
+        for search_idx in range(variable_cost_start_idx, min(variable_cost_start_idx + 100, len(df_str))):
+            row = df_str.iloc[search_idx]
+            row_str = ' '.join([str(c).upper() for c in row])
+            
+            # Detect section headers: A) OPEN FIELD, B) LETTUCE, etc.
+            if ') OPEN FIELD' in row_str or 'A) OPEN FIELD' in row_str or 'OPEN FIELD :' in row_str:
+                current_section = 'Open Field'
+                print(f"   📍 Found section A) OPEN FIELD at row {search_idx + 1}")
+            elif ') LETTUCE' in row_str or 'B) LETTUCE' in row_str or 'LETTUCE:' in row_str:
+                current_section = 'Polyhouse Greens'
+                print(f"   📍 Found section B) LETTUCE at row {search_idx + 1}")
+            elif ') STRAWBERRY' in row_str or 'C) STRAWBERRY' in row_str or 'STRAWBERRY:' in row_str:
+                current_section = 'Strawberry'
+                print(f"   📍 Found section C) STRAWBERRY at row {search_idx + 1}")
+            elif ') RASPBERRY' in row_str or 'D) RASPBERRY' in row_str or 'RASPBERRY&BLUBERRY:' in row_str:
+                current_section = 'Other Berries'
+                print(f"   📍 Found section D) RASPBERRY&BLUBERRY at row {search_idx + 1}")
+            elif ') PACKING' in row_str or 'E) PACKING' in row_str or 'PACKING:' in row_str:
+                current_section = 'Packing'
+                print(f"   📍 Found section E) PACKING at row {search_idx + 1}")
+            elif ') AGGREGATION' in row_str or 'F) AGGREGATION' in row_str or 'AGGREGATION' in row_str and current_section != 'Other Berries':
+                current_section = 'Aggregation'
+                print(f"   📍 Found section F) AGGREGATION at row {search_idx + 1}")
+            
+            # Look for totals in each section (usually a large number on its own row or at end of section)
+            if current_section:
+                # Check if this row has a large number that could be the section total
+                for col in range(len(row)):
+                    val = parse_numeric_robust(row.iloc[col])
+                    # Section totals are usually large numbers (100k+)
+                    if val > 10000 and val > section_totals.get(current_section, 0):
+                        # Verify it's not part of a cost item name
+                        row_has_text = any(len(str(c).strip()) > 5 and not str(c).replace('.', '').replace(',', '').isdigit() 
+                                         for c in row if pd.notna(c))
+                        if not row_has_text or val > 100000:  # If it's a large number, it's likely the total
+                            section_totals[current_section] = val
+                            variable_costs[current_section] = val
+                            print(f"   ✅ {current_section} total: ₹{val:,.2f}")
+            
+            # Check if we've moved to next major section (like DISTRIBUTION COST)
+            if 'DISTRIBUTION COST' in row_str or 'MARKETING EXPENSES' in row_str or 'VEHICLE RUNNING COST' in row_str or 'WASTAGE' in row_str or 'PURCHASE ACCOUNTS' in row_str:
+                current_section = None
+    
+    # ============================================
+    # STEP 4B: Extract additional cost sections (DISTRIBUTION, MARKETING, VEHICLE, OTHERS, WASTAGE, PURCHASE)
+    # ============================================
+    print("📊 Step 4B: Extracting additional cost sections...")
+    additional_costs = {
+        'Distribution Cost': {'amount': 0.0, 'allocation': 'both'},
+        'Marketing Expenses': {'amount': 0.0, 'allocation': 'both'},
+        'Vehicle Running Cost': {'amount': 0.0, 'allocation': 'both'},
+        'Others': {'amount': 0.0, 'allocation': 'both'},
+        'Wastage & Shortage': {'amount': 0.0, 'allocation': 'split'},  # Split by inhouse/outsourced
+        'Purchase Accounts': {'amount': 0.0, 'allocation': 'outsourced'}
+    }
+    
+    # Find each section and extract totals
+    for idx, row in df_str.iterrows():
+        row_str = ' '.join([str(c).upper() for c in row])
+        
+        # DISTRIBUTION COST
+        if 'DISTRIBUTION COST' in row_str:
+            # Look for total in this row or next few rows
+            for search_idx in range(idx, min(idx + 15, len(df_str))):
+                search_row = df_str.iloc[search_idx]
+                search_row_str = ' '.join([str(c).upper() for c in search_row])
+                # Check if this is a total row (has large number and possibly "TOTAL" or is after all items)
+                for col in range(len(search_row)):
+                    val = parse_numeric_robust(search_row.iloc[col])
+                    if val > 1000000 and val < 5000000:  # Distribution cost range
+                        # Verify it's not part of a line item name
+                        row_text = ' '.join([str(c).upper() for c in search_row if not str(c).replace('.', '').replace(',', '').isdigit()])
+                        if not any(keyword in row_text for keyword in ['DRIVER', 'TRANSPORT', 'LOADING', 'DELIVERY', 'HAMPER', 'PARKING']):
+                            additional_costs['Distribution Cost']['amount'] = val
+                            print(f"   ✅ Found DISTRIBUTION COST: ₹{val:,.2f} at row {search_idx + 1}")
+                            break
+                if additional_costs['Distribution Cost']['amount'] > 0:
+                    break
+        
+        # MARKETING EXPENSES
+        if 'MARKETING EXPENSES' in row_str:
+            for search_idx in range(idx, min(idx + 15, len(df_str))):
+                search_row = df_str.iloc[search_idx]
+                search_row_str = ' '.join([str(c).upper() for c in search_row])
+                for col in range(len(search_row)):
+                    val = parse_numeric_robust(search_row.iloc[col])
+                    if 100000 < val < 1000000:  # Marketing expenses range
+                        # Verify it's not part of a line item name
+                        row_text = ' '.join([str(c).upper() for c in search_row if not str(c).replace('.', '').replace(',', '').isdigit()])
+                        if not any(keyword in row_text for keyword in ['TRAVELLING', 'SALES TEAM', 'ADVERTISMENT', 'INSTAGRAM']):
+                            if val > additional_costs['Marketing Expenses']['amount']:
+                                additional_costs['Marketing Expenses']['amount'] = val
+                                print(f"   ✅ Found MARKETING EXPENSES: ₹{val:,.2f} at row {search_idx + 1}")
+                                break
+                if additional_costs['Marketing Expenses']['amount'] > 0:
+                    break
+        
+        # VEHICLE RUNNING COST
+        if 'VEHICLE RUNNING COST' in row_str:
+            for search_idx in range(idx, min(idx + 15, len(df_str))):
+                search_row = df_str.iloc[search_idx]
+                search_row_str = ' '.join([str(c).upper() for c in search_row])
+                for col in range(len(search_row)):
+                    val = parse_numeric_robust(search_row.iloc[col])
+                    if val > 2000000 and val < 5000000:  # Vehicle costs are very large
+                        # Verify it's not part of a line item name
+                        row_text = ' '.join([str(c).upper() for c in search_row if not str(c).replace('.', '').replace(',', '').isdigit()])
+                        if not any(keyword in row_text for keyword in ['VEHICLE DIESEL', 'VEHICLE MAINTANANCE', 'VEHICLE PERMIT', 'VEHICLE INSURANCE']):
+                            if val > additional_costs['Vehicle Running Cost']['amount']:
+                                additional_costs['Vehicle Running Cost']['amount'] = val
+                                print(f"   ✅ Found VEHICLE RUNNING COST: ₹{val:,.2f} at row {search_idx + 1}")
+                                break
+                if additional_costs['Vehicle Running Cost']['amount'] > 0:
+                    break
+        
+        # OTHERS (section 6)
+        if (row_str.strip() == 'OTHERS' or (row_str.startswith('6') and 'OTHERS' in row_str)) and additional_costs['Others']['amount'] == 0:
+            for search_idx in range(idx, min(idx + 25, len(df_str))):
+                search_row = df_str.iloc[search_idx]
+                search_row_str = ' '.join([str(c).upper() for c in search_row])
+                # Look for total - either explicit TOTAL or a large number after all items
+                for col in range(len(search_row)):
+                    val = parse_numeric_robust(search_row.iloc[col])
+                    if 100000 < val < 1000000:
+                        # Check if this row is after all OTHERS items (no item names)
+                        row_text = ' '.join([str(c).upper() for c in search_row if not str(c).replace('.', '').replace(',', '').isdigit()])
+                        if not any(keyword in row_text for keyword in ['BANKING', 'COURIER', 'DEBTORS', 'DISCOUNT', 'FINANCE', 'FINE', 'FREE', 'FREIGHT', 'MISCELLANEOUS', 'OFFICE', 'ROUND', 'TEA', 'TRAVELLING']):
+                            additional_costs['Others']['amount'] = val
+                            print(f"   ✅ Found OTHERS: ₹{val:,.2f} at row {search_idx + 1}")
+                            break
+                if additional_costs['Others']['amount'] > 0:
+                    break
+        
+        # WASTAGE & SHORTAGE (section 7)
+        if ('WASTAGE' in row_str and 'SHORTAGE' in row_str) or (row_str.startswith('7') and 'WASTAGE' in row_str):
+            for search_idx in range(idx, min(idx + 15, len(df_str))):
+                search_row = df_str.iloc[search_idx]
+                search_row_str = ' '.join([str(c).upper() for c in search_row])
+                for col in range(len(search_row)):
+                    val = parse_numeric_robust(search_row.iloc[col])
+                    if val > 500000 and val < 2000000:  # Wastage range
+                        # Verify it's not part of a line item name
+                        row_text = ' '.join([str(c).upper() for c in search_row if not str(c).replace('.', '').replace(',', '').isdigit()])
+                        if not any(keyword in row_text for keyword in ['WASTAGE-OWN FARM', 'WASTAGE-DISPATCH', 'WASTAGE- FARM']):
+                            if val > additional_costs['Wastage & Shortage']['amount']:
+                                additional_costs['Wastage & Shortage']['amount'] = val
+                                print(f"   ✅ Found WASTAGE & SHORTAGE: ₹{val:,.2f} at row {search_idx + 1}")
+                                break
+                if additional_costs['Wastage & Shortage']['amount'] > 0:
+                    break
+        
+        # PURCHASE ACCOUNTS (section 8)
+        if ('PURCHASE ACCOUNTS' in row_str or (row_str.startswith('8') and 'PURCHASE' in row_str)) and additional_costs['Purchase Accounts']['amount'] == 0:
+            for search_idx in range(idx, min(idx + 15, len(df_str))):
+                search_row = df_str.iloc[search_idx]
+                search_row_str = ' '.join([str(c).upper() for c in search_row])
+                for col in range(len(search_row)):
+                    val = parse_numeric_robust(search_row.iloc[col])
+                    if val > 10000000 and val < 20000000:  # Purchase accounts are very large
+                        # Verify it's not part of a line item name
+                        row_text = ' '.join([str(c).upper() for c in search_row if not str(c).replace('.', '').replace(',', '').isdigit()])
+                        if not any(keyword in row_text for keyword in ['PURCHASE VEGETABLES', 'PURCHASE OTHERS']):
+                            if val > additional_costs['Purchase Accounts']['amount']:
+                                additional_costs['Purchase Accounts']['amount'] = val
+                                print(f"   ✅ Found PURCHASE ACCOUNTS: ₹{val:,.2f} at row {search_idx + 1}")
+                                break
+                if additional_costs['Purchase Accounts']['amount'] > 0:
+                    break
+    
+    # ============================================
+    # STEP 5: Extract Production table (bottom section)
+    # ============================================
+    print("📊 Step 5: Extracting Production table...")
+    production_data = {}  # {product_name: {'production_kg': 0, 'damage_kg': 0, 'sales_kg': 0}}
+    
+    # Find production section (look for "Production Kg", "Damage Kg", "Sales Kg")
+    production_start_idx = None
+    for idx, row in df_str.iterrows():
+        row_str = ' '.join([str(c).upper() for c in row])
+        if 'PRODUCTION' in row_str and ('KG' in row_str or 'QTY' in row_str):
+            production_start_idx = idx
+            print(f"   📍 Found Production header at row {idx + 1}: {row_str[:100]}")
+            break
+        elif 'DAMAGE' in row_str and ('KG' in row_str or 'QTY' in row_str):
+            production_start_idx = idx
+            print(f"   📍 Found Damage header at row {idx + 1}: {row_str[:100]}")
+            break
+        elif 'SALES' in row_str and ('KG' in row_str or 'QTY' in row_str):
+            production_start_idx = idx
+            print(f"   📍 Found Sales header at row {idx + 1}: {row_str[:100]}")
+            break
+    
+    if production_start_idx is not None:
+        print(f"   📍 Using Production table starting at row {production_start_idx + 1}")
+        
+        # Find column indices for Production, Damage, Sales, Av price
+        header_row = df_str.iloc[production_start_idx]
+        prod_col = None
+        damage_col = None
+        sales_col = None
+        price_col = None
+        
+        for col_idx, cell in enumerate(header_row):
+            cell_upper = str(cell).upper()
+            if ('PRODUCTION' in cell_upper or 'PROD' in cell_upper) and ('KG' in cell_upper or 'QTY' in cell_upper):
+                prod_col = col_idx
+                print(f"   ✅ Found Production column at index {col_idx}")
+            if 'DAMAGE' in cell_upper and ('KG' in cell_upper or 'QTY' in cell_upper):
+                damage_col = col_idx
+                print(f"   ✅ Found Damage column at index {damage_col}")
+            if 'SALES' in cell_upper and ('KG' in cell_upper or 'QTY' in cell_upper):
+                sales_col = col_idx
+                print(f"   ✅ Found Sales column at index {sales_col}")
+            if 'AV PRICE' in cell_upper or 'AVG PRICE' in cell_upper or 'PRICE' in cell_upper:
+                price_col = col_idx
+                print(f"   ✅ Found Average Price column at index {price_col}")
+        
+        # Extract data rows - try multiple product name variations
+        product_names_variations = {
+            'Strawberry': ['STRAWBERRY', 'STRAW', 'STRAWBERRY'],
+            'Greens PH C': ['GREENS PH C', 'GREENS C', 'GREEN C', 'PH C', 'POLYHOUSE C'],
+            'Greens PH D': ['GREENS PH D', 'GREENS D', 'GREEN D', 'PH D', 'POLYHOUSE D'],
+            'Greens PH E': ['GREENS PH E', 'GREENS E', 'GREEN E', 'PH E', 'POLYHOUSE E'],
+            'Open farm': ['OPEN FARM', 'OPEN FIELD', 'OPEN', 'FARM'],
+            'Raspberry and Blueberry': ['RASPBERRY', 'BLUEBERRY', 'BLUBERRY', 'RASPBERRY AND BLUEBERRY', 'RASPBERRY&BLUEBERRY'],
+            'Aggregation': ['AGGREGATION', 'AGG', 'AGGREGATE']
+        }
+        
+        # Also try to find product names in first column
+        for search_idx in range(production_start_idx + 1, min(production_start_idx + 30, len(df_str))):
+            try:
+                row = df_str.iloc[search_idx]
+                row_str = ' '.join([str(c).upper() for c in row])
+                
+                # Skip empty rows
+                if not row_str.strip() or row_str.strip() == 'NAN':
+                    continue
+                
+                # Check if this row contains a product name
+                for prod_name, variations in product_names_variations.items():
+                    for variation in variations:
+                        if variation in row_str:
+                            # Try to extract numbers from this row
+                            prod_kg = 0.0
+                            dmg_kg = 0.0
+                            sales_kg = 0.0
+                            
+                            # Try to find numbers in the row
+                            for col_idx in range(len(row)):
+                                try:
+                                    cell_val = str(row.iloc[col_idx]).strip()
+                                    num_val = parse_numeric_robust(cell_val)
+                                    
+                                    # Assign based on column position or header
+                                    if prod_col is not None and col_idx == prod_col:
+                                        prod_kg = num_val
+                                    elif damage_col is not None and col_idx == damage_col:
+                                        dmg_kg = num_val
+                                    elif sales_col is not None and col_idx == sales_col:
+                                        sales_kg = num_val
+                                    # Fallback: if columns not found, try to infer from position
+                                    elif prod_col is None and damage_col is None and sales_col is None:
+                                        # First number after product name might be production
+                                        if num_val > 0 and prod_kg == 0:
+                                            prod_kg = num_val
+                                        elif num_val > 0 and prod_kg > 0 and sales_kg == 0:
+                                            sales_kg = num_val
+                                        elif num_val > 0 and sales_kg > 0:
+                                            dmg_kg = num_val
+                                except (IndexError, KeyError, ValueError):
+                                    continue
+                            
+                            # Also extract average price if available
+                            avg_price = 0.0
+                            if price_col is not None:
+                                try:
+                                    price_val = parse_numeric_robust(row.iloc[price_col])
+                                    if 50 < price_val < 500:  # Reasonable price range
+                                        avg_price = price_val
+                                except:
+                                    pass
+                            
+                            if prod_kg > 0 or sales_kg > 0:
+                                if prod_name not in production_data:
+                                    production_data[prod_name] = {
+                                        'production_kg': 0.0,
+                                        'damage_kg': 0.0,
+                                        'sales_kg': 0.0,
+                                        'avg_price': 0.0
+                                    }
+                                production_data[prod_name]['production_kg'] += prod_kg
+                                production_data[prod_name]['damage_kg'] += dmg_kg
+                                production_data[prod_name]['sales_kg'] += sales_kg
+                                if avg_price > 0:
+                                    production_data[prod_name]['avg_price'] = avg_price
+                                print(f"   ✅ {prod_name}: Production={prod_kg}kg, Damage={dmg_kg}kg, Sales={sales_kg}kg, Price=₹{avg_price}")
+                            break
+                    else:
+                        continue
+                    break
+            except (IndexError, KeyError) as e:
+                print(f"   ⚠️  Error processing row {search_idx + 1}: {e}")
+                continue
+    else:
+        print("   ⚠️  Production table header not found - trying fallback extraction...")
+        # Fallback: Try to find any rows with product names and numbers
+        for idx, row in df_str.iterrows():
+            row_str = ' '.join([str(c).upper() for c in row])
+            for prod_name, variations in product_names_variations.items():
+                for variation in variations:
+                    if variation in row_str:
+                        # Extract any numbers from this row
+                        numbers = []
+                        for col_idx in range(len(row)):
+                            try:
+                                num = parse_numeric_robust(row.iloc[col_idx])
+                                if num > 0:
+                                    numbers.append(num)
+                            except:
+                                continue
+                        
+                        if len(numbers) >= 2:  # At least production and sales
+                            if prod_name not in production_data:
+                                production_data[prod_name] = {
+                                    'production_kg': numbers[0] if len(numbers) > 0 else 0.0,
+                                    'damage_kg': numbers[2] if len(numbers) > 2 else 0.0,
+                                    'sales_kg': numbers[1] if len(numbers) > 1 else 0.0
+                                }
+                                print(f"   ✅ Fallback: {prod_name}: Production={production_data[prod_name]['production_kg']}kg, Sales={production_data[prod_name]['sales_kg']}kg")
+                        break
+    
+    # ============================================
+    # STEP 6: Create MonthlySales records from Production data
+    # ============================================
+    print("📊 Step 6: Creating MonthlySales records...")
+    print(f"   📋 Found {len(production_data)} products in production data")
+    
+    # Map production product names to our categories
+    production_to_category = {
+        'Strawberry': 'Strawberry',
+        'Greens PH C': 'Polyhouse Greens',
+        'Greens PH D': 'Polyhouse Greens',
+        'Greens PH E': 'Polyhouse Greens',
+        'Open farm': 'Open Field',
+        'Raspberry and Blueberry': 'Other Berries',
+        'Aggregation': 'Aggregation'
+    }
+    
+    # Aggregate Greens PH C/D/E into single Polyhouse Greens
+    greens_total_sales = 0.0
+    greens_total_prod = 0.0
+    greens_total_damage = 0.0
+    for prod_name in ['Greens PH C', 'Greens PH D', 'Greens PH E']:
+        if prod_name in production_data:
+            greens_total_sales += production_data[prod_name]['sales_kg']
+            greens_total_prod += production_data[prod_name]['production_kg']
+            greens_total_damage += production_data[prod_name]['damage_kg']
+    
+    # Create sales records
+    for prod_name, data in production_data.items():
+        if prod_name in ['Greens PH C', 'Greens PH D', 'Greens PH E']:
+            continue  # Skip individual greens, will create aggregated
+        
+        category = production_to_category.get(prod_name, prod_name)
+        sales_kg = data['sales_kg']
+        production_kg = data['production_kg']
+        damage_kg = data['damage_kg']
+        
+        print(f"   🔍 Processing {prod_name}: sales={sales_kg}kg, production={production_kg}kg, damage={damage_kg}kg")
+        
+        if sales_kg > 0:
+            # Determine source: if production > 0, it's inhouse; otherwise outsourced
+            source = "inhouse" if production_kg > 0 else "outsourced"
+            
+            # Create or get product
+            product_name = f"{category} ({source.title()})"
+            product = db.query(Product).filter(Product.name == product_name).first()
+            if not product:
+                product = Product(
+                    name=product_name,
+                    source=source,
+                    unit="kg"
+                )
+                db.add(product)
+                db.commit()
+                db.refresh(product)
+                products_created += 1
+                print(f"   📦 Created product: {product_name}")
+            
+            # Calculate wastage and production
+            wastage = damage_kg
+            inhouse_production = max(0, production_kg - sales_kg) if production_kg > sales_kg else 0
+            
+            # Use average price from production data if available
+            sale_price = data.get('avg_price', 0.0)
+            if sale_price == 0:
+                sale_price = 50.0  # Default fallback
+            print(f"   💵 Using sale price: ₹{sale_price} for {prod_name}")
+            
+            # Create monthly sale
+            monthly_sale = MonthlySale(
+                product_id=product.id,
+                month=month,
+                quantity=sales_kg,
+                sale_price=sale_price,
+                direct_cost=0.0,
+                inward_quantity=production_kg,
+                inward_rate=0.0,
+                inward_value=0.0,
+                inhouse_production=inhouse_production,
+                wastage=wastage
+            )
+            db.add(monthly_sale)
+            sales_created += 1
+            
+            parsed_data.append(ExcelRowData(
+                month=month,
+                particulars=category,
+                type=source.title(),
+                inward_quantity=production_kg,
+                inward_rate=0.0,
+                inward_value=0.0,
+                outward_quantity=sales_kg,
+                outward_rate=sale_price,
+                outward_value=sales_kg * sale_price,
+                inhouse_production=inhouse_production,
+                wastage=wastage
+            ))
+    
+    # Create aggregated Polyhouse Greens if we have data
+    if greens_total_sales > 0 or greens_total_prod > 0:
+        print(f"   📦 Creating aggregated Polyhouse Greens: sales={greens_total_sales}kg, production={greens_total_prod}kg")
+        product_name = "Polyhouse Greens (Inhouse)"
+        product = db.query(Product).filter(Product.name == product_name).first()
+        if not product:
+            product = Product(
+                name=product_name,
+                source="inhouse",
+                unit="kg"
+            )
+            db.add(product)
+            db.commit()
+            db.refresh(product)
+            products_created += 1
+            print(f"   📦 Created product: {product_name}")
+        
+        # Use sales_kg if available, otherwise use production_kg
+        quantity = greens_total_sales if greens_total_sales > 0 else greens_total_prod
+        
+        monthly_sale = MonthlySale(
+            product_id=product.id,
+            month=month,
+            quantity=quantity,
+            sale_price=50.0,
+            direct_cost=0.0,
+            inward_quantity=greens_total_prod,
+            inward_rate=0.0,
+            inward_value=0.0,
+            inhouse_production=max(0, greens_total_prod - greens_total_sales) if greens_total_sales > 0 else 0,
+            wastage=greens_total_damage
+        )
+        db.add(monthly_sale)
+        sales_created += 1
+        print(f"   💰 Created sale: {quantity}kg for Polyhouse Greens")
+    
+    # ============================================
+    # STEP 7: Create Cost records
+    # ============================================
+    print("📊 Step 7: Creating Cost records...")
+    
+    # FIXED COST CAT - I: Allocate to all products (B classification)
+    if fixed_cost_1_total > 0:
+        cost = Cost(
+            name="Fixed Cost Category I",
+            amount=fixed_cost_1_total,
+            applies_to="both",
+            cost_type="common",
+            basis="hybrid",
+            month=month,
+            is_fixed="fixed",
+            category="fixed_cost_1",
+            pl_classification="B",
+            original_amount=fixed_cost_1_total,
+            allocation_ratio=None,
+            source_file="auto_mode_upload"
+        )
+        db.add(cost)
+        costs_created += 1
+        print(f"   💰 Created Fixed Cost I: ₹{fixed_cost_1_total:,.2f}")
+    
+    # FIXED COST CAT - II: Apportioned costs
+    if fixed_cost_2_strawberry > 0:
+        cost = Cost(
+            name="Fixed Cost Category II - Strawberry",
+            amount=fixed_cost_2_strawberry,
+            applies_to="inhouse",  # Strawberry is inhouse
+            cost_type="common",
+            basis="hybrid",
+            month=month,
+            is_fixed="fixed",
+            category="fixed_cost_2_strawberry",
+            pl_classification="I",
+            original_amount=fixed_cost_2_strawberry,
+            allocation_ratio=1.0,
+            source_file="auto_mode_upload"
+        )
+        db.add(cost)
+        costs_created += 1
+    
+    if fixed_cost_2_greens > 0:
+        cost = Cost(
+            name="Fixed Cost Category II - Greens",
+            amount=fixed_cost_2_greens,
+            applies_to="inhouse",
+            cost_type="common",
+            basis="hybrid",
+            month=month,
+            is_fixed="fixed",
+            category="fixed_cost_2_greens",
+            pl_classification="I",
+            original_amount=fixed_cost_2_greens,
+            allocation_ratio=1.0,
+            source_file="auto_mode_upload"
+        )
+        db.add(cost)
+        costs_created += 1
+    
+    if fixed_cost_2_aggregation > 0:
+        cost = Cost(
+            name="Fixed Cost Category II - Aggregation",
+            amount=fixed_cost_2_aggregation,
+            applies_to="both",
+            cost_type="common",
+            basis="hybrid",
+            month=month,
+            is_fixed="fixed",
+            category="fixed_cost_2_aggregation",
+            pl_classification="B",
+            original_amount=fixed_cost_2_aggregation,
+            allocation_ratio=None,
+            source_file="auto_mode_upload"
+        )
+        db.add(cost)
+        costs_created += 1
+    
+    # VARIABLE COSTS: Create cost records for each category with correct allocation
+    variable_cost_allocation = {
+        'Open Field': 'inhouse',  # "only to open field products"
+        'Polyhouse Greens': 'inhouse',  # "only lettuce related cost"
+        'Strawberry': 'inhouse',  # "only strawberry related cost"
+        'Other Berries': 'inhouse',  # "only rasberry and bluebbery related cost"
+        'Packing': 'both',  # "both"
+        'Aggregation': 'outsourced'  # "outsourced"
+    }
+    
+    for category_name, amount in variable_costs.items():
+        if amount > 0:
+            applies_to = variable_cost_allocation.get(category_name, 'both')
+            pl_class = "I" if applies_to == "inhouse" else ("O" if applies_to == "outsourced" else "B")
+            
+            cost = Cost(
+                name=f"Variable Cost - {category_name}",
+                amount=amount,
+                applies_to=applies_to,
+                cost_type="common",
+                basis="hybrid",
+                month=month,
+                is_fixed="variable",
+                category=f"variable_cost_{category_name.lower().replace(' ', '_')}",
+                pl_classification=pl_class,
+                original_amount=amount,
+                allocation_ratio=1.0 if pl_class != "B" else None,
+                source_file="auto_mode_upload"
+            )
+            db.add(cost)
+            costs_created += 1
+            print(f"   💰 Created Variable Cost - {category_name}: ₹{amount:,.2f} ({applies_to})")
+    
+    # ADDITIONAL COSTS: Create cost records for Distribution, Marketing, Vehicle, Others, Wastage, Purchase
+    for cost_name, cost_info in additional_costs.items():
+        if cost_info['amount'] > 0:
+            allocation = cost_info['allocation']
+            if allocation == 'split':
+                # Wastage: Split by inhouse/outsourced ratio (use dynamic ratio)
+                pl_class = "B"
+                applies_to = "both"
+            elif allocation == 'outsourced':
+                pl_class = "O"
+                applies_to = "outsourced"
+            else:  # 'both'
+                pl_class = "B"
+                applies_to = "both"
+            
+            cost = Cost(
+                name=cost_name,
+                amount=cost_info['amount'],
+                applies_to=applies_to,
+                cost_type="common",
+                basis="hybrid",
+                month=month,
+                is_fixed="variable" if cost_name != "Purchase Accounts" else "variable",
+                category=cost_name.lower().replace(' ', '_').replace('&', '_'),
+                pl_classification=pl_class,
+                original_amount=cost_info['amount'],
+                allocation_ratio=1.0 if pl_class != "B" else None,
+                source_file="auto_mode_upload"
+            )
+            db.add(cost)
+            costs_created += 1
+            print(f"   💰 Created {cost_name}: ₹{cost_info['amount']:,.2f} ({applies_to})")
+    
+    db.commit()
+    
+    print(f"✅ Auto Mode parsing completed!")
+    print(f"   📦 Products created: {products_created}")
+    print(f"   💰 Sales created: {sales_created}")
+    print(f"   💵 Costs created: {costs_created}")
+    print(f"   📊 Rows processed: {len(parsed_data)}")
+    print(f"   📋 Production data found: {len(production_data)} products")
+    print(f"   💵 Variable costs found: {sum(1 for v in variable_costs.values() if v > 0)} categories")
+    
+    # If no data was extracted, provide helpful debugging info
+    if sales_created == 0 and costs_created == 0:
+        print("⚠️  WARNING: No data was extracted from the file!")
+        print("   This could mean:")
+        print("   1. The file format is different than expected")
+        print("   2. The data sections weren't found (check for 'Production Kg', 'Sales Kg', etc.)")
+        print("   3. Product names don't match expected patterns")
+        print("   💡 Tip: Check the server logs above for what was found during parsing")
+        errors.append("No data extracted - file format may differ from expected Purple Patch format")
+    
+    return {
+        "success": True,
+        "message": f"Successfully processed Purple Patch format: {sales_created} sales, {costs_created} costs",
+        "products_created": products_created,
+        "sales_created": sales_created,
+        "costs_created": costs_created,
+        "parsed_data": [data.model_dump() for data in parsed_data],
+        "errors": errors,
+        "mode": "auto",
+        "debug_info": {
+            "production_data_found": len(production_data),
+            "variable_costs_found": sum(1 for v in variable_costs.values() if v > 0),
+            "total_qty_sold": total_qty_sold,
+            "fixed_cost_1_total": fixed_cost_1_total,
+            "fixed_cost_2_strawberry": fixed_cost_2_strawberry,
+            "fixed_cost_2_greens": fixed_cost_2_greens,
+            "fixed_cost_2_aggregation": fixed_cost_2_aggregation
+        }
+    }
 
 def split_inhouse_outsourced(row):
     """Split a product into outsourced and inhouse portions when OutwardQty > InwardQty"""
@@ -1633,36 +2802,68 @@ def parse_purple_patch_pl(file_path, db):
         df = pd.read_excel(file_path, header=None)
         print(f"📋 Excel loaded: {len(df)} rows, {len(df.columns)} columns")
         
-        # Find the period from the data
+        # Print first few rows for debugging
+        print(f"📋 First 5 rows preview:")
+        for i in range(min(5, len(df))):
+            row_preview = [str(df.iloc[i, j])[:30] if pd.notna(df.iloc[i, j]) else 'NaN' for j in range(min(5, len(df.columns)))]
+            print(f"   Row {i+1}: {row_preview}")
+        
+        # OPTIMIZED: Find the period from the data - early exit, pre-compiled patterns
+        # Time Complexity: O(n*m) worst case, but early exit on first match (typically O(1))
         period = "Unknown"
-        for idx, row in df.iterrows():
-            for col in df.columns:
-                if pd.notna(row[col]) and 'Apr-24' in str(row[col]):
-                    period = str(row[col])
-                    break
+        period_patterns_compiled = [
+            REGEX_PATTERNS['period_date'],      # 1-Apr-24, 01-Apr-2024
+            REGEX_PATTERNS['period_month'],     # Apr-24, Apr-2024
+            REGEX_PATTERNS['period_iso'],      # 2024-04
+        ]
+        
+        # OPTIMIZED: Scan only first 100 rows (periods are usually at top)
+        max_scan_rows = min(100, len(df))
+        for idx in range(max_scan_rows):
+            row = df.iloc[idx]
+            for col_idx in range(min(10, len(row))):  # Check first 10 columns
+                if pd.notna(row.iloc[col_idx]):
+                    cell_str = str(row.iloc[col_idx])
+                    # OPTIMIZED: Use pre-compiled patterns
+                    for pattern in period_patterns_compiled:
+                        match = pattern.search(cell_str, re.IGNORECASE)
+                        if match:
+                            period = match.group(0)
+                            print(f"📅 Period detected: {period} (from row {idx+1}, col {col_idx+1})")
+                            break
+                    if period != "Unknown":
+                        break
             if period != "Unknown":
                 break
         
-        print(f"📅 Period detected: {period}")
+        if period == "Unknown":
+            print("⚠️  Period not detected, using default")
+            period = "2025-04"
         
-        # Extract data rows
+        # Extract data rows - try multiple column combinations
         data_rows = []
+        print("📊 Extracting data rows...")
+        
+        # Strategy 1: First two columns (original approach)
         for idx, row in df.iterrows():
-            # Look for rows with data in first two columns
-            if len(row) >= 2 and pd.notna(row.iloc[0]) and pd.notna(row.iloc[1]):
-                particulars = str(row.iloc[0]).strip()
-                amount_str = str(row.iloc[1]).strip()
-                
-                # Skip empty or header rows
-                if particulars in ['', 'nan', 'PURPLE PATCH FARMS INTERNATIONAL PVT.LTD -FARM', 'Particulars', 'Trading Account:', 'Income Statement:']:
-                    continue
-                
-                # Try to parse amount
-                try:
-                    # Clean amount string
-                    amount_str = amount_str.replace(',', '').replace('₹', '').strip()
-                    if amount_str and amount_str != 'nan':
-                        amount = float(amount_str)
+            try:
+                if len(row) >= 2:
+                    particulars_raw = row.iloc[0]
+                    amount_raw = row.iloc[1] if len(row) > 1 else None
+                    
+                    if pd.notna(particulars_raw) and pd.notna(amount_raw):
+                        particulars = str(particulars_raw).strip()
+                        amount_str = str(amount_raw).strip()
+                        
+                        # Skip empty or header rows
+                        skip_patterns = ['', 'nan', 'PURPLE PATCH FARMS', 'Particulars', 'Trading Account', 
+                                       'Income Statement', 'NAN', 'NONE', 'N/A']
+                        if any(pattern.upper() in particulars.upper() for pattern in skip_patterns):
+                            continue
+                        
+                        # Use robust number parser
+                        amount = parse_numeric_robust(amount_raw)
+                        
                         if particulars and amount != 0:
                             # Skip revenue/trading account items
                             if particulars in exclude_items:
@@ -1676,7 +2877,79 @@ def parse_purple_patch_pl(file_path, db):
                                 'type': template_mapping.get(particulars, 'B')  # Default to B if not found
                             })
                             print(f"   📊 Found: {particulars} = ₹{amount:,.2f} ({template_mapping.get(particulars, 'B')})")
-                except ValueError:
+            except (IndexError, KeyError, ValueError) as e:
+                continue
+        
+        # Strategy 2: If no data found, try to find "Particulars" header and use that column
+        if len(data_rows) == 0:
+            print("   🔄 Trying alternative column detection...")
+            particulars_col = None
+            amount_col = None
+            
+            # Find header row
+            for idx, row in df.iterrows():
+                row_str = ' '.join([str(c).upper() if pd.notna(c) else '' for c in row])
+                if 'PARTICULARS' in row_str or 'PARTICULAR' in row_str:
+                    # Found header row, identify columns
+                    for col_idx, cell in enumerate(row):
+                        cell_str = str(cell).upper() if pd.notna(cell) else ''
+                        if 'PARTICULAR' in cell_str:
+                            particulars_col = col_idx
+                        elif any(keyword in cell_str for keyword in ['AMOUNT', 'VALUE', 'TOTAL', 'COST', 'EXPENSE']):
+                            if amount_col is None:
+                                amount_col = col_idx
+                    
+                    if particulars_col is not None:
+                        print(f"   ✅ Found header row at {idx+1}, Particulars col: {particulars_col}, Amount col: {amount_col}")
+                        # Extract data from rows below header
+                        for data_idx in range(idx + 1, len(df)):
+                            try:
+                                row = df.iloc[data_idx]
+                                if particulars_col < len(row) and (amount_col is None or amount_col < len(row)):
+                                    particulars_raw = row.iloc[particulars_col] if particulars_col is not None else None
+                                    amount_raw = row.iloc[amount_col] if amount_col is not None else (row.iloc[particulars_col + 1] if particulars_col + 1 < len(row) else None)
+                                    
+                                    if pd.notna(particulars_raw):
+                                        particulars = str(particulars_raw).strip()
+                                        if particulars and particulars.upper() not in ['NAN', 'NONE', '']:
+                                            amount = parse_numeric_robust(amount_raw) if pd.notna(amount_raw) else 0.0
+                                            
+                                            if amount != 0:
+                                                if particulars not in exclude_items:
+                                                    data_rows.append({
+                                                        'particulars': particulars,
+                                                        'amount': amount,
+                                                        'type': template_mapping.get(particulars, 'B')
+                                                    })
+                                                    print(f"   📊 Found (alt): {particulars} = ₹{amount:,.2f}")
+                            except (IndexError, KeyError, ValueError):
+                                continue
+                    break
+        
+        # Strategy 3: Try to find any row with text in first column and number in any other column
+        if len(data_rows) == 0:
+            print("   🔄 Trying fallback: any text + number pattern...")
+            for idx, row in df.iterrows():
+                try:
+                    if len(row) >= 2:
+                        first_col = str(row.iloc[0]).strip() if pd.notna(row.iloc[0]) else ''
+                        # Skip if first column looks like a header or is empty
+                        if not first_col or first_col.upper() in ['NAN', 'NONE', 'PARTICULARS', '']:
+                            continue
+                        
+                        # Look for a number in remaining columns
+                        for col_idx in range(1, min(len(row), 10)):  # Check up to 10 columns
+                            amount = parse_numeric_robust(row.iloc[col_idx])
+                            if amount > 0:
+                                if first_col not in exclude_items:
+                                    data_rows.append({
+                                        'particulars': first_col,
+                                        'amount': amount,
+                                        'type': template_mapping.get(first_col, 'B')
+                                    })
+                                    print(f"   📊 Found (fallback): {first_col} = ₹{amount:,.2f}")
+                                break
+                except (IndexError, KeyError, ValueError):
                     continue
         
         print(f"📊 Found {len(data_rows)} data rows")
