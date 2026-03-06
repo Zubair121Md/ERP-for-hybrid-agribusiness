@@ -1027,7 +1027,7 @@ function displayAllocationResults(result) {
     result.products.forEach(product => {
         const qtyText = formatQtyDisplay(product.product_name, product.unit, product.quantity);
         html += `
-            <tr>
+            <tr class="product-row" style="cursor: pointer;" onclick="showCostBreakdown(${product.product_id})" title="Click to view cost breakdown">
                 <td><strong>${product.product_name}</strong></td>
                 <td><span class="badge ${product.source === 'inhouse' ? 'badge-success' : 'badge-info'}">${product.source}</span></td>
                 <td>${qtyText}</td>
