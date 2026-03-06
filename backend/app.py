@@ -1573,21 +1573,28 @@ async def get_product_cost_breakdown(product_id: int, db: Session = Depends(get_
                 else:
                     skip_reason = "Product not matched to this VARIABLE COST section"
         
-        # Check if basis calculation would result in zero
+        # Check if basis calculation would result in zero (only if not already skipped)
         if not skip_reason:
-            product_basis = engine._compute_product_basis(cost, sale)
-            if product_basis == 0:
-                skip_reason = f"Product basis is 0 (basis: {cost.basis})"
-            else:
+            try:
+                # First check if product is applicable before computing basis
                 applicable_products = engine._get_applicable_products(cost, product_map, sales_map)
                 if not applicable_products:
                     skip_reason = "No applicable products found for this cost"
+                elif product_id not in applicable_products:
+                    skip_reason = "Product not in applicable products list"
                 else:
-                    total_basis = engine._compute_total_basis(cost, applicable_products, sales_map)
-                    if total_basis == 0:
-                        skip_reason = "Total basis is 0 (no products have basis value)"
-                    elif product_id not in applicable_products:
-                        skip_reason = "Product not in applicable products list"
+                    # Product is applicable, check basis
+                    product_basis = engine._compute_product_basis(cost, sale)
+                    if product_basis == 0:
+                        skip_reason = f"Product basis is 0 (basis: {cost.basis})"
+                    else:
+                        # Only compute total basis if product basis > 0
+                        total_basis = engine._compute_total_basis(cost, applicable_products, sales_map)
+                        if total_basis == 0:
+                            skip_reason = "Total basis is 0 (no products have basis value)"
+            except Exception as e:
+                # If computation fails, skip with error reason
+                skip_reason = f"Error computing basis: {str(e)}"
         
         if skip_reason:
             cost_breakdown["skipped_costs"].append({

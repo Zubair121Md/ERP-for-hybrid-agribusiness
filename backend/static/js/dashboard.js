@@ -1313,13 +1313,6 @@ function displayCostBreakdownModal(breakdown) {
     document.body.appendChild(modalContainer.firstElementChild);
 }
 
-function closeCostBreakdownModal() {
-    const modal = document.getElementById('costBreakdownModal');
-    if (modal) {
-        modal.remove();
-    }
-}
-
 // Close modal when clicking outside (but don't override existing onclick handlers)
 document.addEventListener('click', function(event) {
     const modal = document.getElementById('costBreakdownModal');
