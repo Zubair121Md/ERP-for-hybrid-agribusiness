@@ -1073,7 +1073,7 @@ async function showCostBreakdown(productId) {
     }
     
     try {
-        showLoading('allocation-results');
+        // Don't show loading for cost breakdown - we're opening a modal, not replacing content
         console.log('📡 Fetching from:', `${API_BASE}/product-cost-breakdown/${productId}`);
         
         const response = await fetch(`${API_BASE}/product-cost-breakdown/${productId}`);
@@ -1092,8 +1092,6 @@ async function showCostBreakdown(productId) {
     } catch (error) {
         console.error('❌ Error fetching cost breakdown:', error);
         showAlert('Error loading cost breakdown: ' + error.message, 'error');
-    } finally {
-        hideLoading('allocation-results');
     }
 }
 
@@ -1514,12 +1512,26 @@ function formatNumber(num) {
 
 function showLoading(containerId) {
     const container = document.getElementById(containerId);
-    container.innerHTML = `
-        <div class="loading">
-            <div class="spinner"></div>
-            <p>Loading...</p>
-        </div>
-    `;
+    if (container) {
+        container.innerHTML = `
+            <div class="loading">
+                <div class="spinner"></div>
+                <p>Loading...</p>
+            </div>
+        `;
+    }
+}
+
+function hideLoading(containerId) {
+    const container = document.getElementById(containerId);
+    // For cost breakdown, we don't want to clear the allocation results
+    // Just remove any loading indicator if present
+    if (container) {
+        const loadingDiv = container.querySelector('.loading');
+        if (loadingDiv) {
+            loadingDiv.remove();
+        }
+    }
 }
 
 function showAlert(message, type) {
