@@ -752,17 +752,43 @@ class CostAllocationEngine:
         
         elif cost.basis == "production_kg":
             # Production KG = Inward Quantity (total quantity produced or handled)
-            # For EA units, convert inward_quantity to kg
-            if is_ea:
-                return get_quantity_kg(sale.inward_quantity) if sale.inward_quantity > 0 else get_quantity_kg(sale.quantity)
-            return sale.inward_quantity if sale.inward_quantity > 0 else sale.quantity
+            # For inhouse products: use inhouse_production (harvested quantity)
+            # For outsourced products: use inward_quantity (purchased quantity)
+            if product.source == "inhouse":
+                # For inhouse products, production = harvested quantity
+                if sale.inhouse_production > 0:
+                    if is_ea:
+                        return get_quantity_kg(sale.inhouse_production)
+                    return sale.inhouse_production
+                # Fallback to quantity if inhouse_production not set
+                if is_ea:
+                    return get_quantity_kg(sale.quantity)
+                return sale.quantity
+            else:
+                # For outsourced products, use inward_quantity (purchased quantity)
+                if is_ea:
+                    return get_quantity_kg(sale.inward_quantity) if sale.inward_quantity > 0 else get_quantity_kg(sale.quantity)
+                return sale.inward_quantity if sale.inward_quantity > 0 else sale.quantity
         
         elif cost.basis == "handled_kg":
             # Handled KG = Inward Quantity (total quantity handled = inhouse production + outsourced purchases)
-            # Same as production_kg but explicitly for all products
-            if is_ea:
-                return get_quantity_kg(sale.inward_quantity) if sale.inward_quantity > 0 else get_quantity_kg(sale.quantity)
-            return sale.inward_quantity if sale.inward_quantity > 0 else sale.quantity
+            # For inhouse products: use inhouse_production (harvested quantity)
+            # For outsourced products: use inward_quantity (purchased quantity)
+            if product.source == "inhouse":
+                # For inhouse products, handled = harvested quantity
+                if sale.inhouse_production > 0:
+                    if is_ea:
+                        return get_quantity_kg(sale.inhouse_production)
+                    return sale.inhouse_production
+                # Fallback to quantity if inhouse_production not set
+                if is_ea:
+                    return get_quantity_kg(sale.quantity)
+                return sale.quantity
+            else:
+                # For outsourced products, use inward_quantity
+                if is_ea:
+                    return get_quantity_kg(sale.inward_quantity) if sale.inward_quantity > 0 else get_quantity_kg(sale.quantity)
+                return sale.inward_quantity if sale.inward_quantity > 0 else sale.quantity
         
         elif cost.basis == "purchase_kg":
             # Purchase KG = Inward Quantity for outsourced products (quantity purchased)
