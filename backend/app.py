@@ -557,8 +557,11 @@ class CostAllocationEngine:
             cost_name_upper = cost.name.upper()
             if "OPEN FIELD" in cost_name_upper:
                 cost_section = "Open Field"
-            elif "LETTUCE" in cost_name_upper or "POLYHOUSE C" in cost_name_upper or "POLYHOUSE" in cost_name_upper:
-                # Match to all Polyhouse sections (C, D, E)
+            elif "LETTUCE" in cost_name_upper:
+                # VARIABLE COST - LETTUCE: Only products with "lettuce" in name
+                cost_section = "Lettuce"  # Special section for lettuce-only matching
+            elif "POLYHOUSE C" in cost_name_upper or "POLYHOUSE" in cost_name_upper:
+                # Match to all Polyhouse sections (C, D, E) - but NOT for LETTUCE costs
                 cost_section = "Polyhouse"  # Will match Polyhouse C, D, E
             elif "STRAWBERRY" in cost_name_upper:
                 cost_section = "Strawberry"
@@ -674,7 +677,12 @@ class CostAllocationEngine:
                         if "STRAWBERRY" in product_name_upper:
                             product_mapped = True
                     
-                    # LETTUCE/POLYHOUSE: match products with "lettuce" in name (for Polyhouse greens)
+                    # LETTUCE: Only match products with "lettuce" in name
+                    elif cost_section == "Lettuce":
+                        if "LETTUCE" in product_name_upper:
+                            product_mapped = True
+                    
+                    # POLYHOUSE: match products in Polyhouse sections (for other Polyhouse costs, not LETTUCE)
                     elif cost_section == "Polyhouse":
                         if "LETTUCE" in product_name_upper or "GREEN" in product_name_upper or "SPINACH" in product_name_upper or "ARUGULA" in product_name_upper or "BOK" in product_name_upper or "CELERY" in product_name_upper or "PARSLEY" in product_name_upper or "BASIL" in product_name_upper or "KALE" in product_name_upper or "CHIVES" in product_name_upper or "DILL" in product_name_upper or "OREGANO" in product_name_upper or "SAGE" in product_name_upper or "THYME" in product_name_upper or "TARRAGON" in product_name_upper or "LEEKS" in product_name_upper or "ASPARAGUS" in product_name_upper or "MIXED" in product_name_upper or "SALAD" in product_name_upper or "MICRO" in product_name_upper:
                             product_mapped = True
