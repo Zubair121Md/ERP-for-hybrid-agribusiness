@@ -3739,12 +3739,12 @@ def parse_purple_patch_pl(file_path, db):
                                         continue
                                 
                                 if particulars not in exclude_items:
-                                                    data_rows.append({
-                                                        'particulars': particulars,
-                                                        'amount': amount,
-                                                        'type': template_mapping.get(particulars, 'B')
-                                                    })
-                                    print(f"   📊 Found (Strategy 3): {particulars} = ₹{amount:,.2f}")
+                                    data_rows.append({
+                                        'particulars': particulars,
+                                        'amount': amount,
+                                        'type': template_mapping.get(particulars, 'B')
+                                    })
+                                print(f"   📊 Found (Strategy 3): {particulars} = ₹{amount:,.2f}")
                             except (IndexError, KeyError, ValueError):
                                 continue
         
