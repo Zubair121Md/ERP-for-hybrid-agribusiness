@@ -4291,7 +4291,7 @@ async def upload_cost_sheet(file: UploadFile = File(...), db: Session = Depends(
             cat_basis_map = {
                 'distribution_cost':    'sales_kg',      # Sales KG
                 'marketing_expenses':   'sales_value',   # Sales Value
-                'vehicle_running_cost': 'sales_kg',      # Sales KG
+                'vehicle_running_cost': 'handled_kg',    # Handled KG (trucks move weight, not revenue)
                 'others':               'sales_kg',      # Sales KG
             }
             

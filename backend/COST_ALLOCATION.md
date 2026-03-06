@@ -69,7 +69,7 @@ This document explains **exactly** how each cost category is allocated to produc
 | **VARIABLE COST - AGGREGATION** | Purchase KG | All outsourced | Purchase quantity-based |
 | **DISTRIBUTION COST** | Sales KG | ALL | Sales volume-based |
 | **MARKETING EXPENSES** | Sales Value | ALL | Revenue-based |
-| **VEHICLE RUNNING COST** | Sales KG | ALL | Sales volume-based |
+| **VEHICLE RUNNING COST** | Handled KG | ALL | Handled quantity-based (trucks move weight, not revenue) |
 | **OTHERS** | Sales KG | ALL | Sales volume-based |
 | **WASTAGE-OWN FARM** | Production KG | Inhouse only | Production-based |
 | **WASTAGE-DISPATCH** | Sales KG | ALL | Sales volume-based |
@@ -301,16 +301,16 @@ This document explains **exactly** how each cost category is allocated to produc
 
 ### **6. VEHICLE RUNNING COST** (₹3,144,393)
 
-**Basis:** Sales KG (outward quantity)  
+**Basis:** Handled KG (quantity sold/dispatched)  
 **Applies To:** ALL products (inhouse + outsourced)  
-**Formula:** `(Product Sales_kg / Total Sales_kg) × ₹3,144,393`
+**Formula:** `(Product Handled_kg / Total Handled_kg) × ₹3,144,393`
 
 **Line Items:**
 - VEHICLE DIESEL
 - VEHICLE MAINTANANCE
 - VEHICLE PERMIT & INSURANCE
 
-**What This Means:** All products share vehicle costs based on sales volume.
+**What This Means:** All products share vehicle costs based on handled quantity (weight moved). Trucks move weight, not revenue, so allocation is based on the quantity handled/dispatched rather than sales value.
 
 ---
 
@@ -699,7 +699,7 @@ Baby Corn Allocation = (Y / Z) × ₹1,556,118
 6. **VARIABLE COST - AGGREGATION**: Based on Purchase KG → 19,791.0 / Total Purchase KG × ₹1,556,118
 7. **DISTRIBUTION COST**: Based on Sales KG → (1,682.30 + 19,751.70) / Total Sales KG × ₹1,518,289
 8. **MARKETING**: Based on Sales Value → (₹211,955 + ₹2,488,920) / Total Sales Value × ₹221,594
-9. **VEHICLE RUNNING**: Based on Sales KG → (1,682.30 + 19,751.70) / Total Sales KG × ₹3,144,393
+9. **VEHICLE RUNNING**: Based on Handled KG → (1,682.30 + 19,751.70) / Total Handled KG × ₹3,144,393
 10. **OTHERS**: Based on Sales KG → (1,682.30 + 19,751.70) / Total Sales KG × ₹410,219
 11. **WASTAGE**: 
     - OWN FARM: Based on Production KG → 1,682.30 / Total Inhouse Production × ₹8
