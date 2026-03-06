@@ -2099,9 +2099,9 @@ async def upload_excel(file: UploadFile = File(...), db: Session = Depends(get_d
                             outsourced_qty = max(0.0, outward_qty - harvest_qty)  # Rest is outsourced
                             
                             print(f"   🔄 Splitting {particulars} (Outsourced): {inhouse_qty} kg (inhouse from harvest) + {outsourced_qty} kg (outsourced purchased)")
-                        
-                        # Only proceed with split logic if we have both portions or outsourced portion > 0
-                        if inhouse_qty > 0 or outsourced_qty > 0:
+                            
+                            # Only proceed with split logic if we have both portions or outsourced portion > 0
+                            if inhouse_qty > 0 or outsourced_qty > 0:
                             # Create INHOUSE product and sale (only if inhouse_qty > 0)
                             if inhouse_qty > 0:
                                 inhouse_product_name = f"{particulars} (Inhouse)"
