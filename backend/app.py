@@ -3530,7 +3530,7 @@ def parse_purple_patch_pl(file_path, db):
                             print(f"📅 Period detected: {period} (from row {idx+1}, col {col_idx+1})")
                             break
                     if period != "Unknown":
-                    break
+                        break
             if period != "Unknown":
                 break
         
