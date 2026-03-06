@@ -1084,6 +1084,14 @@ async function showCostBreakdown(productId) {
 }
 
 function displayCostBreakdownModal(breakdown) {
+    console.log('📊 Displaying cost breakdown modal for:', breakdown.product_name);
+    
+    if (!breakdown || !breakdown.product_name) {
+        console.error('❌ Invalid breakdown data:', breakdown);
+        showAlert('Error: Invalid cost breakdown data', 'error');
+        return;
+    }
+    
     // Create modal HTML
     const modalHtml = `
         <div id="costBreakdownModal" class="modal" style="display: block;">
