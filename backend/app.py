@@ -3681,7 +3681,7 @@ def parse_purple_patch_pl(file_path, db):
                         if pd.isna(particulars_raw) or str(particulars_raw).strip() == '':
                             continue
                         
-                                        particulars = str(particulars_raw).strip()
+                        particulars = str(particulars_raw).strip()
                         
                         # Skip category headers
                         category_headers = [
