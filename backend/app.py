@@ -3738,7 +3738,7 @@ def parse_purple_patch_pl(file_path, db):
                                     if not matched:
                                         continue
                                 
-                                                if particulars not in exclude_items:
+                                if particulars not in exclude_items:
                                                     data_rows.append({
                                                         'particulars': particulars,
                                                         'amount': amount,
