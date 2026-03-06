@@ -3718,9 +3718,9 @@ def parse_purple_patch_pl(file_path, db):
                             if any(keyword in particulars.upper() for keyword in overview_keywords):
                                 continue
                             
-                                            amount = parse_numeric_robust(amount_raw) if pd.notna(amount_raw) else 0.0
-                                            
-                                            if amount != 0:
+                            amount = parse_numeric_robust(amount_raw) if pd.notna(amount_raw) else 0.0
+                            
+                            if amount != 0:
                                 # Normalize and check whitelist
                                 normalized_particulars = normalize_name(particulars)
                                 
