@@ -3625,7 +3625,7 @@ def parse_purple_patch_pl(file_path, db):
                             # Check if amount is small (likely from overview table)
                             amount = parse_numeric_robust(amount_raw)
                             if amount < 1000:
-                    continue
+                                continue
                 
                         # Use robust number parser
                         amount = parse_numeric_robust(amount_raw)
