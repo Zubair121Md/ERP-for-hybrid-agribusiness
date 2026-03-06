@@ -3243,20 +3243,20 @@ def split_inhouse_outsourced(row):
     """
     # Return single record as-is (no splitting based on inward/outward difference)
     records = []
-        records.append({
-            'month': row['month'],
-            'particulars': row['particulars'],
+    records.append({
+        'month': row['month'],
+        'particulars': row['particulars'],
         'type': row.get('type', 'Outsourced'),  # Use the Type from the row
-            'inward_qty': row['inward_qty'],
-            'outward_qty': row['outward_qty'],
-            'inward_rate': row['inward_rate'],
-            'outward_rate': row['outward_rate'],
-            'inward_value': row['inward_qty'] * row['inward_rate'],
-            'outward_value': row['outward_qty'] * row['outward_rate'],
+        'inward_qty': row['inward_qty'],
+        'outward_qty': row['outward_qty'],
+        'inward_rate': row['inward_rate'],
+        'outward_rate': row['outward_rate'],
+        'inward_value': row['inward_qty'] * row['inward_rate'],
+        'outward_value': row['outward_qty'] * row['outward_rate'],
         'inhouse_production': 0,  # Will be set based on Type column, not inward/outward difference
         'wastage': 0,
-            'unit': row['outward_unit']
-        })
+        'unit': row['outward_unit']
+    })
     
     return records
 
