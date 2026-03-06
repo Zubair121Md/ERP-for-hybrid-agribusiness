@@ -1051,19 +1051,62 @@ async function showCostBreakdown(productId) {
     try {
         console.log('🔍 Fetching cost breakdown for product ID:', productId);
         
-        const response = await fetch(`${API_BASE}/product-cost-breakdown/${productId}`);
+        // Show loading modal immediately
+        const loadingModal = `
+            <div id="costBreakdownModal" class="modal" style="display: block;">
+                <div class="modal-content" style="max-width: 900px;">
+                    <div class="modal-header">
+                        <h2>Loading Cost Breakdown...</h2>
+                        <span class="close" onclick="closeCostBreakdownModal()">&times;</span>
+                    </div>
+                    <div class="modal-body">
+                        <div style="text-align: center; padding: 40px;">
+                            <div class="spinner"></div>
+                            <p>Loading cost breakdown data...</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        `;
+        document.body.insertAdjacentHTML('beforeend', loadingModal);
+        
+        // Add timeout to prevent infinite loading
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 30000); // 30 second timeout
+        
+        const response = await fetch(`${API_BASE}/product-cost-breakdown/${productId}`, {
+            signal: controller.signal
+        });
+        
+        clearTimeout(timeoutId);
         
         if (!response.ok) {
             const errorData = await response.json().catch(() => ({ detail: 'Unknown error' }));
+            closeCostBreakdownModal();
             throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
         }
         
         const breakdown = await response.json();
         console.log('✅ Cost breakdown received:', breakdown);
+        
+        // Close loading modal and show actual breakdown
+        closeCostBreakdownModal();
         displayCostBreakdownModal(breakdown);
     } catch (error) {
         console.error('❌ Error fetching cost breakdown:', error);
-        alert('Error loading cost breakdown: ' + error.message);
+        closeCostBreakdownModal();
+        if (error.name === 'AbortError') {
+            alert('Request timed out. The server may be processing a large amount of data. Please try again.');
+        } else {
+            alert('Error loading cost breakdown: ' + error.message);
+        }
+    }
+}
+
+function closeCostBreakdownModal() {
+    const modal = document.getElementById('costBreakdownModal');
+    if (modal) {
+        modal.remove();
     }
 }
 
