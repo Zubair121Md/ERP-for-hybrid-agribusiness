@@ -1026,8 +1026,10 @@ function displayAllocationResults(result) {
     
     result.products.forEach(product => {
         const qtyText = formatQtyDisplay(product.product_name, product.unit, product.quantity);
+        const productId = product.product_id || product.id;
+        console.log('📦 Product data:', product, 'Product ID:', productId);
         html += `
-            <tr class="product-row" style="cursor: pointer;" onclick="showCostBreakdown(${product.product_id})" title="Click to view cost breakdown">
+            <tr class="product-row" style="cursor: pointer;" data-product-id="${productId}" onclick="showCostBreakdown(${productId})" title="Click to view cost breakdown">
                 <td><strong>${product.product_name}</strong></td>
                 <td><span class="badge ${product.source === 'inhouse' ? 'badge-success' : 'badge-info'}">${product.source}</span></td>
                 <td>${qtyText}</td>
