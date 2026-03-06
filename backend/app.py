@@ -1855,50 +1855,50 @@ async def upload_excel(file: UploadFile = File(...), db: Session = Depends(get_d
                                 source = "inhouse"
                                 product_name = f"{particulars} (Inhouse)"
                                 # Create inhouse product and sale (reuse existing logic)
-                        product = db.query(Product).filter(Product.name == product_name).first()
-                        if not product:
-                            product = Product(
-                                name=product_name,
+                                product = db.query(Product).filter(Product.name == product_name).first()
+                                if not product:
+                                    product = Product(
+                                        name=product_name,
                                         source=source,
-                            unit=outward_unit if outward_unit else "kg"
-                            )
-                            db.add(product)
-                            db.commit()
-                            db.refresh(product)
-                            products_created += 1
-                            print(f"   📦 Created product: {product_name}")
-                        
-                        monthly_sale = MonthlySale(
-                            product_id=product.id,
-                        month=month,
+                                        unit=outward_unit if outward_unit else "kg"
+                                    )
+                                    db.add(product)
+                                    db.commit()
+                                    db.refresh(product)
+                                    products_created += 1
+                                    print(f"   📦 Created product: {product_name}")
+                                
+                                monthly_sale = MonthlySale(
+                                    product_id=product.id,
+                                    month=month,
                                     quantity=outward_qty,
-                        sale_price=outward_rate,
+                                    sale_price=outward_rate,
                                     direct_cost=0.0,
                                     inward_quantity=0.0,
-                        inward_rate=0.0,
-                        inward_value=0.0,
+                                    inward_rate=0.0,
+                                    inward_value=0.0,
                                     inhouse_production=outward_qty,
-                        wastage=0.0
-                        )
-                        db.add(monthly_sale)
-                        sales_created += 1
+                                    wastage=0.0
+                                )
+                                db.add(monthly_sale)
+                                sales_created += 1
                                 print(f"   💰 Created sale (inhouse): {outward_qty}{outward_unit} @ ₹{outward_rate}")
-                        
-                        parsed_data.append(ExcelRowData(
-                        month=month,
-                        particulars=particulars,
-                        type="Inhouse",
-                        inward_quantity=0.0,
-                        inward_rate=0.0,
-                        inward_value=0.0,
+                                
+                                parsed_data.append(ExcelRowData(
+                                    month=month,
+                                    particulars=particulars,
+                                    type="Inhouse",
+                                    inward_quantity=0.0,
+                                    inward_rate=0.0,
+                                    inward_value=0.0,
                                     outward_quantity=outward_qty,
-                        outward_rate=outward_rate,
+                                    outward_rate=outward_rate,
                                     outward_value=outward_value,
                                     inhouse_production=outward_qty,
-                        wastage=0.0
-                        ))
+                                    wastage=0.0
+                                ))
                                 continue
-                else:
+                        else:
                             # For "Outsourced" products: ALWAYS split if harvest exists
                             # inhouse_qty = min(harvest_qty, outward_qty) - the portion from harvest
                             # outsourced_qty = max(0, outward_qty - harvest_qty) - the purchased portion
@@ -1906,12 +1906,12 @@ async def upload_excel(file: UploadFile = File(...), db: Session = Depends(get_d
                             outsourced_qty = max(0.0, outward_qty - harvest_qty)  # Rest is outsourced
                             
                             print(f"   🔄 Splitting {particulars} (Outsourced): {inhouse_qty} kg (inhouse from harvest) + {outsourced_qty} kg (outsourced purchased)")
-                        
-                        # Only proceed with split logic if we have both portions or outsourced portion > 0
-                        if inhouse_qty > 0 or outsourced_qty > 0:
-                            # Create INHOUSE product and sale (only if inhouse_qty > 0)
-                            if inhouse_qty > 0:
-                                inhouse_product_name = f"{particulars} (Inhouse)"
+                            
+                            # Only proceed with split logic if we have both portions or outsourced portion > 0
+                            if inhouse_qty > 0 or outsourced_qty > 0:
+                                # Create INHOUSE product and sale (only if inhouse_qty > 0)
+                                if inhouse_qty > 0:
+                                    inhouse_product_name = f"{particulars} (Inhouse)"
                                 inhouse_product = db.query(Product).filter(Product.name == inhouse_product_name).first()
                                 if not inhouse_product:
                                     inhouse_product = Product(
@@ -1927,6 +1927,18 @@ async def upload_excel(file: UploadFile = File(...), db: Session = Depends(get_d
                                 
                                 # Calculate inhouse sale price (proportional)
                                 inhouse_sale_price = outward_rate
+                                
+                                # Check if sale already exists for this product/month and delete it
+                                existing_sale = db.query(MonthlySale).filter(
+                                    MonthlySale.product_id == inhouse_product.id,
+                                    MonthlySale.month == month
+                                ).first()
+                                if existing_sale:
+                                    print(f"   🗑️  Deleting existing sale record for {inhouse_product_name} (month: {month})")
+                                    print(f"   🗑️  Old values: quantity={existing_sale.quantity}, inhouse_production={existing_sale.inhouse_production}")
+                                    db.delete(existing_sale)
+                                    db.commit()
+                                
                                 inhouse_sale = MonthlySale(
                                     product_id=inhouse_product.id,
                                     month=month,
@@ -1939,6 +1951,7 @@ async def upload_excel(file: UploadFile = File(...), db: Session = Depends(get_d
                                     inhouse_production=inhouse_qty,
                                     wastage=0.0
                                 )
+                                print(f"   ✅ Creating inhouse sale: quantity={inhouse_qty}, inhouse_production={inhouse_qty}")
                                 db.add(inhouse_sale)
                                 sales_created += 1
                                 
@@ -2058,7 +2071,7 @@ async def upload_excel(file: UploadFile = File(...), db: Session = Depends(get_d
                         db.commit()
                         db.refresh(product)
                         products_created += 1
-                            print(f"   📦 Created product: {product_name} (no harvest data, using as-is)")
+                        print(f"   📦 Created product: {product_name} (no harvest data, using as-is)")
                     
                     # Create monthly sale record
                     monthly_sale = MonthlySale(
@@ -2076,7 +2089,7 @@ async def upload_excel(file: UploadFile = File(...), db: Session = Depends(get_d
                     
                     db.add(monthly_sale)
                     sales_created += 1
-                        print(f"   💰 Created sale ({source}): {outward_qty}{outward_unit} @ ₹{outward_rate}")
+                    print(f"   💰 Created sale ({source}): {outward_qty}{outward_unit} @ ₹{outward_rate}")
                     
                     # Add to parsed data
                     parsed_data.append(ExcelRowData(
@@ -2090,10 +2103,10 @@ async def upload_excel(file: UploadFile = File(...), db: Session = Depends(get_d
                         outward_rate=outward_rate,
                         outward_value=outward_value,
                         inhouse_production=inhouse_production,
-                            wastage=wastage
-                        ))
-                        # Skip the duplicate parsed_data.append below
-                        continue
+                        wastage=wastage
+                    ))
+                    # Skip the duplicate parsed_data.append below
+                    continue
                 else:
                     # Type is "Inhouse" - use directly, no harvest check needed
                     product_name = f"{particulars} (Inhouse)"
