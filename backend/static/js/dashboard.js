@@ -1290,16 +1290,17 @@ function closeCostBreakdownModal() {
     const modal = document.getElementById('costBreakdownModal');
     if (modal) {
         modal.remove();
+        console.log('✅ Modal closed');
     }
 }
 
-// Close modal when clicking outside
-window.onclick = function(event) {
+// Close modal when clicking outside (but preserve existing onclick handlers)
+document.addEventListener('click', function(event) {
     const modal = document.getElementById('costBreakdownModal');
-    if (event.target == modal) {
+    if (modal && event.target === modal) {
         closeCostBreakdownModal();
     }
-}
+});
 
 // Report functions
 async function generateReport() {
