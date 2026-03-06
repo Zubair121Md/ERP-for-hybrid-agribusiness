@@ -1419,69 +1419,10 @@ async def get_product_cost_breakdown(product_id: int, db: Session = Depends(get_
     
     # Get all allocations for this product
     allocations = db.query(Allocation).filter(Allocation.product_id == product_id).all()
+    allocated_cost_ids = {a.cost_id for a in allocations}
     
     # Get all costs to identify skipped ones
     all_costs = db.query(Cost).all()
-    allocated_cost_ids = {a.cost_id for a in allocations}
-    
-    # Identify skipped costs (costs that exist but weren't allocated to this product)
-    skipped_costs = []
-    for cost in all_costs:
-        # Skip if this cost was allocated to this product
-        if cost.id in allocated_cost_ids:
-            continue
-        
-        # Check why it was skipped
-        skip_reason = None
-        
-        # Reason 1: Direct cost (PURCHASE ACCOUNTS) - not allocated by design
-        if cost.basis == "direct_cost" or "PURCHASE ACCOUNTS" in (cost.name or "").upper():
-            skip_reason = "Direct cost - not allocated (handled as direct_cost per product)"
-        
-        # Reason 2: Doesn't apply to this product type
-        elif cost.applies_to == "inhouse" and product.source != "inhouse":
-            skip_reason = f"Applies only to inhouse products (this product is {product.source})"
-        elif cost.applies_to == "outsourced" and product.source != "outsourced":
-            skip_reason = f"Applies only to outsourced products (this product is {product.source})"
-        
-        # Reason 3: Section-based filtering (for variable costs)
-        elif cost.name and "VARIABLE COST" in cost.name.upper():
-            # Check if this product would match the section
-            cost_name_upper = cost.name.upper()
-            product_name_upper = (product.name or "").upper()
-            
-            if "LETTUCE" in cost_name_upper:
-                if "LETTUCE" not in product_name_upper:
-                    skip_reason = "VARIABLE COST - LETTUCE only applies to products with 'lettuce' in name"
-            elif "STRAWBERRY" in cost_name_upper:
-                if "STRAWBERRY" not in product_name_upper:
-                    skip_reason = "VARIABLE COST - STRAWBERRY only applies to products with 'strawberry' in name"
-            elif "OPEN FIELD" in cost_name_upper:
-                skip_reason = "VARIABLE COST - OPEN FIELD only applies to Open Field section products"
-            elif "RASPBERRY" in cost_name_upper or "BLUEBERRY" in cost_name_upper:
-                if "RASPBERRY" not in product_name_upper and "BLUEBERRY" not in product_name_upper:
-                    skip_reason = "VARIABLE COST - RASPBERRY/BLUEBERRY only applies to berry products"
-            elif "AGGREGATION" in cost_name_upper:
-                if product.source != "outsourced":
-                    skip_reason = "VARIABLE COST - AGGREGATION only applies to outsourced products"
-            elif "PACKING" in cost_name_upper:
-                # PACKING applies to all products, so shouldn't be skipped unless there's another reason
-                skip_reason = "No allocation basis available (total basis = 0)"
-            else:
-                skip_reason = "Product doesn't match section/category requirements"
-        else:
-            skip_reason = "No allocation basis available or product doesn't match criteria"
-        
-        if skip_reason:
-            skipped_costs.append({
-                "cost_id": cost.id,
-                "cost_name": cost.name,
-                "category": cost.category,
-                "applies_to": cost.applies_to,
-                "basis": cost.basis,
-                "total_cost_amount": cost.amount,
-                "skip_reason": skip_reason
-            })
     
     # Group allocations by cost category and type
     cost_breakdown = {
@@ -1501,7 +1442,7 @@ async def get_product_cost_breakdown(product_id: int, db: Session = Depends(get_
             "common": []
         },
         "detailed_costs": [],
-        "skipped_costs": skipped_costs
+        "skipped_costs": []
     }
     
     # Process each allocation
@@ -1537,6 +1478,67 @@ async def get_product_cost_breakdown(product_id: int, db: Session = Depends(get_
             cost_breakdown["costs_by_type"]["outsourced_only"].append(cost_info)
         else:
             cost_breakdown["costs_by_type"]["common"].append(cost_info)
+    
+    # Identify skipped costs (costs that exist but weren't allocated to this product)
+    engine = CostAllocationEngine(db)
+    products = db.query(Product).filter(Product.is_active == True).all()
+    product_map = {p.id: p for p in products}
+    monthly_sales = db.query(MonthlySale).all()
+    sales_map = {s.product_id: s for s in monthly_sales}
+    
+    for cost in all_costs:
+        if cost.id in allocated_cost_ids:
+            continue  # This cost was allocated, skip it
+        
+        # Determine why this cost was skipped
+        skip_reason = None
+        
+        # Check if it's a direct cost (PURCHASE ACCOUNTS)
+        if cost.basis == "direct_cost" or "PURCHASE ACCOUNTS" in (cost.name or "").upper():
+            skip_reason = "Direct cost (not allocated - handled as purchase cost)"
+        # Check applies_to mismatch
+        elif cost.applies_to == "inhouse" and product.source != "inhouse":
+            skip_reason = f"Applies to 'inhouse' only, but product is '{product.source}'"
+        elif cost.applies_to == "outsourced" and product.source != "outsourced":
+            skip_reason = f"Applies to 'outsourced' only, but product is '{product.source}'"
+        # Check if product is not applicable (section-based filtering)
+        else:
+            applicable_products = engine._get_applicable_products(cost, product_map, sales_map)
+            if product_id not in applicable_products:
+                # Determine specific reason
+                is_variable_cost = cost.name and "VARIABLE COST" in cost.name.upper()
+                if is_variable_cost:
+                    cost_name_upper = cost.name.upper()
+                    if "LETTUCE" in cost_name_upper:
+                        if "LETTUCE" not in (product.name or "").upper():
+                            skip_reason = "VARIABLE COST - LETTUCE only applies to products with 'lettuce' in name"
+                        else:
+                            skip_reason = "Product not in applicable section for this variable cost"
+                    elif "STRAWBERRY" in cost_name_upper:
+                        if "STRAWBERRY" not in (product.name or "").upper():
+                            skip_reason = "VARIABLE COST - STRAWBERRY only applies to products with 'strawberry' in name"
+                        else:
+                            skip_reason = "Product not in applicable section for this variable cost"
+                    elif "OPEN FIELD" in cost_name_upper:
+                        skip_reason = "Product not mapped to 'Open Field' section"
+                    else:
+                        skip_reason = "Product not in applicable section for this variable cost"
+                else:
+                    skip_reason = "Product does not match cost applicability criteria"
+            else:
+                # Product is applicable but cost wasn't allocated - might be zero basis
+                skip_reason = "Cost applicable but allocation basis was zero"
+        
+        if skip_reason:
+            cost_breakdown["skipped_costs"].append({
+                "cost_id": cost.id,
+                "cost_name": cost.name,
+                "category": cost.category or "other",
+                "applies_to": cost.applies_to,
+                "basis": cost.basis,
+                "total_cost_amount": cost.amount,
+                "skip_reason": skip_reason
+            })
     
     # Calculate totals
     cost_breakdown["total_cost"] = sale.direct_cost + cost_breakdown["total_allocated"]
