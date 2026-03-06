@@ -548,8 +548,23 @@ class CostAllocationEngine:
         """Get products that this cost applies to"""
         applicable = {}
         
+        cost_name_upper = (cost.name or "").upper()
+        
+        # Check if this is FIXED COST CAT - II that needs category-based filtering
+        is_fixed_cost_cat_ii = "FIXED COST CAT - II" in cost_name_upper
+        fixed_cost_category = None
+        
+        if is_fixed_cost_cat_ii:
+            # Extract category from cost name
+            if "STRAWBERRY" in cost_name_upper and "60" in cost_name_upper:
+                fixed_cost_category = "strawberry"
+            elif "GREENS" in cost_name_upper and "25" in cost_name_upper:
+                fixed_cost_category = "greens"
+            elif "AGGREGATION" in cost_name_upper and "15" in cost_name_upper:
+                fixed_cost_category = "aggregation"
+        
         # Check if this is a VARIABLE COST that needs section-based filtering
-        is_variable_cost = cost.name and "VARIABLE COST" in cost.name.upper()
+        is_variable_cost = "VARIABLE COST" in cost_name_upper
         cost_section = None
         
         if is_variable_cost:
@@ -618,6 +633,33 @@ class CostAllocationEngine:
             
             if not matches_applies_to:
                 continue
+            
+            # Category-based filtering for FIXED COST CAT - II
+            if fixed_cost_category:
+                product_name_upper = (product.name or "").upper().strip()
+                
+                if fixed_cost_category == "strawberry":
+                    # FIXED COST CAT - II (Strawberry 60%): Only apply to strawberry products (inhouse)
+                    if product.source != "inhouse" or "STRAWBERRY" not in product_name_upper:
+                        continue
+                
+                elif fixed_cost_category == "greens":
+                    # FIXED COST CAT - II (Greens 25%): Only apply to greens/lettuce products (inhouse)
+                    # Match products with "greens", "lettuce", "micro", "salad", or other greens keywords
+                    if product.source != "inhouse":
+                        continue
+                    # Check for greens/lettuce keywords
+                    greens_keywords = ["GREEN", "LETTUCE", "MICRO", "SALAD", "SPINACH", "ARUGULA", 
+                                     "KALE", "BASIL", "PARSLEY", "CELERY", "CHIVES", "DILL", 
+                                     "OREGANO", "SAGE", "THYME", "TARRAGON", "LEEKS", "ASPARAGUS",
+                                     "BOK", "MIXED"]
+                    if not any(keyword in product_name_upper for keyword in greens_keywords):
+                        continue
+                
+                elif fixed_cost_category == "aggregation":
+                    # FIXED COST CAT - II (Aggregation 15%): Only apply to outsourced products
+                    if product.source != "outsourced":
+                        continue
             
             # Section-based filtering for VARIABLE COST
             # IMPORTANT: Section-based filtering ONLY applies to inhouse products
