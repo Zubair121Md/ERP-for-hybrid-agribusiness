@@ -582,6 +582,10 @@ class CostAllocationEngine:
                 mappings = self.db.query(ProductSectionMapping).filter(
                     ProductSectionMapping.section.like("Polyhouse%")
                 ).all()
+            elif cost_section == "Lettuce":
+                # For LETTUCE costs, we'll use name-based matching only (not section mappings)
+                # This ensures only products with "lettuce" in name get LETTUCE costs
+                mappings = []
             else:
                 mappings = self.db.query(ProductSectionMapping).filter(
                     ProductSectionMapping.section == cost_section
