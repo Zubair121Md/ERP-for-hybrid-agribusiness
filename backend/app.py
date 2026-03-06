@@ -4238,7 +4238,7 @@ async def upload_cost_sheet(file: UploadFile = File(...), db: Session = Depends(
                 costs_updated = 0  # reset since we're replacing
             
             # ============================================================
-            # 1) FIXED COST CAT - I  →  All products proportional by Sales Value
+            # 1) FIXED COST CAT - I  →  All products proportional by Sales KG (weight-based)
             # ============================================================
             fc1 = expenses.get('fixed_cost_cat_i', {}).get('total', 0.0)
             # CORRECTION: Excel line items sum to 393,350 but should be 390,350
@@ -4250,7 +4250,7 @@ async def upload_cost_sheet(file: UploadFile = File(...), db: Session = Depends(
                 print(f"   📊 FIXED COST CAT - I: ₹{fc1:,.2f}")
             if fc1 > 0:
                 save_cost("FIXED COST CAT - I", fc1, "both", "fixed_cost_cat_i",
-                          "sales_value",  # Basis: Sales Value (revenue)
+                          "sales_kg",  # Basis: Sales KG (weight-based)
                           is_fixed="fixed", pl_class="B")
             else:
                 print(f"   ⚠️  FIXED COST CAT - I is 0 or not found")
@@ -4329,10 +4329,10 @@ async def upload_cost_sheet(file: UploadFile = File(...), db: Session = Depends(
             # ============================================================
             # 4) DISTRIBUTION, MARKETING, VEHICLE, OTHERS
             # ============================================================
-            # Basis mapping per COST_ALLOCATION.md
+            # Basis mapping per COST_ALLOCATION.md - All allocations now weight-based (kg)
             cat_basis_map = {
                 'distribution_cost':    'sales_kg',      # Sales KG
-                'marketing_expenses':   'sales_value',   # Sales Value
+                'marketing_expenses':   'sales_kg',      # Sales KG (changed from Sales Value to weight-based)
                 'vehicle_running_cost': 'handled_kg',    # Handled KG (trucks move weight, not revenue)
                 'others':               'sales_kg',      # Sales KG
             }

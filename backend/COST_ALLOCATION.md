@@ -59,7 +59,7 @@ This document explains **exactly** how each cost category is allocated to produc
 
 | Cost Category | Basis | Applies To | Key Point |
 |--------------|-------|------------|-----------|
-| **FIXED COST CAT - I** | Sales Value | ALL | Revenue-based |
+| **FIXED COST CAT - I** | Sales KG | ALL | Weight-based |
 | **FIXED COST CAT - II** | Production KG | Split by type | Production-based |
 | **VARIABLE COST - OPEN FIELD** | Production KG | Open Field (inhouse) | Production-based |
 | **VARIABLE COST - LETTUCE(PH)** | Production KG | Polyhouse (inhouse) | Production-based |
@@ -68,7 +68,7 @@ This document explains **exactly** how each cost category is allocated to produc
 | **VARIABLE COST - PACKING** | Handled KG | ALL | Handled quantity-based |
 | **VARIABLE COST - AGGREGATION** | Purchase KG | All outsourced | Purchase quantity-based |
 | **DISTRIBUTION COST** | Sales KG | ALL | Sales volume-based |
-| **MARKETING EXPENSES** | Sales Value | ALL | Revenue-based |
+| **MARKETING EXPENSES** | Sales KG | ALL | Weight-based |
 | **VEHICLE RUNNING COST** | Handled KG | ALL | Handled quantity-based (trucks move weight, not revenue) |
 | **OTHERS** | Sales KG | ALL | Sales volume-based |
 | **WASTAGE-OWN FARM** | Production KG | Inhouse only | Production-based |
@@ -82,9 +82,9 @@ This document explains **exactly** how each cost category is allocated to produc
 
 ### **1. FIXED COST CAT - I** (₹393,350)
 
-**Basis:** Sales Value (revenue)  
+**Basis:** Sales KG (weight)  
 **Applies To:** ALL products (inhouse + outsourced)  
-**Formula:** `(Product Sales Value / Total Sales Value) × ₹393,350`
+**Formula:** `(Product Sales KG / Total Sales KG) × ₹393,350`
 
 **Line Items:**
 - ACCOUNTING CHARGES(AUDIT FEE)
@@ -112,7 +112,7 @@ This document explains **exactly** how each cost category is allocated to produc
 - TRADE MARK CONSULTANCY FEE/OTHERS
 - VEHICLE ACCIDENT
 
-**What This Means:** Higher revenue products pay more. If a product generates 10% of total revenue, it gets 10% of this cost.
+**What This Means:** Higher quantity products pay more. If a product represents 10% of total sales weight, it gets 10% of this cost.
 
 ---
 
@@ -286,9 +286,9 @@ This document explains **exactly** how each cost category is allocated to produc
 
 ### **5. MARKETING EXPENSES** (₹221,594)
 
-**Basis:** Sales Value (revenue)  
+**Basis:** Sales KG (weight)  
 **Applies To:** ALL products (inhouse + outsourced)  
-**Formula:** `(Product Sales Value / Total Sales Value) × ₹221,594`
+**Formula:** `(Product Sales KG / Total Sales KG) × ₹221,594`
 
 **Line Items:**
 - TRAVELLING EXP AND OTHERS
@@ -417,43 +417,43 @@ This document explains **exactly** how each cost category is allocated to produc
 ### **Rule 1: FIXED COST CAT - I** (₹393,350)
 
 **Applies To:** ALL products (both inhouse + outsourced)  
-**Basis:** Sales Value (revenue = quantity × sale_price)  
-**Allocation Method:** Proportional to total sales value
+**Basis:** Sales KG (weight = quantity sold/dispatched)  
+**Allocation Method:** Proportional to total sales weight
 
 #### **Calculation Example:**
 
-**Step 1: Calculate Total Sales Value**
+**Step 1: Calculate Total Sales KG**
 ```
-Total Sales Value = Sum of all Outward Value (quantity × sale_price)
+Total Sales KG = Sum of all Outward Quantity (quantity sold/dispatched)
 
 Example:
-- Tree Tomato: 31.0 kg × ₹151.13 = ₹4,685
-- Arugula: 409.35 kg × ₹271.8 = ₹111,260
-- Basil: 883.14 kg × ₹277.1 = ₹244,714
-- Chinese Cabbage: 7,722.0 kg × ₹65.76 = ₹507,830
+- Tree Tomato: 31.0 kg
+- Arugula: 409.35 kg
+- Basil: 883.14 kg
+- Chinese Cabbage: 7,722.0 kg
 ... (sum all)
 
-Total Sales Value = ₹4,685 + ₹111,260 + ₹244,714 + ₹507,830 + ... = ₹X
+Total Sales KG = 31.0 + 409.35 + 883.14 + 7,722.0 + ... = X kg
 ```
 
 **Step 2: Calculate Allocation for Each Product**
 ```
-Product Allocation = (Product Sales Value / Total Sales Value) × ₹393,350
+Product Allocation = (Product Sales KG / Total Sales KG) × ₹393,350
 
 Example for Tree Tomato:
-- Tree Tomato Sales Value = ₹4,685
-- Total Sales Value = ₹X
-- Tree Tomato Allocation = (₹4,685 / ₹X) × ₹393,350
+- Tree Tomato Sales KG = 31.0 kg
+- Total Sales KG = X kg
+- Tree Tomato Allocation = (31.0 / X) × ₹393,350
 
 Example for Iceberg Lettuce:
-- Iceberg Lettuce Sales Value = ₹2,700,875
-- Iceberg Lettuce Allocation = (₹2,700,875 / ₹X) × ₹393,350
+- Iceberg Lettuce Sales KG = 15,000 kg
+- Iceberg Lettuce Allocation = (15,000 / X) × ₹393,350
 ```
 
 **Step 3: Result**
-- Each product receives a proportional share based on its sales value (revenue)
-- Higher revenue products get more allocation
-- Lower revenue products get less allocation
+- Each product receives a proportional share based on its sales weight (quantity)
+- Higher quantity products get more allocation
+- Lower quantity products get less allocation
 
 ---
 
@@ -691,14 +691,14 @@ Baby Corn Allocation = (Y / Z) × ₹1,556,118
 - Outsourced portion: 19,791.0 kg (Production), 19,751.70 kg (Sales), ₹2,488,920 (Sales Value), ₹1,182,131 (Purchase Value)
 
 **Allocations:**
-1. **FIXED COST CAT - I**: Based on Sales Value → (₹211,955 + ₹2,488,920) / Total Sales Value × ₹393,350
+1. **FIXED COST CAT - I**: Based on Sales KG → (1,682.30 + 19,751.70) / Total Sales KG × ₹393,350
 2. **FIXED COST CAT - II (Greens)**: Based on Production KG → 1,682.30 / Total Greens Production × ₹703,791
 3. **FIXED COST CAT - II (Aggregation)**: Based on Production KG → 19,791.0 / Total Outsourced Production × ₹422,275
 4. **VARIABLE COST - OPEN FIELD**: Based on Production KG → 1,682.30 / Total Open Field Production × ₹344,751
 5. **VARIABLE COST - PACKING**: Based on Handled KG → (1,682.30 + 19,791.0) / Total Handled KG × ₹813,443
 6. **VARIABLE COST - AGGREGATION**: Based on Purchase KG → 19,791.0 / Total Purchase KG × ₹1,556,118
 7. **DISTRIBUTION COST**: Based on Sales KG → (1,682.30 + 19,751.70) / Total Sales KG × ₹1,518,289
-8. **MARKETING**: Based on Sales Value → (₹211,955 + ₹2,488,920) / Total Sales Value × ₹221,594
+8. **MARKETING**: Based on Sales KG → (1,682.30 + 19,751.70) / Total Sales KG × ₹221,594
 9. **VEHICLE RUNNING**: Based on Handled KG → (1,682.30 + 19,751.70) / Total Handled KG × ₹3,144,393
 10. **OTHERS**: Based on Sales KG → (1,682.30 + 19,751.70) / Total Sales KG × ₹410,219
 11. **WASTAGE**: 
