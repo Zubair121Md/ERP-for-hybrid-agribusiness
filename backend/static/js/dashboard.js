@@ -1264,10 +1264,26 @@ function displayCostBreakdownModal(breakdown) {
         </div>
     `;
     
+    // Remove any existing modal first
+    const existingModal = document.getElementById('costBreakdownModal');
+    if (existingModal) {
+        existingModal.remove();
+    }
+    
     // Add modal to page
     const modalContainer = document.createElement('div');
     modalContainer.innerHTML = modalHtml;
-    document.body.appendChild(modalContainer.firstElementChild);
+    const modalElement = modalContainer.firstElementChild;
+    document.body.appendChild(modalElement);
+    
+    // Ensure modal is visible
+    console.log('✅ Modal added to DOM');
+    
+    // Add close button handler
+    const closeBtn = modalElement.querySelector('.close');
+    if (closeBtn) {
+        closeBtn.addEventListener('click', closeCostBreakdownModal);
+    }
 }
 
 function closeCostBreakdownModal() {
