@@ -69,10 +69,20 @@ function showTab(tabName) {
     });
     
     // Show selected tab content
-    document.getElementById(tabName).classList.add('active');
+    const tabElement = document.getElementById(tabName);
+    if (!tabElement) {
+        console.error(`❌ Tab element not found: ${tabName}`);
+        return;
+    }
+    tabElement.classList.add('active');
     
     // Add active class to clicked nav item
-    document.querySelector(`[data-tab="${tabName}"]`).classList.add('active');
+    const navItem = document.querySelector(`[data-tab="${tabName}"]`);
+    if (navItem) {
+        navItem.classList.add('active');
+    } else {
+        console.error(`❌ Nav item not found for tab: ${tabName}`);
+    }
     
     // Update page title and subtitle
     const titles = {
@@ -82,7 +92,8 @@ function showTab(tabName) {
         'costs': { title: 'Costs', subtitle: 'Manage Operational Costs' },
         'allocation': { title: 'Allocation', subtitle: 'Cost Distribution Analysis' },
         'reports': { title: 'Reports', subtitle: 'Generate & Export Reports' },
-        'excel-upload': { title: 'Excel Upload', subtitle: 'Import Data from Excel Files' },
+        'data-upload': { title: 'Data Upload', subtitle: 'Upload Sales & P&L Data' },
+        'harvest-mapping': { title: 'Harvest & Mapping', subtitle: 'Upload Harvest Data & Product-Section Mappings' },
         'settings': { title: 'Settings', subtitle: 'System Configuration' }
     };
     
@@ -101,6 +112,9 @@ function showTab(tabName) {
         loadSales();
     } else if (tabName === 'costs') {
         loadCosts();
+    } else if (tabName === 'harvest-mapping') {
+        // No data loading needed for harvest-mapping tab
+        console.log('✅ Harvest & Mapping tab activated');
     }
 }
 
@@ -510,14 +524,45 @@ async function loadCosts() {
     }
 }
 
+// Initialize Cost Items function removed - use cost sheet upload instead
+
 // Display costs
 function displayCosts(costs) {
     const container = document.getElementById('costs-table');
     
     if (costs.length === 0) {
-        container.innerHTML = '<p>No costs found for this month. Add some costs!</p>';
+        container.innerHTML = '<p>No costs found. Upload a cost sheet Excel file to add costs.</p>';
         return;
     }
+    
+    // Organize costs by category (like MD file structure)
+    const categoryHeadings = {
+        'fixed_cost_cat_i': '1. FIXED COST CAT - I',
+        'fixed_cost_cat_ii': 'FIXED COST CAT - II',
+        'variable_cost_open_field': 'A) OPEN FIELD',
+        'variable_cost_lettuce': 'B) LETTUCE',
+        'variable_cost_strawberry': 'C) STRAWBERRY',
+        'variable_cost_raspberry': 'D) RASPBERRY & BLUEBERRY',
+        'variable_cost_packing': 'E) PACKING',
+        'variable_cost_aggregation': 'F) AGGREGATION',
+        'distribution_cost': '3. DISTRIBUTION COST',
+        'marketing_expenses': '4. MARKETING EXPENSES',
+        'vehicle_running_cost': '5. VEHICLE RUNNING COST',
+        'others': '6. OTHERS',
+        'wastage': '7. WASTAGE & SHORTAGE',
+        'purchase_accounts': '8. PURCHASE ACCOUNTS',
+        'pl_import': 'P&L Imported Costs'
+    };
+    
+    // Group costs by category
+    const costsByCategory = {};
+    costs.forEach(cost => {
+        const category = cost.category || 'other';
+        if (!costsByCategory[category]) {
+            costsByCategory[category] = [];
+        }
+        costsByCategory[category].push(cost);
+    });
     
     let tableHTML = `
         <table class="table">
@@ -535,10 +580,20 @@ function displayCosts(costs) {
             <tbody>
     `;
     
-    costs.forEach(cost => {
+    // Display costs organized by category headings
+    Object.keys(categoryHeadings).forEach(categoryKey => {
+        if (costsByCategory[categoryKey] && costsByCategory[categoryKey].length > 0) {
+            const heading = categoryHeadings[categoryKey];
+            tableHTML += `
+                <tr style="background-color: #f0f0f0; font-weight: bold;">
+                    <td colspan="7" style="padding: 10px; font-size: 14px;">${heading}</td>
+                </tr>
+            `;
+            
+            costsByCategory[categoryKey].forEach(cost => {
         tableHTML += `
             <tr>
-                <td><strong>${cost.name}</strong></td>
+                        <td style="padding-left: 20px;">${cost.name}</td>
                 <td>₹${formatNumber(cost.amount)}</td>
                 <td><span class="badge badge-info">${cost.applies_to}</span></td>
                 <td>${cost.cost_type}</td>
@@ -554,6 +609,40 @@ function displayCosts(costs) {
                 </td>
             </tr>
         `;
+            });
+        }
+    });
+    
+    // Display any costs not in predefined categories
+    Object.keys(costsByCategory).forEach(category => {
+        if (!categoryHeadings[category] && costsByCategory[category].length > 0) {
+            tableHTML += `
+                <tr style="background-color: #f0f0f0; font-weight: bold;">
+                    <td colspan="7" style="padding: 10px; font-size: 14px;">Other Costs</td>
+                </tr>
+            `;
+            
+            costsByCategory[category].forEach(cost => {
+                tableHTML += `
+                    <tr>
+                        <td style="padding-left: 20px;">${cost.name}</td>
+                        <td>₹${formatNumber(cost.amount)}</td>
+                        <td><span class="badge badge-info">${cost.applies_to}</span></td>
+                        <td>${cost.cost_type}</td>
+                        <td>${cost.basis}</td>
+                        <td><span class="badge badge-secondary">${cost.category}</span></td>
+                        <td>
+                            <button class="btn btn-sm btn-secondary" onclick="editCost(${cost.id})">
+                                <i class="fas fa-edit"></i>
+                            </button>
+                            <button class="btn btn-sm btn-danger" onclick="deleteCost(${cost.id})">
+                                <i class="fas fa-trash"></i>
+                            </button>
+                        </td>
+                    </tr>
+                `;
+            });
+        }
     });
     
     tableHTML += '</tbody></table>';
