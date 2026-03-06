@@ -1186,6 +1186,7 @@ function displayCostBreakdownModal(breakdown) {
                                 <th>Basis</th>
                                 <th>Allocated Amount</th>
                                 <th>Total Cost Amount</th>
+                                <th>Calculation</th>
                             </tr>
                         </thead>
                         <tbody>
@@ -1197,6 +1198,12 @@ function displayCostBreakdownModal(breakdown) {
                                     <td>${cost.basis}</td>
                                     <td>₹${formatNumber(cost.amount)}</td>
                                     <td>₹${formatNumber(cost.total_cost_amount)}</td>
+                                    <td style="font-size: 0.85em; color: #666;">
+                                        ${cost.calculation ? `
+                                            <strong>${cost.calculation.formula}</strong><br>
+                                            <small>Product: ${cost.calculation.product_basis.toFixed(2)} ${cost.calculation.basis_name} (${cost.calculation.percentage.toFixed(2)}%)</small>
+                                        ` : 'N/A'}
+                                    </td>
                                 </tr>
                             `).join('')}
                         </tbody>
@@ -1205,19 +1212,50 @@ function displayCostBreakdownModal(breakdown) {
                                 <td colspan="4">Total Allocated Costs</td>
                                 <td>₹${formatNumber(breakdown.total_allocated)}</td>
                                 <td></td>
+                                <td></td>
                             </tr>
                             <tr style="font-weight: bold; background-color: #e8f5e9;">
                                 <td colspan="4">Direct Cost</td>
                                 <td>₹${formatNumber(breakdown.direct_cost)}</td>
+                                <td></td>
                                 <td></td>
                             </tr>
                             <tr style="font-weight: bold; background-color: #fff3e0;">
                                 <td colspan="4">Total Cost</td>
                                 <td>₹${formatNumber(breakdown.total_cost)}</td>
                                 <td></td>
+                                <td></td>
                             </tr>
                         </tfoot>
                     </table>
+                    
+                    ${breakdown.skipped_costs && breakdown.skipped_costs.length > 0 ? `
+                    <h3>Skipped Costs (Not Allocated)</h3>
+                    <table class="table">
+                        <thead>
+                            <tr>
+                                <th>Cost Name</th>
+                                <th>Category</th>
+                                <th>Applies To</th>
+                                <th>Basis</th>
+                                <th>Total Cost Amount</th>
+                                <th>Reason for Skipping</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            ${breakdown.skipped_costs.map(cost => `
+                                <tr style="background-color: #fff3cd;">
+                                    <td><strong>${cost.cost_name}</strong></td>
+                                    <td>${cost.category}</td>
+                                    <td><span class="badge ${cost.applies_to === 'inhouse' ? 'badge-success' : cost.applies_to === 'outsourced' ? 'badge-info' : 'badge-secondary'}">${cost.applies_to}</span></td>
+                                    <td>${cost.basis}</td>
+                                    <td>₹${formatNumber(cost.total_cost_amount)}</td>
+                                    <td style="color: #856404;"><em>${cost.skip_reason}</em></td>
+                                </tr>
+                            `).join('')}
+                        </tbody>
+                    </table>
+                    ` : ''}
                 </div>
                 <div class="modal-footer">
                     <button class="btn btn-secondary" onclick="closeCostBreakdownModal()">Close</button>

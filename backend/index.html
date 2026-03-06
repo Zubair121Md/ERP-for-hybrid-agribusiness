@@ -1839,39 +1839,23 @@
         console.log('🔄 Updating P&L preview...');
         
         try {
-            // Get P&L cost summary from backend
-            const response = await fetch('/api/pl-cost-summary');
-            const summary = await response.json();
+            const response = await fetch('/api/costs');
+            const costs = await response.json();
             
-            if (summary.allocation_run) {
-                // Show actual allocated amounts
-                document.getElementById('pl-total-costs').textContent = `₹${summary.total_allocatable_costs.toLocaleString('en-IN', {maximumFractionDigits: 2})}`;
-                document.getElementById('pl-inhouse-costs').textContent = `₹${summary.inhouse_allocated.toLocaleString('en-IN', {maximumFractionDigits: 2})}`;
-                document.getElementById('pl-outsourced-costs').textContent = `₹${summary.outsourced_allocated.toLocaleString('en-IN', {maximumFractionDigits: 2})}`;
-                
-                console.log('✅ P&L preview updated (after allocation)');
-                console.log(`   Total Allocatable Costs: ₹${summary.total_allocatable_costs.toLocaleString()}`);
-                console.log(`   Inhouse Allocated: ₹${summary.inhouse_allocated.toLocaleString()}`);
-                console.log(`   Outsourced Allocated: ₹${summary.outsourced_allocated.toLocaleString()}`);
-                console.log(`   Purchase Accounts (Direct): ₹${summary.purchase_accounts.toLocaleString()} (not allocated)`);
-                if (summary.unallocated > 0.01) {
-                    console.log(`   ⚠️  Unallocated: ₹${summary.unallocated.toLocaleString()} (costs not matched to products)`);
-                }
-            } else {
-                // Show cost amounts (before allocation)
-                // Note: "both" costs will be split during allocation
-                const estimatedInhouse = summary.inhouse_costs + (summary.both_costs * 0.5);
-                const estimatedOutsourced = summary.outsourced_costs + (summary.both_costs * 0.5);
-                
-                document.getElementById('pl-total-costs').textContent = `₹${summary.total_allocatable_costs.toLocaleString('en-IN', {maximumFractionDigits: 2})}`;
-                document.getElementById('pl-inhouse-costs').textContent = `₹${estimatedInhouse.toLocaleString('en-IN', {maximumFractionDigits: 2})}`;
-                document.getElementById('pl-outsourced-costs').textContent = `₹${estimatedOutsourced.toLocaleString('en-IN', {maximumFractionDigits: 2})}`;
-                
-                console.log('✅ P&L preview updated (before allocation)');
-                console.log(`   Total Allocatable Costs: ₹${summary.total_allocatable_costs.toLocaleString()}`);
-                console.log(`   Purchase Accounts (Direct): ₹${summary.purchase_accounts.toLocaleString()} (excluded from allocation)`);
-                console.log(`   Note: Run allocation to see actual allocated amounts`);
-            }
+            // Filter P&L costs (from cost sheet upload)
+            const plCosts = costs.filter(cost => cost.source_file === 'cost_sheet_upload' || cost.source_file === 'pl_upload');
+            
+            // Calculate totals
+            const totalCosts = plCosts.reduce((sum, cost) => sum + cost.amount, 0);
+            const inhouseCosts = plCosts.filter(cost => cost.applies_to === 'inhouse').reduce((sum, cost) => sum + cost.amount, 0);
+            const outsourcedCosts = plCosts.filter(cost => cost.applies_to === 'outsourced').reduce((sum, cost) => sum + cost.amount, 0);
+            
+            // Update preview cards
+            document.getElementById('pl-total-costs').textContent = `₹${totalCosts.toLocaleString()}`;
+            document.getElementById('pl-inhouse-costs').textContent = `₹${inhouseCosts.toLocaleString()}`;
+            document.getElementById('pl-outsourced-costs').textContent = `₹${outsourcedCosts.toLocaleString()}`;
+            
+            console.log('✅ P&L preview updated');
         } catch (error) {
             console.error('💥 Error updating P&L preview:', error);
         }

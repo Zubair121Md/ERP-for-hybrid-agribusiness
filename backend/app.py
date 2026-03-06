@@ -1404,74 +1404,9 @@ async def allocate_costs(month: str, db: Session = Depends(get_db)):
     result = engine.allocate_costs_for_month(month)
     return result
 
-@app.get("/api/pl-cost-summary")
-async def get_pl_cost_summary(db: Session = Depends(get_db)):
-    """Get P&L cost summary showing total costs and allocated amounts"""
-    # Get all costs
-    all_costs = db.query(Cost).all()
-    
-    # Filter P&L costs
-    pl_costs = [c for c in all_costs if c.source_file in ['cost_sheet_upload', 'pl_upload']]
-    
-    # Exclude PURCHASE ACCOUNTS (direct costs) - they are not allocated
-    allocatable_costs = [c for c in pl_costs if c.basis != "direct_cost" and "PURCHASE ACCOUNTS" not in (c.name or "").upper()]
-    
-    # Calculate total allocatable costs
-    total_allocatable = sum(c.amount for c in allocatable_costs)
-    
-    # Get actual allocated amounts if allocation has been run
-    allocations_exist = db.query(Allocation).count() > 0
-    
-    if allocations_exist:
-        # Get actual allocated amounts by source
-        try:
-            inhouse_allocations = db.query(Allocation).join(MonthlySale).join(Product).filter(Product.source == "inhouse").all()
-            outsourced_allocations = db.query(Allocation).join(MonthlySale).join(Product).filter(Product.source == "outsourced").all()
-            
-            inhouse_allocated = sum(a.allocated_amount for a in inhouse_allocations)
-            outsourced_allocated = sum(a.allocated_amount for a in outsourced_allocations)
-            total_allocated = inhouse_allocated + outsourced_allocated
-            
-            # Get PURCHASE ACCOUNTS amount (direct costs)
-            purchase_accounts = [c for c in pl_costs if c.basis == "direct_cost" or "PURCHASE ACCOUNTS" in (c.name or "").upper()]
-            purchase_accounts_total = sum(c.amount for c in purchase_accounts)
-            
-            return {
-                "total_pl_costs": sum(c.amount for c in pl_costs),  # Total including PURCHASE ACCOUNTS
-                "total_allocatable_costs": total_allocatable,  # Excluding PURCHASE ACCOUNTS
-                "purchase_accounts": purchase_accounts_total,  # Direct costs (not allocated)
-                "total_allocated": total_allocated,  # Actual allocated amount
-                "inhouse_allocated": inhouse_allocated,
-                "outsourced_allocated": outsourced_allocated,
-                "unallocated": total_allocatable - total_allocated,  # Costs not allocated (should be 0 or very small)
-                "allocation_run": True
-            }
-        except Exception as e:
-            print(f"⚠️  Error getting allocation summary: {str(e)}")
-            # Fall through to show cost amounts
-    
-    # If allocation hasn't been run, show cost amounts (excluding direct costs)
-    inhouse_costs = sum(c.amount for c in allocatable_costs if c.applies_to == "inhouse")
-    outsourced_costs = sum(c.amount for c in allocatable_costs if c.applies_to == "outsourced")
-    both_costs = sum(c.amount for c in allocatable_costs if c.applies_to == "both")
-    
-    # Get PURCHASE ACCOUNTS amount
-    purchase_accounts = [c for c in pl_costs if c.basis == "direct_cost" or "PURCHASE ACCOUNTS" in (c.name or "").upper()]
-    purchase_accounts_total = sum(c.amount for c in purchase_accounts)
-    
-    return {
-        "total_pl_costs": sum(c.amount for c in pl_costs),  # Total including PURCHASE ACCOUNTS
-        "total_allocatable_costs": total_allocatable,  # Excluding PURCHASE ACCOUNTS
-        "purchase_accounts": purchase_accounts_total,  # Direct costs (not allocated)
-        "inhouse_costs": inhouse_costs,  # Cost amounts (before allocation)
-        "outsourced_costs": outsourced_costs,  # Cost amounts (before allocation)
-        "both_costs": both_costs,  # Costs that apply to both (will be split during allocation)
-        "allocation_run": False
-    }
-
 @app.get("/api/product-cost-breakdown/{product_id}")
 async def get_product_cost_breakdown(product_id: int, db: Session = Depends(get_db)):
-    """Get detailed cost breakdown for a specific product"""
+    """Get detailed cost breakdown for a specific product including skipped costs and calculation details"""
     # Get product
     product = db.query(Product).filter(Product.id == product_id).first()
     if not product:
@@ -1484,6 +1419,18 @@ async def get_product_cost_breakdown(product_id: int, db: Session = Depends(get_
     
     # Get all allocations for this product
     allocations = db.query(Allocation).filter(Allocation.product_id == product_id).all()
+    
+    # Get all costs to check which ones were skipped
+    all_costs = db.query(Cost).all()
+    
+    # Create allocation engine to compute basis values
+    engine = CostAllocationEngine(db)
+    
+    # Get all products and sales for basis calculation
+    all_products = db.query(Product).filter(Product.is_active == True).all()
+    product_map = {p.id: p for p in all_products}
+    all_sales = db.query(MonthlySale).all()
+    sales_map = {s.product_id: s for s in all_sales}
     
     # Group allocations by cost category and type
     cost_breakdown = {
@@ -1502,12 +1449,42 @@ async def get_product_cost_breakdown(product_id: int, db: Session = Depends(get_
             "outsourced_only": [],
             "common": []
         },
-        "detailed_costs": []
+        "detailed_costs": [],
+        "skipped_costs": []
     }
     
-    # Process each allocation
+    # Create a set of allocated cost IDs for quick lookup
+    allocated_cost_ids = {a.cost_id for a in allocations}
+    
+    # Process each allocation with calculation details
     for allocation in allocations:
         cost = allocation.cost
+        
+        # Calculate basis values for this product
+        product_basis = engine._compute_product_basis(cost, sale)
+        
+        # Get applicable products for this cost
+        applicable_products = engine._get_applicable_products(cost, product_map, sales_map)
+        
+        # Calculate total basis across all applicable products
+        total_basis = engine._compute_total_basis(cost, applicable_products, sales_map)
+        
+        # Calculate percentage
+        percentage = (product_basis / total_basis * 100) if total_basis > 0 else 0
+        
+        # Build calculation formula
+        basis_name = {
+            "sales_value": "Sales Value",
+            "sales_kg": "Sales KG",
+            "production_kg": "Production KG",
+            "handled_kg": "Handled KG",
+            "purchase_kg": "Purchase KG",
+            "direct_cost": "Direct Cost",
+            "hybrid": "Hybrid (Weight + Profit)"
+        }.get(cost.basis, cost.basis)
+        
+        calculation_formula = f"({product_basis:.2f} {basis_name} / {total_basis:.2f} Total {basis_name}) × ₹{cost.amount:,.2f} = ₹{allocation.allocated_amount:,.2f}"
+        
         cost_info = {
             "cost_id": cost.id,
             "cost_name": cost.name,
@@ -1515,7 +1492,14 @@ async def get_product_cost_breakdown(product_id: int, db: Session = Depends(get_
             "applies_to": cost.applies_to,
             "basis": cost.basis,
             "amount": allocation.allocated_amount,
-            "total_cost_amount": cost.amount
+            "total_cost_amount": cost.amount,
+            "calculation": {
+                "product_basis": product_basis,
+                "total_basis": total_basis,
+                "percentage": percentage,
+                "formula": calculation_formula,
+                "basis_name": basis_name
+            }
         }
         
         # Add to detailed costs
@@ -1538,6 +1522,83 @@ async def get_product_cost_breakdown(product_id: int, db: Session = Depends(get_
             cost_breakdown["costs_by_type"]["outsourced_only"].append(cost_info)
         else:
             cost_breakdown["costs_by_type"]["common"].append(cost_info)
+    
+    # Check for skipped costs
+    for cost in all_costs:
+        if cost.id in allocated_cost_ids:
+            continue  # Already allocated
+        
+        skip_reason = None
+        
+        # Check if cost was skipped due to direct_cost basis
+        if cost.basis == "direct_cost" or "PURCHASE ACCOUNTS" in (cost.name or "").upper():
+            skip_reason = "Direct cost - not allocated (used as direct purchase cost for outsourced products)"
+        
+        # Check if product doesn't match applies_to
+        elif cost.applies_to == "inhouse" and product.source != "inhouse":
+            skip_reason = f"Applies to 'inhouse' products only, but this product is '{product.source}'"
+        elif cost.applies_to == "outsourced" and product.source != "outsourced":
+            skip_reason = f"Applies to 'outsourced' products only, but this product is '{product.source}'"
+        
+        # Check if product doesn't match section-based filtering (for VARIABLE COST)
+        elif "VARIABLE COST" in (cost.name or "").upper():
+            applicable_products = engine._get_applicable_products(cost, product_map, sales_map)
+            if product_id not in applicable_products:
+                # Determine why it was excluded
+                cost_name_upper = cost.name.upper()
+                if "LETTUCE" in cost_name_upper:
+                    if "LETTUCE" not in product.name.upper():
+                        skip_reason = "VARIABLE COST - LETTUCE only applies to products with 'lettuce' in name"
+                    else:
+                        skip_reason = "Product not matched to LETTUCE section"
+                elif "STRAWBERRY" in cost_name_upper:
+                    if "STRAWBERRY" not in product.name.upper():
+                        skip_reason = "VARIABLE COST - STRAWBERRY only applies to products with 'strawberry' in name"
+                    else:
+                        skip_reason = "Product not matched to STRAWBERRY section"
+                elif "OPEN FIELD" in cost_name_upper:
+                    skip_reason = "VARIABLE COST - OPEN FIELD only applies to products mapped to 'Open Field' section"
+                elif "POLYHOUSE" in cost_name_upper or "LETTUCE" in cost_name_upper:
+                    skip_reason = "VARIABLE COST - POLYHOUSE only applies to products mapped to Polyhouse sections (C, D, E)"
+                elif "RASPBERRY" in cost_name_upper or "BLUEBERRY" in cost_name_upper:
+                    if "RASPBERRY" not in product.name.upper() and "BLUEBERRY" not in product.name.upper():
+                        skip_reason = "VARIABLE COST - RASPBERRY/BLUEBERRY only applies to products with 'raspberry' or 'blueberry' in name"
+                    else:
+                        skip_reason = "Product not matched to RASPBERRY/BLUEBERRY section"
+                elif "AGGREGATION" in cost_name_upper:
+                    if product.source != "outsourced":
+                        skip_reason = "VARIABLE COST - AGGREGATION only applies to outsourced products"
+                    else:
+                        skip_reason = "Product not matched to AGGREGATION section"
+                else:
+                    skip_reason = "Product not matched to this VARIABLE COST section"
+        
+        # Check if basis calculation would result in zero
+        if not skip_reason:
+            product_basis = engine._compute_product_basis(cost, sale)
+            if product_basis == 0:
+                skip_reason = f"Product basis is 0 (basis: {cost.basis})"
+            else:
+                applicable_products = engine._get_applicable_products(cost, product_map, sales_map)
+                if not applicable_products:
+                    skip_reason = "No applicable products found for this cost"
+                else:
+                    total_basis = engine._compute_total_basis(cost, applicable_products, sales_map)
+                    if total_basis == 0:
+                        skip_reason = "Total basis is 0 (no products have basis value)"
+                    elif product_id not in applicable_products:
+                        skip_reason = "Product not in applicable products list"
+        
+        if skip_reason:
+            cost_breakdown["skipped_costs"].append({
+                "cost_id": cost.id,
+                "cost_name": cost.name,
+                "category": cost.category,
+                "applies_to": cost.applies_to,
+                "basis": cost.basis,
+                "total_cost_amount": cost.amount,
+                "skip_reason": skip_reason
+            })
     
     # Calculate totals
     cost_breakdown["total_cost"] = sale.direct_cost + cost_breakdown["total_allocated"]
