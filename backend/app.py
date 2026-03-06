@@ -3908,49 +3908,49 @@ def parse_purple_patch_pl(file_path, db):
             else:
                 # Create new cost
                 if item_type == 'I':
-                # 100% inhouse
-                cost = Cost(
-                    name=particulars,
-                    amount=amount,
-                    applies_to="inhouse",
-                    cost_type="common",
-                    basis="hybrid",
+                    # 100% inhouse
+                    cost = Cost(
+                        name=particulars,
+                        amount=amount,
+                        applies_to="inhouse",
+                        cost_type="common",
+                        basis="hybrid",
                         month="2025-04",  # Use standard format
-                    is_fixed="variable",
-                    category="pl_import",
-                    pl_classification="I",
-                    original_amount=amount,
-                    allocation_ratio=1.0,
-                    source_file="pl_upload",
-                    pl_period=period
-                )
-                db.add(cost)
-                costs_created += 1
-                print(f"   📦 Created I cost: {particulars} = ₹{amount:,.2f} (100% inhouse)")
+                        is_fixed="variable",
+                        category="pl_import",
+                        pl_classification="I",
+                        original_amount=amount,
+                        allocation_ratio=1.0,
+                        source_file="pl_upload",
+                        pl_period=period
+                    )
+                    db.add(cost)
+                    costs_created += 1
+                    print(f"   📦 Created I cost: {particulars} = ₹{amount:,.2f} (100% inhouse)")
                 
-            elif item_type == 'O':
-                # 100% outsourced
-                cost = Cost(
-                    name=particulars,
-                    amount=amount,
-                    applies_to="outsourced",
-                    cost_type="common",
-                    basis="hybrid",
-                    month="2025-04",
-                    is_fixed="variable",
-                    category="pl_import",
-                    pl_classification="O",
-                    original_amount=amount,
-                    allocation_ratio=1.0,
-                    source_file="pl_upload",
-                    pl_period=period
-                )
-                db.add(cost)
-                costs_created += 1
-                print(f"   📦 Created O cost: {particulars} = ₹{amount:,.2f} (100% outsourced)")
+                elif item_type == 'O':
+                    # 100% outsourced
+                    cost = Cost(
+                        name=particulars,
+                        amount=amount,
+                        applies_to="outsourced",
+                        cost_type="common",
+                        basis="hybrid",
+                        month="2025-04",
+                        is_fixed="variable",
+                        category="pl_import",
+                        pl_classification="O",
+                        original_amount=amount,
+                        allocation_ratio=1.0,
+                        source_file="pl_upload",
+                        pl_period=period
+                    )
+                    db.add(cost)
+                    costs_created += 1
+                    print(f"   📦 Created O cost: {particulars} = ₹{amount:,.2f} (100% outsourced)")
                 
-            else:  # B - single pooled cost; allocate later by hybrid across all products
-                cost_both = Cost(
+                else:  # B - single pooled cost; allocate later by hybrid across all products
+                    cost_both = Cost(
                     name=particulars,
                     amount=amount,
                     applies_to="both",
