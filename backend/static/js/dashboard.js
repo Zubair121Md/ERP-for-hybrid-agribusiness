@@ -1049,21 +1049,21 @@ function displayAllocationResults(result) {
 // Cost Breakdown Modal Functions
 async function showCostBreakdown(productId) {
     try {
-        showLoading('allocation-results');
+        console.log('🔍 Fetching cost breakdown for product ID:', productId);
         
         const response = await fetch(`${API_BASE}/product-cost-breakdown/${productId}`);
         
         if (!response.ok) {
-            throw new Error('Failed to fetch cost breakdown');
+            const errorData = await response.json().catch(() => ({ detail: 'Unknown error' }));
+            throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
         }
         
         const breakdown = await response.json();
+        console.log('✅ Cost breakdown received:', breakdown);
         displayCostBreakdownModal(breakdown);
     } catch (error) {
-        console.error('Error fetching cost breakdown:', error);
-        showAlert('Error loading cost breakdown: ' + error.message, 'error');
-    } finally {
-        hideLoading('allocation-results');
+        console.error('❌ Error fetching cost breakdown:', error);
+        alert('Error loading cost breakdown: ' + error.message);
     }
 }
 
@@ -1239,13 +1239,13 @@ function closeCostBreakdownModal() {
     }
 }
 
-// Close modal when clicking outside
-window.onclick = function(event) {
+// Close modal when clicking outside (but don't override existing onclick handlers)
+document.addEventListener('click', function(event) {
     const modal = document.getElementById('costBreakdownModal');
-    if (event.target == modal) {
+    if (modal && event.target == modal) {
         closeCostBreakdownModal();
     }
-}
+});
 
 // Report functions
 async function generateReport() {
