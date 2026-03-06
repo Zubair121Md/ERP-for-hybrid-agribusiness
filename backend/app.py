@@ -3530,7 +3530,7 @@ def parse_purple_patch_pl(file_path, db):
                             print(f"📅 Period detected: {period} (from row {idx+1}, col {col_idx+1})")
                             break
                     if period != "Unknown":
-                    break
+                        break
             if period != "Unknown":
                 break
         
@@ -3625,10 +3625,10 @@ def parse_purple_patch_pl(file_path, db):
                             # Check if amount is small (likely from overview table)
                             amount = parse_numeric_robust(amount_raw)
                             if amount < 1000:
-                    continue
-                
-                        # Use robust number parser
-                        amount = parse_numeric_robust(amount_raw)
+                                continue
+                            
+                            # Use robust number parser
+                            amount = parse_numeric_robust(amount_raw)
                         
                         if particulars and amount != 0:
                             # Normalize the particulars name for matching
@@ -3649,9 +3649,7 @@ def parse_purple_patch_pl(file_path, db):
                                 
                                 if not matched:
                                     print(f"   ⏭️  Skipped (not in whitelist): {particulars}")
-                                    continue
-                            
-                            # Skip revenue/trading account items (double check)
+                                    continue# Skip revenue/trading account items (double check)
                             if particulars in exclude_items:
                                 print(f"   ⏭️  Skipped revenue item: {particulars}")
                                 continue
@@ -3681,7 +3679,7 @@ def parse_purple_patch_pl(file_path, db):
                         if pd.isna(particulars_raw) or str(particulars_raw).strip() == '':
                             continue
                         
-                                        particulars = str(particulars_raw).strip()
+                        particulars = str(particulars_raw).strip()
                         
                         # Skip category headers
                         category_headers = [
