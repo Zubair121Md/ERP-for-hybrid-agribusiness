@@ -3745,8 +3745,8 @@ def parse_purple_patch_pl(file_path, db):
                                         'type': template_mapping.get(particulars, 'B')
                                     })
                                 print(f"   📊 Found (Strategy 3): {particulars} = ₹{amount:,.2f}")
-                            except (IndexError, KeyError, ValueError):
-                                continue
+                        except (IndexError, KeyError, ValueError):
+                            continue
         
         # Strategy 3: Try column B (index 1) and C (index 2) as fallback
         if len(data_rows) == 0:
