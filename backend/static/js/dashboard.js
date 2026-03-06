@@ -1046,6 +1046,20 @@ function displayAllocationResults(result) {
     
     html += '</tbody></table>';
     container.innerHTML = html;
+    
+    // Add event delegation for product rows (in case onclick doesn't work)
+    const productRows = container.querySelectorAll('.product-row');
+    productRows.forEach(row => {
+        const productId = row.getAttribute('data-product-id');
+        if (productId) {
+            row.addEventListener('click', function(e) {
+                e.preventDefault();
+                e.stopPropagation();
+                console.log('🖱️ Row clicked, productId:', productId);
+                showCostBreakdown(parseInt(productId));
+            });
+        }
+    });
 }
 
 // Cost Breakdown Modal Functions
