@@ -1046,6 +1046,207 @@ function displayAllocationResults(result) {
     container.innerHTML = html;
 }
 
+// Cost Breakdown Modal Functions
+async function showCostBreakdown(productId) {
+    try {
+        showLoading('allocation-results');
+        
+        const response = await fetch(`${API_BASE}/product-cost-breakdown/${productId}`);
+        
+        if (!response.ok) {
+            throw new Error('Failed to fetch cost breakdown');
+        }
+        
+        const breakdown = await response.json();
+        displayCostBreakdownModal(breakdown);
+    } catch (error) {
+        console.error('Error fetching cost breakdown:', error);
+        showAlert('Error loading cost breakdown: ' + error.message, 'error');
+    } finally {
+        hideLoading('allocation-results');
+    }
+}
+
+function displayCostBreakdownModal(breakdown) {
+    // Create modal HTML
+    const modalHtml = `
+        <div id="costBreakdownModal" class="modal" style="display: block;">
+            <div class="modal-content" style="max-width: 900px; max-height: 90vh; overflow-y: auto;">
+                <div class="modal-header">
+                    <h2>Cost Breakdown: ${breakdown.product_name}</h2>
+                    <span class="close" onclick="closeCostBreakdownModal()">&times;</span>
+                </div>
+                <div class="modal-body">
+                    <div class="stats-grid" style="margin-bottom: 20px;">
+                        <div class="stat-card">
+                            <div class="stat-header">
+                                <span class="stat-title">Quantity</span>
+                            </div>
+                            <div class="stat-value">${formatQtyDisplay(breakdown.product_name, breakdown.unit || 'kg', breakdown.quantity)}</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-header">
+                                <span class="stat-title">Sale Price</span>
+                            </div>
+                            <div class="stat-value">₹${breakdown.sale_price}</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-header">
+                                <span class="stat-title">Revenue</span>
+                            </div>
+                            <div class="stat-value">₹${formatNumber(breakdown.revenue)}</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-header">
+                                <span class="stat-title">Total Cost</span>
+                            </div>
+                            <div class="stat-value">₹${formatNumber(breakdown.total_cost)}</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-header">
+                                <span class="stat-title">Cost per KG</span>
+                            </div>
+                            <div class="stat-value">₹${breakdown.cost_per_kg.toFixed(2)}</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-header">
+                                <span class="stat-title">Profit</span>
+                            </div>
+                            <div class="stat-value ${breakdown.profit >= 0 ? 'text-success' : 'text-danger'}">₹${formatNumber(breakdown.profit)}</div>
+                        </div>
+                    </div>
+                    
+                    <h3>Cost Breakdown by Category</h3>
+                    <table class="table">
+                        <thead>
+                            <tr>
+                                <th>Category</th>
+                                <th>Total Allocated</th>
+                                <th>Number of Costs</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            ${Object.entries(breakdown.costs_by_category).map(([category, data]) => `
+                                <tr>
+                                    <td><strong>${category}</strong></td>
+                                    <td>₹${formatNumber(data.total)}</td>
+                                    <td>${data.costs.length}</td>
+                                </tr>
+                            `).join('')}
+                        </tbody>
+                    </table>
+                    
+                    <h3>Cost Breakdown by Type</h3>
+                    <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; margin-bottom: 20px;">
+                        <div>
+                            <h4>Inhouse Only Costs</h4>
+                            <ul style="list-style: none; padding: 0;">
+                                ${breakdown.costs_by_type.inhouse_only.map(cost => `
+                                    <li style="padding: 5px 0; border-bottom: 1px solid #eee;">
+                                        <strong>${cost.cost_name}</strong><br>
+                                        <small>₹${formatNumber(cost.amount)} (${cost.basis})</small>
+                                    </li>
+                                `).join('')}
+                                ${breakdown.costs_by_type.inhouse_only.length === 0 ? '<li>None</li>' : ''}
+                            </ul>
+                        </div>
+                        <div>
+                            <h4>Outsourced Only Costs</h4>
+                            <ul style="list-style: none; padding: 0;">
+                                ${breakdown.costs_by_type.outsourced_only.map(cost => `
+                                    <li style="padding: 5px 0; border-bottom: 1px solid #eee;">
+                                        <strong>${cost.cost_name}</strong><br>
+                                        <small>₹${formatNumber(cost.amount)} (${cost.basis})</small>
+                                    </li>
+                                `).join('')}
+                                ${breakdown.costs_by_type.outsourced_only.length === 0 ? '<li>None</li>' : ''}
+                            </ul>
+                        </div>
+                        <div>
+                            <h4>Common Costs (Both)</h4>
+                            <ul style="list-style: none; padding: 0;">
+                                ${breakdown.costs_by_type.common.map(cost => `
+                                    <li style="padding: 5px 0; border-bottom: 1px solid #eee;">
+                                        <strong>${cost.cost_name}</strong><br>
+                                        <small>₹${formatNumber(cost.amount)} (${cost.basis})</small>
+                                    </li>
+                                `).join('')}
+                                ${breakdown.costs_by_type.common.length === 0 ? '<li>None</li>' : ''}
+                            </ul>
+                        </div>
+                    </div>
+                    
+                    <h3>Detailed Cost Allocation</h3>
+                    <table class="table">
+                        <thead>
+                            <tr>
+                                <th>Cost Name</th>
+                                <th>Category</th>
+                                <th>Applies To</th>
+                                <th>Basis</th>
+                                <th>Allocated Amount</th>
+                                <th>Total Cost Amount</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            ${breakdown.detailed_costs.map(cost => `
+                                <tr>
+                                    <td><strong>${cost.cost_name}</strong></td>
+                                    <td>${cost.category}</td>
+                                    <td><span class="badge ${cost.applies_to === 'inhouse' ? 'badge-success' : cost.applies_to === 'outsourced' ? 'badge-info' : 'badge-secondary'}">${cost.applies_to}</span></td>
+                                    <td>${cost.basis}</td>
+                                    <td>₹${formatNumber(cost.amount)}</td>
+                                    <td>₹${formatNumber(cost.total_cost_amount)}</td>
+                                </tr>
+                            `).join('')}
+                        </tbody>
+                        <tfoot>
+                            <tr style="font-weight: bold; background-color: #f5f5f5;">
+                                <td colspan="4">Total Allocated Costs</td>
+                                <td>₹${formatNumber(breakdown.total_allocated)}</td>
+                                <td></td>
+                            </tr>
+                            <tr style="font-weight: bold; background-color: #e8f5e9;">
+                                <td colspan="4">Direct Cost</td>
+                                <td>₹${formatNumber(breakdown.direct_cost)}</td>
+                                <td></td>
+                            </tr>
+                            <tr style="font-weight: bold; background-color: #fff3e0;">
+                                <td colspan="4">Total Cost</td>
+                                <td>₹${formatNumber(breakdown.total_cost)}</td>
+                                <td></td>
+                            </tr>
+                        </tfoot>
+                    </table>
+                </div>
+                <div class="modal-footer">
+                    <button class="btn btn-secondary" onclick="closeCostBreakdownModal()">Close</button>
+                </div>
+            </div>
+        </div>
+    `;
+    
+    // Add modal to page
+    const modalContainer = document.createElement('div');
+    modalContainer.innerHTML = modalHtml;
+    document.body.appendChild(modalContainer.firstElementChild);
+}
+
+function closeCostBreakdownModal() {
+    const modal = document.getElementById('costBreakdownModal');
+    if (modal) {
+        modal.remove();
+    }
+}
+
+// Close modal when clicking outside
+window.onclick = function(event) {
+    const modal = document.getElementById('costBreakdownModal');
+    if (event.target == modal) {
+        closeCostBreakdownModal();
+    }
+}
+
 // Report functions
 async function generateReport() {
     try {
