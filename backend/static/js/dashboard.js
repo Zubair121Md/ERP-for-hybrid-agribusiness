@@ -1048,22 +1048,36 @@ function displayAllocationResults(result) {
 
 // Cost Breakdown Modal Functions
 async function showCostBreakdown(productId) {
+    console.log('🔍 showCostBreakdown called with productId:', productId);
+    
+    if (!productId) {
+        console.error('❌ No productId provided');
+        showAlert('Error: Product ID is missing', 'error');
+        return;
+    }
+    
     try {
-        console.log('🔍 Fetching cost breakdown for product ID:', productId);
+        showLoading('allocation-results');
+        console.log('📡 Fetching from:', `${API_BASE}/product-cost-breakdown/${productId}`);
         
         const response = await fetch(`${API_BASE}/product-cost-breakdown/${productId}`);
         
+        console.log('📥 Response status:', response.status, response.statusText);
+        
         if (!response.ok) {
-            const errorData = await response.json().catch(() => ({ detail: 'Unknown error' }));
-            throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
+            const errorText = await response.text();
+            console.error('❌ Response error:', errorText);
+            throw new Error(`Failed to fetch cost breakdown: ${response.status} ${response.statusText}`);
         }
         
         const breakdown = await response.json();
-        console.log('✅ Cost breakdown received:', breakdown);
+        console.log('✅ Breakdown received:', breakdown);
         displayCostBreakdownModal(breakdown);
     } catch (error) {
         console.error('❌ Error fetching cost breakdown:', error);
-        alert('Error loading cost breakdown: ' + error.message);
+        showAlert('Error loading cost breakdown: ' + error.message, 'error');
+    } finally {
+        hideLoading('allocation-results');
     }
 }
 
@@ -1218,37 +1232,6 @@ function displayCostBreakdownModal(breakdown) {
                             </tr>
                         </tfoot>
                     </table>
-                    
-                    ${breakdown.skipped_costs && breakdown.skipped_costs.length > 0 ? `
-                    <h3 style="margin-top: 30px; color: #856404;">Skipped Costs (Not Allocated)</h3>
-                    <p style="color: #666; font-size: 0.9em; margin-bottom: 15px;">
-                        These costs exist in the system but were not allocated to this product. Reasons are provided below.
-                    </p>
-                    <table class="table">
-                        <thead>
-                            <tr>
-                                <th>Cost Name</th>
-                                <th>Category</th>
-                                <th>Applies To</th>
-                                <th>Basis</th>
-                                <th>Total Cost Amount</th>
-                                <th>Reason for Skipping</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            ${breakdown.skipped_costs.map(cost => `
-                                <tr style="background-color: #fff3cd;">
-                                    <td><strong>${cost.cost_name}</strong></td>
-                                    <td>${cost.category || 'N/A'}</td>
-                                    <td><span class="badge ${cost.applies_to === 'inhouse' ? 'badge-success' : cost.applies_to === 'outsourced' ? 'badge-info' : 'badge-secondary'}">${cost.applies_to || 'N/A'}</span></td>
-                                    <td>${cost.basis || 'N/A'}</td>
-                                    <td>₹${formatNumber(cost.total_cost_amount)}</td>
-                                    <td style="color: #856404;"><em>${cost.skip_reason}</em></td>
-                                </tr>
-                            `).join('')}
-                        </tbody>
-                    </table>
-                    ` : ''}
                 </div>
                 <div class="modal-footer">
                     <button class="btn btn-secondary" onclick="closeCostBreakdownModal()">Close</button>
@@ -1270,13 +1253,13 @@ function closeCostBreakdownModal() {
     }
 }
 
-// Close modal when clicking outside (but don't override existing onclick handlers)
-document.addEventListener('click', function(event) {
+// Close modal when clicking outside
+window.onclick = function(event) {
     const modal = document.getElementById('costBreakdownModal');
-    if (modal && event.target == modal) {
+    if (event.target == modal) {
         closeCostBreakdownModal();
     }
-});
+}
 
 // Report functions
 async function generateReport() {
