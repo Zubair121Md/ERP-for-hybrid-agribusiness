@@ -1772,195 +1772,233 @@ async def upload_excel(file: UploadFile = File(...), db: Session = Depends(get_d
                                 harvest_record = h
                                 break
                     
+                    # Strategy 5: Partial word matching (e.g., "Cabbage Red" matches "Micro Greens-Red Cabbage")
+                    # Split sales name into significant words and try to match harvest products containing those words
+                    if not harvest_record:
+                        import re
+                        # Extract significant words (longer than 2 chars, ignore common words)
+                        sales_words = [w.upper() for w in particulars.split() if len(w) > 2]
+                        # Remove common words that don't help matching
+                        common_words = {'MICRO', 'GREENS', 'WITH', 'LEAVES', 'BABY', 'FRESH', 'OOTY'}
+                        sales_words = [w for w in sales_words if w not in common_words]
+                        
+                        if sales_words:
+                            all_harvest = db.query(HarvestData).all()
+                            for h in all_harvest:
+                                h_upper = h.product_name.upper()
+                                # Check if all significant words from sales name appear in harvest name
+                                # Or if harvest name contains key words from sales name
+                                if all(word in h_upper for word in sales_words) or \
+                                   any(word in h_upper for word in sales_words if len(word) > 4):
+                                    harvest_record = h
+                                    print(f"   ✅ Matched '{particulars}' to harvest '{h.product_name}' (partial word match: {sales_words})")
+                                    break
+                    
                     if harvest_record:
                         harvest_qty = harvest_record.quantity
-                        print(f"   🌾 Found harvest data for '{particulars}': {harvest_qty} kg (inhouse)")
+                        print(f"   🌾 Found harvest data for '{particulars}': {harvest_qty} kg (matched to '{harvest_record.product_name}')")
                     
-                    # If we have harvest data and sales qty > harvest qty, split into inhouse + outsourced
-                    if harvest_qty > 0 and outward_qty > harvest_qty:
-                        # Split: harvest_qty = inhouse, (outward_qty - harvest_qty) = outsourced
-                        inhouse_qty = harvest_qty
-                        outsourced_qty = outward_qty - harvest_qty
-                        
-                        print(f"   🔄 Splitting {particulars}: {inhouse_qty} kg (inhouse) + {outsourced_qty} kg (outsourced)")
-                    
-                        # Create INHOUSE product and sale
-                        inhouse_product_name = f"{particulars} (Inhouse)"
-                        inhouse_product = db.query(Product).filter(Product.name == inhouse_product_name).first()
-                        if not inhouse_product:
-                            inhouse_product = Product(
-                                name=inhouse_product_name,
-                                source="inhouse",
-                                unit=outward_unit if outward_unit else "kg"
-                            )
-                            db.add(inhouse_product)
-                            db.commit()
-                            db.refresh(inhouse_product)
-                            products_created += 1
-                            print(f"   📦 Created product: {inhouse_product_name}")
-                        
-                        # Calculate inhouse sale price (proportional)
-                        inhouse_sale_price = outward_rate
-                        inhouse_sale = MonthlySale(
-                            product_id=inhouse_product.id,
-                            month=month,
-                            quantity=inhouse_qty,
-                            sale_price=inhouse_sale_price,
-                            direct_cost=0.0,  # No direct cost for inhouse production
-                            inward_quantity=0.0,
-                            inward_rate=0.0,
-                            inward_value=0.0,
-                            inhouse_production=inhouse_qty,
-                            wastage=0.0
-                        )
-                        db.add(inhouse_sale)
-                        sales_created += 1
-                        
-                        # Add to parsed data
-                        parsed_data.append(ExcelRowData(
-                            month=month,
-                            particulars=particulars,
-                            type="Inhouse",
-                            inward_quantity=0.0,
-                            inward_rate=0.0,
-                            inward_value=0.0,
-                            outward_quantity=inhouse_qty,
-                            outward_rate=inhouse_sale_price,
-                            outward_value=inhouse_qty * inhouse_sale_price,
-                            inhouse_production=inhouse_qty,
-                            wastage=0.0
-                        ))
-                        
-                        # Create OUTSOURCED product and sale
-                        outsourced_product_name = f"{particulars} (Outsourced)"
-                        outsourced_product = db.query(Product).filter(Product.name == outsourced_product_name).first()
-                        if not outsourced_product:
-                            outsourced_product = Product(
-                                name=outsourced_product_name,
-                                source="outsourced",
-                                unit=outward_unit if outward_unit else "kg"
-                            )
-                            db.add(outsourced_product)
-                            db.commit()
-                            db.refresh(outsourced_product)
-                            products_created += 1
-                            print(f"   📦 Created product: {outsourced_product_name}")
-                        
-                        # Calculate outsourced sale price (proportional)
-                        outsourced_sale_price = outward_rate
-                        
-                        # CRITICAL FIX: Calculate direct cost and inward quantities for outsourced portion
-                        # The outsourced portion represents the quantity that was PURCHASED (not harvested)
-                        # So: outsourced_inward_qty = outsourced_qty (the purchased portion)
-                        #     outsourced_direct_cost = outsourced_qty × purchase_rate
-                        if inward_rate > 0:
-                            # The outsourced quantity is what was purchased (not from harvest)
-                            # So inward_quantity for outsourced = outsourced_qty
-                            outsourced_inward_qty = outsourced_qty
-                            outsourced_inward_rate = inward_rate  # Purchase rate stays the same
-                            outsourced_inward_value = outsourced_inward_qty * outsourced_inward_rate
-                            outsourced_direct_cost = outsourced_inward_value
-                            
-                            print(f"   💰 Outsourced portion: {outsourced_qty} kg (purchased, not from harvest)")
-                            print(f"   💰 Purchase rate: ₹{inward_rate}/kg")
-                            print(f"   💰 Direct cost: ₹{outsourced_direct_cost:,.2f} ({outsourced_qty} kg × ₹{inward_rate})")
-                            print(f"   💰 (Previously would have been ₹{inward_value:,.2f} for full {inward_qty} kg)")
+                    # If we have harvest data, split into inhouse + outsourced
+                    # For "Both" products: split if sales > harvest
+                    # For "Outsourced" products: ALWAYS split if harvest exists (even if harvest >= sales)
+                    if harvest_qty > 0:
+                        if product_type.lower() in ["both", "b"]:
+                            # For "Both" products: only split if sales > harvest
+                            if outward_qty > harvest_qty:
+                                # Split: harvest_qty = inhouse, (outward_qty - harvest_qty) = outsourced
+                                inhouse_qty = harvest_qty
+                                outsourced_qty = outward_qty - harvest_qty
+                                print(f"   🔄 Splitting {particulars} (Both): {inhouse_qty} kg (inhouse) + {outsourced_qty} kg (outsourced)")
+                            else:
+                                # Sales <= Harvest: All is inhouse (skip to inhouse creation below)
+                                inhouse_qty = outward_qty
+                                outsourced_qty = 0.0
+                                print(f"   🌾 {particulars} (Both): Sales ({outward_qty}) <= harvest ({harvest_qty}), all is inhouse")
+                                # Continue to inhouse creation (skip split logic)
+                                source = "inhouse"
+                                product_name = f"{particulars} (Inhouse)"
+                                # Create inhouse product and sale (reuse existing logic)
+                                product = db.query(Product).filter(Product.name == product_name).first()
+                                if not product:
+                                    product = Product(
+                                        name=product_name,
+                                        source=source,
+                                        unit=outward_unit if outward_unit else "kg"
+                                    )
+                                    db.add(product)
+                                    db.commit()
+                                    db.refresh(product)
+                                    products_created += 1
+                                    print(f"   📦 Created product: {product_name}")
+                                
+                                monthly_sale = MonthlySale(
+                                    product_id=product.id,
+                                    month=month,
+                                    quantity=outward_qty,
+                                    sale_price=outward_rate,
+                                    direct_cost=0.0,
+                                    inward_quantity=0.0,
+                                    inward_rate=0.0,
+                                    inward_value=0.0,
+                                    inhouse_production=outward_qty,
+                                    wastage=0.0
+                                )
+                                db.add(monthly_sale)
+                                sales_created += 1
+                                print(f"   💰 Created sale (inhouse): {outward_qty}{outward_unit} @ ₹{outward_rate}")
+                                
+                                parsed_data.append(ExcelRowData(
+                                    month=month,
+                                    particulars=particulars,
+                                    type="Inhouse",
+                                    inward_quantity=0.0,
+                                    inward_rate=0.0,
+                                    inward_value=0.0,
+                                    outward_quantity=outward_qty,
+                                    outward_rate=outward_rate,
+                                    outward_value=outward_value,
+                                    inhouse_production=outward_qty,
+                                    wastage=0.0
+                                ))
+                                continue
                         else:
-                            # Fallback if no inward rate
-                            outsourced_inward_qty = 0.0
-                            outsourced_inward_rate = 0.0
-                            outsourced_inward_value = 0.0
-                            outsourced_direct_cost = 0.0
+                            # For "Outsourced" products: ALWAYS split if harvest exists
+                            # inhouse_qty = min(harvest_qty, outward_qty) - the portion from harvest
+                            # outsourced_qty = max(0, outward_qty - harvest_qty) - the purchased portion
+                            inhouse_qty = min(harvest_qty, outward_qty)  # Can't be more than sales
+                            outsourced_qty = max(0.0, outward_qty - harvest_qty)  # Rest is outsourced
+                            
+                            print(f"   🔄 Splitting {particulars} (Outsourced): {inhouse_qty} kg (inhouse from harvest) + {outsourced_qty} kg (outsourced purchased)")
                         
-                        outsourced_sale = MonthlySale(
-                            product_id=outsourced_product.id,
-                            month=month,
-                            quantity=outsourced_qty,
-                            sale_price=outsourced_sale_price,
-                            direct_cost=outsourced_direct_cost,
-                            inward_quantity=outsourced_inward_qty,
-                            inward_rate=outsourced_inward_rate,
-                            inward_value=outsourced_inward_value,
-                            inhouse_production=0.0,
-                            wastage=wastage
-                        )
-                        db.add(outsourced_sale)
-                        sales_created += 1
-                        
-                        # Add to parsed data (use proportional values for outsourced portion)
-                        parsed_data.append(ExcelRowData(
-                            month=month,
-                            particulars=particulars,
-                            type="Outsourced",
-                            inward_quantity=outsourced_inward_qty,
-                            inward_rate=outsourced_inward_rate,
-                            inward_value=outsourced_inward_value,
-                            outward_quantity=outsourced_qty,
-                            outward_rate=outsourced_sale_price,
-                            outward_value=outsourced_qty * outsourced_sale_price,
-                            inhouse_production=0.0,
-                            wastage=wastage
-                        ))
-                        
-                        rows_split += 1
-                        print(f"   ✅ Split into: {inhouse_qty} kg (inhouse) + {outsourced_qty} kg (outsourced)")
-                        # Skip creating original record since we already split it
-                        continue
-                    elif harvest_qty > 0 and outward_qty <= harvest_qty:
-                        # Harvest >= Sales, so all is inhouse (even if marked as "Outsourced" or "Both")
-                        source = "inhouse"
-                        product_name = f"{particulars} (Inhouse)"
-                        print(f"   🌾 Sales qty ({outward_qty}) <= harvest qty ({harvest_qty}), marking as inhouse")
-                        
-                        # Create or get product
-                        product = db.query(Product).filter(Product.name == product_name).first()
-                        if not product:
-                            product = Product(
-                                name=product_name,
-                                source=source,
-                                unit=outward_unit if outward_unit else "kg"
-                            )
-                            db.add(product)
-                            db.commit()
-                            db.refresh(product)
-                            products_created += 1
-                            print(f"   📦 Created product: {product_name}")
-                        
-                        # Create monthly sale record
-                        monthly_sale = MonthlySale(
-                            product_id=product.id,
-                            month=month,
-                            quantity=outward_qty,
-                            sale_price=outward_rate,
-                            direct_cost=0.0,  # No direct cost for inhouse production
-                            inward_quantity=0.0,
-                            inward_rate=0.0,
-                            inward_value=0.0,
-                            inhouse_production=outward_qty,
-                            wastage=0.0
-                        )
-                        
-                        db.add(monthly_sale)
-                        sales_created += 1
-                        print(f"   💰 Created sale (inhouse): {outward_qty}{outward_unit} @ ₹{outward_rate}")
-                        
-                        # Add to parsed data
-                        parsed_data.append(ExcelRowData(
-                            month=month,
-                            particulars=particulars,
-                            type="Inhouse",
-                            inward_quantity=0.0,
-                            inward_rate=0.0,
-                            inward_value=0.0,
-                            outward_quantity=outward_qty,
-                            outward_rate=outward_rate,
-                            outward_value=outward_value,
-                            inhouse_production=outward_qty,
-                            wastage=0.0
-                        ))
-                        # Skip creating original record since we already created inhouse record
-                        continue
-                    else:
+                        # Only proceed with split logic if we have both portions or outsourced portion > 0
+                        if inhouse_qty > 0 or outsourced_qty > 0:
+                            # Create INHOUSE product and sale (only if inhouse_qty > 0)
+                            if inhouse_qty > 0:
+                                inhouse_product_name = f"{particulars} (Inhouse)"
+                                inhouse_product = db.query(Product).filter(Product.name == inhouse_product_name).first()
+                                if not inhouse_product:
+                                    inhouse_product = Product(
+                                        name=inhouse_product_name,
+                                        source="inhouse",
+                                        unit=outward_unit if outward_unit else "kg"
+                                    )
+                                    db.add(inhouse_product)
+                                    db.commit()
+                                    db.refresh(inhouse_product)
+                                    products_created += 1
+                                    print(f"   📦 Created product: {inhouse_product_name}")
+                                
+                                # Calculate inhouse sale price (proportional)
+                                inhouse_sale_price = outward_rate
+                                inhouse_sale = MonthlySale(
+                                    product_id=inhouse_product.id,
+                                    month=month,
+                                    quantity=inhouse_qty,
+                                    sale_price=inhouse_sale_price,
+                                    direct_cost=0.0,  # No direct cost for inhouse production
+                                    inward_quantity=0.0,
+                                    inward_rate=0.0,
+                                    inward_value=0.0,
+                                    inhouse_production=inhouse_qty,
+                                    wastage=0.0
+                                )
+                                db.add(inhouse_sale)
+                                sales_created += 1
+                                
+                                # Add to parsed data
+                                parsed_data.append(ExcelRowData(
+                                    month=month,
+                                    particulars=particulars,
+                                    type="Inhouse",
+                                    inward_quantity=0.0,
+                                    inward_rate=0.0,
+                                    inward_value=0.0,
+                                    outward_quantity=inhouse_qty,
+                                    outward_rate=inhouse_sale_price,
+                                    outward_value=inhouse_qty * inhouse_sale_price,
+                                    inhouse_production=inhouse_qty,
+                                    wastage=0.0
+                                ))
+                            
+                            # Create OUTSOURCED product and sale (only if outsourced_qty > 0)
+                            if outsourced_qty > 0:
+                                outsourced_product_name = f"{particulars} (Outsourced)"
+                                outsourced_product = db.query(Product).filter(Product.name == outsourced_product_name).first()
+                                if not outsourced_product:
+                                    outsourced_product = Product(
+                                        name=outsourced_product_name,
+                                        source="outsourced",
+                                        unit=outward_unit if outward_unit else "kg"
+                                    )
+                                    db.add(outsourced_product)
+                                    db.commit()
+                                    db.refresh(outsourced_product)
+                                    products_created += 1
+                                    print(f"   📦 Created product: {outsourced_product_name}")
+                                
+                                # Calculate outsourced sale price (proportional)
+                                outsourced_sale_price = outward_rate
+                                
+                                # CRITICAL FIX: Calculate direct cost and inward quantities for outsourced portion
+                                # The outsourced portion represents the quantity that was PURCHASED (not harvested)
+                                # So: outsourced_inward_qty = outsourced_qty (the purchased portion)
+                                #     outsourced_direct_cost = outsourced_qty × purchase_rate
+                                if inward_rate > 0:
+                                    # The outsourced quantity is what was purchased (not from harvest)
+                                    # So inward_quantity for outsourced = outsourced_qty
+                                    outsourced_inward_qty = outsourced_qty
+                                    outsourced_inward_rate = inward_rate  # Purchase rate stays the same
+                                    outsourced_inward_value = outsourced_inward_qty * outsourced_inward_rate
+                                    outsourced_direct_cost = outsourced_inward_value
+                                    
+                                    print(f"   💰 Outsourced portion: {outsourced_qty} kg (purchased, not from harvest)")
+                                    print(f"   💰 Purchase rate: ₹{inward_rate}/kg")
+                                    print(f"   💰 Direct cost: ₹{outsourced_direct_cost:,.2f} ({outsourced_qty} kg × ₹{inward_rate})")
+                                    print(f"   💰 (Previously would have been ₹{inward_value:,.2f} for full {inward_qty} kg)")
+                                else:
+                                    # Fallback if no inward rate
+                                    outsourced_inward_qty = 0.0
+                                    outsourced_inward_rate = 0.0
+                                    outsourced_inward_value = 0.0
+                                    outsourced_direct_cost = 0.0
+                                
+                                outsourced_sale = MonthlySale(
+                                    product_id=outsourced_product.id,
+                                    month=month,
+                                    quantity=outsourced_qty,
+                                    sale_price=outsourced_sale_price,
+                                    direct_cost=outsourced_direct_cost,
+                                    inward_quantity=outsourced_inward_qty,
+                                    inward_rate=outsourced_inward_rate,
+                                    inward_value=outsourced_inward_value,
+                                    inhouse_production=0.0,
+                                    wastage=wastage
+                                )
+                                db.add(outsourced_sale)
+                                sales_created += 1
+                                
+                                # Add to parsed data (use proportional values for outsourced portion)
+                                parsed_data.append(ExcelRowData(
+                                    month=month,
+                                    particulars=particulars,
+                                    type="Outsourced",
+                                    inward_quantity=outsourced_inward_qty,
+                                    inward_rate=outsourced_inward_rate,
+                                    inward_value=outsourced_inward_value,
+                                    outward_quantity=outsourced_qty,
+                                    outward_rate=outsourced_sale_price,
+                                    outward_value=outsourced_qty * outsourced_sale_price,
+                                    inhouse_production=0.0,
+                                    wastage=wastage
+                                ))
+                            
+                            rows_split += 1
+                            print(f"   ✅ Split into: {inhouse_qty} kg (inhouse) + {outsourced_qty} kg (outsourced)")
+                            # Skip creating original record since we already split it
+                            continue
+                    
+                    # If we reach here, no harvest data found - use Type as-is
+                    if harvest_qty == 0:
                         # No harvest data found - use Type as-is
                         if product_type.lower() in ["both", "b"]:
                             # Type is "Both" but no harvest data - treat as "Both"
