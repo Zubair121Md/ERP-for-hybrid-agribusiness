@@ -3700,51 +3700,52 @@ def parse_purple_patch_pl(file_path, db):
                         elif pd.notna(amount_raw_col3):
                             amount_raw = amount_raw_col3
                         
-                        if amount_raw is not None:
-                            
-                            # Skip header/summary patterns
-                            skip_patterns = ['', 'nan', 'PURPLE PATCH FARMS', 'Particulars', 'Trading Account', 
-                                           'Income Statement', 'NAN', 'NONE', 'N/A', 'SL.NO', 'SL.NO.',
-                                           'APPORTIONMENT', 'KG', 'COP', 'TOTAL VALUE', 'AMOUNT']
-                            if any(pattern.upper() in particulars.upper() for pattern in skip_patterns):
-                                continue
-                            
-                            # Skip summary/total rows
-                            if particulars.upper().strip() in ['TOTAL', 'TOTAL EXPENSES', 'TOTAL INCOME', 'TOTAL SALES']:
-                                continue
-                            
-                            # Skip overview table rows
-                            overview_keywords = ['PRODUCTION KG', 'DAMAGE KG', 'SALES KG', 'AVG PRICE', 'PURCHASE KG']
-                            if any(keyword in particulars.upper() for keyword in overview_keywords):
-                                continue
-                            
-                            amount = parse_numeric_robust(amount_raw) if pd.notna(amount_raw) else 0.0
-                            
-                            if amount != 0:
-                                # Normalize and check whitelist
-                                normalized_particulars = normalize_name(particulars)
+                        try:
+                            if amount_raw is not None:
                                 
-                                # WHITELIST CHECK
-                                if normalized_particulars not in normalized_valid_items:
-                                    # Try fuzzy matching
-                                    matched = False
-                                    for valid_normalized, valid_original in normalized_valid_items.items():
-                                        if valid_normalized in normalized_particulars or normalized_particulars in valid_normalized:
-                                            if len(valid_normalized) > 5:
-                                                matched = True
-                                                particulars = valid_original
-                                                break
+                                # Skip header/summary patterns
+                                skip_patterns = ['', 'nan', 'PURPLE PATCH FARMS', 'Particulars', 'Trading Account', 
+                                               'Income Statement', 'NAN', 'NONE', 'N/A', 'SL.NO', 'SL.NO.',
+                                               'APPORTIONMENT', 'KG', 'COP', 'TOTAL VALUE', 'AMOUNT']
+                                if any(pattern.upper() in particulars.upper() for pattern in skip_patterns):
+                                    continue
+                                
+                                # Skip summary/total rows
+                                if particulars.upper().strip() in ['TOTAL', 'TOTAL EXPENSES', 'TOTAL INCOME', 'TOTAL SALES']:
+                                    continue
+                                
+                                # Skip overview table rows
+                                overview_keywords = ['PRODUCTION KG', 'DAMAGE KG', 'SALES KG', 'AVG PRICE', 'PURCHASE KG']
+                                if any(keyword in particulars.upper() for keyword in overview_keywords):
+                                    continue
+                                
+                                amount = parse_numeric_robust(amount_raw) if pd.notna(amount_raw) else 0.0
+                                
+                                if amount != 0:
+                                    # Normalize and check whitelist
+                                    normalized_particulars = normalize_name(particulars)
                                     
-                                    if not matched:
-                                        continue
-                                
-                                if particulars not in exclude_items:
-                                    data_rows.append({
-                                        'particulars': particulars,
-                                        'amount': amount,
-                                        'type': template_mapping.get(particulars, 'B')
-                                    })
-                                print(f"   📊 Found (Strategy 3): {particulars} = ₹{amount:,.2f}")
+                                    # WHITELIST CHECK
+                                    if normalized_particulars not in normalized_valid_items:
+                                        # Try fuzzy matching
+                                        matched = False
+                                        for valid_normalized, valid_original in normalized_valid_items.items():
+                                            if valid_normalized in normalized_particulars or normalized_particulars in valid_normalized:
+                                                if len(valid_normalized) > 5:
+                                                    matched = True
+                                                    particulars = valid_original
+                                                    break
+                                        
+                                        if not matched:
+                                            continue
+                                    
+                                    if particulars not in exclude_items:
+                                        data_rows.append({
+                                            'particulars': particulars,
+                                            'amount': amount,
+                                            'type': template_mapping.get(particulars, 'B')
+                                        })
+                                    print(f"   📊 Found (Strategy 3): {particulars} = ₹{amount:,.2f}")
                         except (IndexError, KeyError, ValueError):
                             continue
         
