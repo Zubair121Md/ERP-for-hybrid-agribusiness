@@ -1406,7 +1406,7 @@ async def allocate_costs(month: str, db: Session = Depends(get_db)):
 
 @app.get("/api/product-cost-breakdown/{product_id}")
 async def get_product_cost_breakdown(product_id: int, db: Session = Depends(get_db)):
-    """Get detailed cost breakdown for a specific product including skipped costs and calculation details"""
+    """Get detailed cost breakdown for a specific product"""
     # Get product
     product = db.query(Product).filter(Product.id == product_id).first()
     if not product:
@@ -1420,17 +1420,14 @@ async def get_product_cost_breakdown(product_id: int, db: Session = Depends(get_
     # Get all allocations for this product
     allocations = db.query(Allocation).filter(Allocation.product_id == product_id).all()
     
-    # Get all costs to check which ones were skipped
+    # Get all costs to determine which ones were skipped
     all_costs = db.query(Cost).all()
+    allocated_cost_ids = {a.cost_id for a in allocations}
     
-    # Create allocation engine to compute basis values
+    # Initialize cost allocation engine to compute basis and calculations
     engine = CostAllocationEngine(db)
-    
-    # Get all products and sales for basis calculation
-    all_products = db.query(Product).filter(Product.is_active == True).all()
-    product_map = {p.id: p for p in all_products}
-    all_sales = db.query(MonthlySale).all()
-    sales_map = {s.product_id: s for s in all_sales}
+    product_map = {product_id: product}
+    sales_map = {product_id: sale}
     
     # Group allocations by cost category and type
     cost_breakdown = {
@@ -1453,37 +1450,43 @@ async def get_product_cost_breakdown(product_id: int, db: Session = Depends(get_
         "skipped_costs": []
     }
     
-    # Create a set of allocated cost IDs for quick lookup
-    allocated_cost_ids = {a.cost_id for a in allocations}
-    
     # Process each allocation with calculation details
     for allocation in allocations:
         cost = allocation.cost
         
-        # Calculate basis values for this product
+        # Compute product basis and total basis for calculation details
         product_basis = engine._compute_product_basis(cost, sale)
         
-        # Get applicable products for this cost
+        # Get applicable products to compute total basis
         applicable_products = engine._get_applicable_products(cost, product_map, sales_map)
-        
-        # Calculate total basis across all applicable products
         total_basis = engine._compute_total_basis(cost, applicable_products, sales_map)
         
         # Calculate percentage
         percentage = (product_basis / total_basis * 100) if total_basis > 0 else 0
         
-        # Build calculation formula
-        basis_name = {
+        # Build calculation formula string
+        basis_name_map = {
             "sales_value": "Sales Value",
             "sales_kg": "Sales KG",
             "production_kg": "Production KG",
             "handled_kg": "Handled KG",
             "purchase_kg": "Purchase KG",
-            "direct_cost": "Direct Cost",
-            "hybrid": "Hybrid (Weight + Profit)"
-        }.get(cost.basis, cost.basis)
+            "direct_cost": "Direct Cost"
+        }
+        basis_name = basis_name_map.get(cost.basis, cost.basis)
         
-        calculation_formula = f"({product_basis:.2f} {basis_name} / {total_basis:.2f} Total {basis_name}) × ₹{cost.amount:,.2f} = ₹{allocation.allocated_amount:,.2f}"
+        # Format calculation
+        if total_basis > 0:
+            formula = f"(Product {basis_name} / Total {basis_name}) × Total Cost"
+            calculation = {
+                "formula": formula,
+                "product_basis": product_basis,
+                "total_basis": total_basis,
+                "percentage": percentage,
+                "basis_name": basis_name
+            }
+        else:
+            calculation = None
         
         cost_info = {
             "cost_id": cost.id,
@@ -1493,13 +1496,7 @@ async def get_product_cost_breakdown(product_id: int, db: Session = Depends(get_
             "basis": cost.basis,
             "amount": allocation.allocated_amount,
             "total_cost_amount": cost.amount,
-            "calculation": {
-                "product_basis": product_basis,
-                "total_basis": total_basis,
-                "percentage": percentage,
-                "formula": calculation_formula,
-                "basis_name": basis_name
-            }
+            "calculation": calculation
         }
         
         # Add to detailed costs
@@ -1523,81 +1520,53 @@ async def get_product_cost_breakdown(product_id: int, db: Session = Depends(get_
         else:
             cost_breakdown["costs_by_type"]["common"].append(cost_info)
     
-    # Check for skipped costs
+    # Find skipped costs (costs that don't have allocations for this product)
     for cost in all_costs:
-        if cost.id in allocated_cost_ids:
-            continue  # Already allocated
-        
-        skip_reason = None
-        
-        # Check if cost was skipped due to direct_cost basis
-        if cost.basis == "direct_cost" or "PURCHASE ACCOUNTS" in (cost.name or "").upper():
-            skip_reason = "Direct cost - not allocated (used as direct purchase cost for outsourced products)"
-        
-        # Check if product doesn't match applies_to
-        elif cost.applies_to == "inhouse" and product.source != "inhouse":
-            skip_reason = f"Applies to 'inhouse' products only, but this product is '{product.source}'"
-        elif cost.applies_to == "outsourced" and product.source != "outsourced":
-            skip_reason = f"Applies to 'outsourced' products only, but this product is '{product.source}'"
-        
-        # Check if product doesn't match section-based filtering (for VARIABLE COST)
-        elif "VARIABLE COST" in (cost.name or "").upper():
-            applicable_products = engine._get_applicable_products(cost, product_map, sales_map)
-            if product_id not in applicable_products:
-                # Determine why it was excluded
-                cost_name_upper = cost.name.upper()
-                if "LETTUCE" in cost_name_upper:
-                    if "LETTUCE" not in product.name.upper():
-                        skip_reason = "VARIABLE COST - LETTUCE only applies to products with 'lettuce' in name"
-                    else:
-                        skip_reason = "Product not matched to LETTUCE section"
-                elif "STRAWBERRY" in cost_name_upper:
-                    if "STRAWBERRY" not in product.name.upper():
-                        skip_reason = "VARIABLE COST - STRAWBERRY only applies to products with 'strawberry' in name"
-                    else:
-                        skip_reason = "Product not matched to STRAWBERRY section"
-                elif "OPEN FIELD" in cost_name_upper:
-                    skip_reason = "VARIABLE COST - OPEN FIELD only applies to products mapped to 'Open Field' section"
-                elif "POLYHOUSE" in cost_name_upper or "LETTUCE" in cost_name_upper:
-                    skip_reason = "VARIABLE COST - POLYHOUSE only applies to products mapped to Polyhouse sections (C, D, E)"
-                elif "RASPBERRY" in cost_name_upper or "BLUEBERRY" in cost_name_upper:
-                    if "RASPBERRY" not in product.name.upper() and "BLUEBERRY" not in product.name.upper():
-                        skip_reason = "VARIABLE COST - RASPBERRY/BLUEBERRY only applies to products with 'raspberry' or 'blueberry' in name"
-                    else:
-                        skip_reason = "Product not matched to RASPBERRY/BLUEBERRY section"
-                elif "AGGREGATION" in cost_name_upper:
-                    if product.source != "outsourced":
-                        skip_reason = "VARIABLE COST - AGGREGATION only applies to outsourced products"
-                    else:
-                        skip_reason = "Product not matched to AGGREGATION section"
-                else:
-                    skip_reason = "Product not matched to this VARIABLE COST section"
-        
-        # Check if basis calculation would result in zero (only if not already skipped)
-        if not skip_reason:
-            try:
-                # First check if product is applicable before computing basis
+        if cost.id not in allocated_cost_ids:
+            skip_reason = None
+            
+            # Determine why this cost was skipped
+            if cost.basis == "direct_cost" or "PURCHASE ACCOUNTS" in (cost.name or "").upper():
+                skip_reason = "Direct cost - not allocated (already included in direct_cost)"
+            else:
+                # Check if product is applicable
                 applicable_products = engine._get_applicable_products(cost, product_map, sales_map)
-                if not applicable_products:
-                    skip_reason = "No applicable products found for this cost"
-                elif product_id not in applicable_products:
-                    skip_reason = "Product not in applicable products list"
+                if product_id not in applicable_products:
+                    # Product not applicable
+                    if cost.applies_to == "inhouse" and product.source != "inhouse":
+                        skip_reason = f"Cost applies to '{cost.applies_to}' products only, but this product is '{product.source}'"
+                    elif cost.applies_to == "outsourced" and product.source != "outsourced":
+                        skip_reason = f"Cost applies to '{cost.applies_to}' products only, but this product is '{product.source}'"
+                    else:
+                        # Check section-based filtering for variable costs
+                        if "VARIABLE COST" in (cost.name or "").upper():
+                            cost_name_upper = cost.name.upper()
+                            if "LETTUCE" in cost_name_upper:
+                                if "LETTUCE" not in product.name.upper():
+                                    skip_reason = "VARIABLE COST - LETTUCE only applies to products with 'lettuce' in name"
+                            elif "STRAWBERRY" in cost_name_upper:
+                                if "STRAWBERRY" not in product.name.upper():
+                                    skip_reason = "VARIABLE COST - STRAWBERRY only applies to products with 'strawberry' in name"
+                            elif "OPEN FIELD" in cost_name_upper:
+                                skip_reason = "VARIABLE COST - OPEN FIELD only applies to products mapped to 'Open Field' section"
+                            else:
+                                skip_reason = "Product not mapped to the required section for this variable cost"
+                        else:
+                            skip_reason = "Product does not match the cost's applicability criteria"
                 else:
-                    # Product is applicable, check basis
+                    # Product is applicable but no allocation - check basis
                     product_basis = engine._compute_product_basis(cost, sale)
                     if product_basis == 0:
-                        skip_reason = f"Product basis is 0 (basis: {cost.basis})"
+                        skip_reason = f"Product basis is 0 (no {cost.basis} value available)"
                     else:
-                        # Only compute total basis if product basis > 0
+                        applicable_products = engine._get_applicable_products(cost, product_map, sales_map)
                         total_basis = engine._compute_total_basis(cost, applicable_products, sales_map)
                         if total_basis == 0:
-                            skip_reason = "Total basis is 0 (no products have basis value)"
-            except Exception as e:
-                # If computation fails, skip with error reason
-                skip_reason = f"Error computing basis: {str(e)}"
-        
-        if skip_reason:
-            cost_breakdown["skipped_costs"].append({
+                            skip_reason = "Total basis is 0 (no applicable products have basis value)"
+                        else:
+                            skip_reason = "Cost was not allocated (unknown reason)"
+            
+            skipped_cost_info = {
                 "cost_id": cost.id,
                 "cost_name": cost.name,
                 "category": cost.category,
@@ -1605,7 +1574,8 @@ async def get_product_cost_breakdown(product_id: int, db: Session = Depends(get_
                 "basis": cost.basis,
                 "total_cost_amount": cost.amount,
                 "skip_reason": skip_reason
-            })
+            }
+            cost_breakdown["skipped_costs"].append(skipped_cost_info)
     
     # Calculate totals
     cost_breakdown["total_cost"] = sale.direct_cost + cost_breakdown["total_allocated"]
@@ -2055,50 +2025,50 @@ async def upload_excel(file: UploadFile = File(...), db: Session = Depends(get_d
                                 source = "inhouse"
                                 product_name = f"{particulars} (Inhouse)"
                                 # Create inhouse product and sale (reuse existing logic)
-                        product = db.query(Product).filter(Product.name == product_name).first()
-                        if not product:
-                            product = Product(
-                                name=product_name,
+                                product = db.query(Product).filter(Product.name == product_name).first()
+                                if not product:
+                                    product = Product(
+                                        name=product_name,
                                         source=source,
-                            unit=outward_unit if outward_unit else "kg"
-                            )
-                            db.add(product)
-                            db.commit()
-                            db.refresh(product)
-                            products_created += 1
-                            print(f"   📦 Created product: {product_name}")
-                        
-                        monthly_sale = MonthlySale(
-                            product_id=product.id,
-                        month=month,
+                                        unit=outward_unit if outward_unit else "kg"
+                                    )
+                                    db.add(product)
+                                    db.commit()
+                                    db.refresh(product)
+                                    products_created += 1
+                                    print(f"   📦 Created product: {product_name}")
+                                
+                                monthly_sale = MonthlySale(
+                                    product_id=product.id,
+                                    month=month,
                                     quantity=outward_qty,
-                        sale_price=outward_rate,
+                                    sale_price=outward_rate,
                                     direct_cost=0.0,
                                     inward_quantity=0.0,
-                        inward_rate=0.0,
-                        inward_value=0.0,
+                                    inward_rate=0.0,
+                                    inward_value=0.0,
                                     inhouse_production=outward_qty,
-                        wastage=0.0
-                        )
-                        db.add(monthly_sale)
-                        sales_created += 1
+                                    wastage=0.0
+                                )
+                                db.add(monthly_sale)
+                                sales_created += 1
                                 print(f"   💰 Created sale (inhouse): {outward_qty}{outward_unit} @ ₹{outward_rate}")
-                        
-                        parsed_data.append(ExcelRowData(
-                        month=month,
-                        particulars=particulars,
-                        type="Inhouse",
-                        inward_quantity=0.0,
-                        inward_rate=0.0,
-                        inward_value=0.0,
+                                
+                                parsed_data.append(ExcelRowData(
+                                    month=month,
+                                    particulars=particulars,
+                                    type="Inhouse",
+                                    inward_quantity=0.0,
+                                    inward_rate=0.0,
+                                    inward_value=0.0,
                                     outward_quantity=outward_qty,
-                        outward_rate=outward_rate,
+                                    outward_rate=outward_rate,
                                     outward_value=outward_value,
                                     inhouse_production=outward_qty,
-                        wastage=0.0
-                        ))
+                                    wastage=0.0
+                                ))
                                 continue
-                else:
+                        else:
                             # For "Outsourced" products: ALWAYS split if harvest exists
                             # inhouse_qty = min(harvest_qty, outward_qty) - the portion from harvest
                             # outsourced_qty = max(0, outward_qty - harvest_qty) - the purchased portion
@@ -2109,9 +2079,9 @@ async def upload_excel(file: UploadFile = File(...), db: Session = Depends(get_d
                             
                             # Only proceed with split logic if we have both portions or outsourced portion > 0
                             if inhouse_qty > 0 or outsourced_qty > 0:
-                            # Create INHOUSE product and sale (only if inhouse_qty > 0)
-                            if inhouse_qty > 0:
-                                inhouse_product_name = f"{particulars} (Inhouse)"
+                                # Create INHOUSE product and sale (only if inhouse_qty > 0)
+                                if inhouse_qty > 0:
+                                    inhouse_product_name = f"{particulars} (Inhouse)"
                                 inhouse_product = db.query(Product).filter(Product.name == inhouse_product_name).first()
                                 if not inhouse_product:
                                     inhouse_product = Product(
@@ -2246,50 +2216,50 @@ async def upload_excel(file: UploadFile = File(...), db: Session = Depends(get_d
                             product_name = f"{particulars} (Outsourced)"
                             source = "outsourced"
                     
-                    # Create or get product
-                    product = db.query(Product).filter(Product.name == product_name).first()
-                    if not product:
-                        product = Product(
-                            name=product_name,
+                        # Create or get product
+                        product = db.query(Product).filter(Product.name == product_name).first()
+                        if not product:
+                            product = Product(
+                                name=product_name,
                                 source="inhouse" if source == "both" else source,  # Default to inhouse for "Both" without harvest data
-                            unit=outward_unit if outward_unit else "kg"
-                        )
-                        db.add(product)
-                        db.commit()
-                        db.refresh(product)
-                        products_created += 1
+                                unit=outward_unit if outward_unit else "kg"
+                            )
+                            db.add(product)
+                            db.commit()
+                            db.refresh(product)
+                            products_created += 1
                             print(f"   📦 Created product: {product_name} (no harvest data, using as-is)")
-                    
-                    # Create monthly sale record
-                    monthly_sale = MonthlySale(
-                        product_id=product.id,
-                        month=month,
-                        quantity=outward_qty,
-                        sale_price=outward_rate,
-                        direct_cost=inward_value if inward_value > 0 else (inward_qty * inward_rate),
-                        inward_quantity=inward_qty,
-                        inward_rate=inward_rate,
-                        inward_value=inward_value,
-                        inhouse_production=inhouse_production,
-                        wastage=wastage
-                    )
-                    
-                    db.add(monthly_sale)
-                    sales_created += 1
+                        
+                        # Create monthly sale record
+                        monthly_sale = MonthlySale(
+                            product_id=product.id,
+                            month=month,
+                            quantity=outward_qty,
+                            sale_price=outward_rate,
+                            direct_cost=inward_value if inward_value > 0 else (inward_qty * inward_rate),
+                            inward_quantity=inward_qty,
+                            inward_rate=inward_rate,
+                            inward_value=inward_value,
+                            inhouse_production=inhouse_production,
+                            wastage=wastage
+                        )
+                        
+                        db.add(monthly_sale)
+                        sales_created += 1
                         print(f"   💰 Created sale ({source}): {outward_qty}{outward_unit} @ ₹{outward_rate}")
-                    
-                    # Add to parsed data
-                    parsed_data.append(ExcelRowData(
-                        month=month,
-                        particulars=particulars,
-                        type=product_type,
-                        inward_quantity=inward_qty,
-                        inward_rate=inward_rate,
-                        inward_value=inward_value,
-                        outward_quantity=outward_qty,
-                        outward_rate=outward_rate,
-                        outward_value=outward_value,
-                        inhouse_production=inhouse_production,
+                        
+                        # Add to parsed data
+                        parsed_data.append(ExcelRowData(
+                            month=month,
+                            particulars=particulars,
+                            type=product_type,
+                            inward_quantity=inward_qty,
+                            inward_rate=inward_rate,
+                            inward_value=inward_value,
+                            outward_quantity=outward_qty,
+                            outward_rate=outward_rate,
+                            outward_value=outward_value,
+                            inhouse_production=inhouse_production,
                             wastage=wastage
                         ))
                         # Skip the duplicate parsed_data.append below
@@ -3430,20 +3400,20 @@ def split_inhouse_outsourced(row):
     """
     # Return single record as-is (no splitting based on inward/outward difference)
     records = []
-        records.append({
-            'month': row['month'],
-            'particulars': row['particulars'],
+    records.append({
+        'month': row['month'],
+        'particulars': row['particulars'],
         'type': row.get('type', 'Outsourced'),  # Use the Type from the row
-            'inward_qty': row['inward_qty'],
-            'outward_qty': row['outward_qty'],
-            'inward_rate': row['inward_rate'],
-            'outward_rate': row['outward_rate'],
-            'inward_value': row['inward_qty'] * row['inward_rate'],
-            'outward_value': row['outward_qty'] * row['outward_rate'],
+        'inward_qty': row['inward_qty'],
+        'outward_qty': row['outward_qty'],
+        'inward_rate': row['inward_rate'],
+        'outward_rate': row['outward_rate'],
+        'inward_value': row['inward_qty'] * row['inward_rate'],
+        'outward_value': row['outward_qty'] * row['outward_rate'],
         'inhouse_production': 0,  # Will be set based on Type column, not inward/outward difference
         'wastage': 0,
-            'unit': row['outward_unit']
-        })
+        'unit': row['outward_unit']
+    })
     
     return records
 
@@ -3717,7 +3687,7 @@ def parse_purple_patch_pl(file_path, db):
                             print(f"📅 Period detected: {period} (from row {idx+1}, col {col_idx+1})")
                             break
                     if period != "Unknown":
-                    break
+                        break
             if period != "Unknown":
                 break
         
@@ -3812,7 +3782,7 @@ def parse_purple_patch_pl(file_path, db):
                             # Check if amount is small (likely from overview table)
                             amount = parse_numeric_robust(amount_raw)
                             if amount < 1000:
-                    continue
+                                continue
                 
                         # Use robust number parser
                         amount = parse_numeric_robust(amount_raw)
@@ -3868,7 +3838,7 @@ def parse_purple_patch_pl(file_path, db):
                         if pd.isna(particulars_raw) or str(particulars_raw).strip() == '':
                             continue
                         
-                                        particulars = str(particulars_raw).strip()
+                        particulars = str(particulars_raw).strip()
                         
                         # Skip category headers
                         category_headers = [
@@ -3905,9 +3875,9 @@ def parse_purple_patch_pl(file_path, db):
                             if any(keyword in particulars.upper() for keyword in overview_keywords):
                                 continue
                             
-                                            amount = parse_numeric_robust(amount_raw) if pd.notna(amount_raw) else 0.0
-                                            
-                                            if amount != 0:
+                            amount = parse_numeric_robust(amount_raw) if pd.notna(amount_raw) else 0.0
+                            
+                            if amount != 0:
                                 # Normalize and check whitelist
                                 normalized_particulars = normalize_name(particulars)
                                 
@@ -3925,15 +3895,15 @@ def parse_purple_patch_pl(file_path, db):
                                     if not matched:
                                         continue
                                 
-                                                if particulars not in exclude_items:
-                                                    data_rows.append({
-                                                        'particulars': particulars,
-                                                        'amount': amount,
-                                                        'type': template_mapping.get(particulars, 'B')
-                                                    })
+                                if particulars not in exclude_items:
+                                    data_rows.append({
+                                        'particulars': particulars,
+                                        'amount': amount,
+                                        'type': template_mapping.get(particulars, 'B')
+                                    })
                                     print(f"   📊 Found (Strategy 3): {particulars} = ₹{amount:,.2f}")
-                            except (IndexError, KeyError, ValueError):
-                                continue
+                except (IndexError, KeyError, ValueError):
+                    continue
         
         # Strategy 3: Try column B (index 1) and C (index 2) as fallback
         if len(data_rows) == 0:
@@ -4094,50 +4064,50 @@ def parse_purple_patch_pl(file_path, db):
                     print(f"   ✏️  Updated cost: {particulars} ({preferred_match.category}) = ₹{amount:,.2f} (selected from {len(all_matches)} matches)")
             else:
                 # Create new cost
-            if item_type == 'I':
-                # 100% inhouse
-                cost = Cost(
-                    name=particulars,
-                    amount=amount,
-                    applies_to="inhouse",
-                    cost_type="common",
-                    basis="hybrid",
+                if item_type == 'I':
+                    # 100% inhouse
+                    cost = Cost(
+                        name=particulars,
+                        amount=amount,
+                        applies_to="inhouse",
+                        cost_type="common",
+                        basis="hybrid",
                         month="2025-04",  # Use standard format
-                    is_fixed="variable",
-                    category="pl_import",
-                    pl_classification="I",
-                    original_amount=amount,
-                    allocation_ratio=1.0,
-                    source_file="pl_upload",
-                    pl_period=period
-                )
-                db.add(cost)
-                costs_created += 1
-                print(f"   📦 Created I cost: {particulars} = ₹{amount:,.2f} (100% inhouse)")
-                
-            elif item_type == 'O':
-                # 100% outsourced
-                cost = Cost(
-                    name=particulars,
-                    amount=amount,
-                    applies_to="outsourced",
-                    cost_type="common",
-                    basis="hybrid",
-                    month="2025-04",
-                    is_fixed="variable",
-                    category="pl_import",
-                    pl_classification="O",
-                    original_amount=amount,
-                    allocation_ratio=1.0,
-                    source_file="pl_upload",
-                    pl_period=period
-                )
-                db.add(cost)
-                costs_created += 1
-                print(f"   📦 Created O cost: {particulars} = ₹{amount:,.2f} (100% outsourced)")
-                
-            else:  # B - single pooled cost; allocate later by hybrid across all products
-                cost_both = Cost(
+                        is_fixed="variable",
+                        category="pl_import",
+                        pl_classification="I",
+                        original_amount=amount,
+                        allocation_ratio=1.0,
+                        source_file="pl_upload",
+                        pl_period=period
+                    )
+                    db.add(cost)
+                    costs_created += 1
+                    print(f"   📦 Created I cost: {particulars} = ₹{amount:,.2f} (100% inhouse)")
+                    
+                elif item_type == 'O':
+                    # 100% outsourced
+                    cost = Cost(
+                        name=particulars,
+                        amount=amount,
+                        applies_to="outsourced",
+                        cost_type="common",
+                        basis="hybrid",
+                        month="2025-04",
+                        is_fixed="variable",
+                        category="pl_import",
+                        pl_classification="O",
+                        original_amount=amount,
+                        allocation_ratio=1.0,
+                        source_file="pl_upload",
+                        pl_period=period
+                    )
+                    db.add(cost)
+                    costs_created += 1
+                    print(f"   📦 Created O cost: {particulars} = ₹{amount:,.2f} (100% outsourced)")
+                    
+                else:  # B - single pooled cost; allocate later by hybrid across all products
+                    cost_both = Cost(
                     name=particulars,
                     amount=amount,
                     applies_to="both",
@@ -4625,9 +4595,9 @@ async def upload_cost_sheet(file: UploadFile = File(...), db: Session = Depends(
             }
         
         finally:
-        # Clean up temp file
+            # Clean up temp file
             if os.path.exists(tmp_file_path):
-        os.unlink(tmp_file_path)
+                os.unlink(tmp_file_path)
         
     except Exception as e:
         import traceback
@@ -4919,17 +4889,23 @@ async def upload_harvest_data(file: UploadFile = File(...), db: Session = Depend
                 })
             
             print(f"📊 Returning {len(parsed_harvest)} harvest records for display")
-        
-        return {
-            "success": True,
+            
+            return {
+                "success": True,
                 "message": f"Successfully uploaded {harvest_records_created} harvest records",
                 "harvest_records_created": harvest_records_created,
                 "period": period or "Unknown",
                 "parsed_harvest": parsed_harvest  # Detailed list of all harvest records
             }
-        
+        except Exception as e:
+            db.rollback()
+            import traceback
+            print(f"💥 Harvest upload failed: {str(e)}")
+            print(f"📋 Traceback: {traceback.format_exc()}")
+            raise HTTPException(status_code=500, detail=f"Harvest upload failed: {str(e)}")
         finally:
-            os.unlink(tmp_file_path)
+            if os.path.exists(tmp_file_path):
+                os.unlink(tmp_file_path)
         
     except Exception as e:
         import traceback
