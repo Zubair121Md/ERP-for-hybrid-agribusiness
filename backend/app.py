@@ -3907,7 +3907,7 @@ def parse_purple_patch_pl(file_path, db):
                     print(f"   ✏️  Updated cost: {particulars} ({preferred_match.category}) = ₹{amount:,.2f} (selected from {len(all_matches)} matches)")
             else:
                 # Create new cost
-            if item_type == 'I':
+                if item_type == 'I':
                 # 100% inhouse
                 cost = Cost(
                     name=particulars,
