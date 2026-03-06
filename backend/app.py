@@ -696,7 +696,7 @@ class CostAllocationEngine:
                     continue
             
             # Add product to applicable list
-            applicable[product_id] = product
+                applicable[product_id] = product
         
         return applicable
     
@@ -719,6 +719,10 @@ class CostAllocationEngine:
         unit_upper = (product.unit or "").upper() if hasattr(product, 'unit') and product.unit else ""
         is_ea = unit_upper in ['EA', 'EACH', 'PC', 'PCS', 'UNIT', 'UNITS']
         is_hamper = "hamper" in pname
+        
+        # DEBUG: Log production_kg basis calculation for inhouse products
+        if cost.basis == "production_kg" and product.source == "inhouse":
+            print(f"   🔍 DEBUG production_kg for {product.name}: inhouse_production={sale.inhouse_production}, quantity={sale.quantity}, inward_quantity={sale.inward_quantity}")
 
         # Special handling for hampers:
         # Hampers are assembled products, not directly cultivated, so:
@@ -1578,6 +1582,13 @@ async def upload_excel(file: UploadFile = File(...), db: Session = Depends(get_d
         print(f"📋 Sample data:")
         print(df.head(2).to_string())
         
+        # Clear old allocations before uploading new sales data
+        # This ensures fresh allocation calculations with correct quantities
+        print("🧹 Clearing old allocations before upload...")
+        deleted_allocations = db.query(Allocation).delete()
+        db.commit()
+        print(f"   ✅ Cleared {deleted_allocations} old allocation records")
+        
         # ============================================
         # AUTO-DETECTION: Check if Purple Patch format
         # ============================================
@@ -1844,50 +1855,50 @@ async def upload_excel(file: UploadFile = File(...), db: Session = Depends(get_d
                                 source = "inhouse"
                                 product_name = f"{particulars} (Inhouse)"
                                 # Create inhouse product and sale (reuse existing logic)
-                                product = db.query(Product).filter(Product.name == product_name).first()
-                                if not product:
-                                    product = Product(
-                                        name=product_name,
+                        product = db.query(Product).filter(Product.name == product_name).first()
+                        if not product:
+                            product = Product(
+                                name=product_name,
                                         source=source,
-                                        unit=outward_unit if outward_unit else "kg"
-                                    )
-                                    db.add(product)
-                                    db.commit()
-                                    db.refresh(product)
-                                    products_created += 1
-                                    print(f"   📦 Created product: {product_name}")
-                                
-                                monthly_sale = MonthlySale(
-                                    product_id=product.id,
-                                    month=month,
+                            unit=outward_unit if outward_unit else "kg"
+                            )
+                            db.add(product)
+                            db.commit()
+                            db.refresh(product)
+                            products_created += 1
+                            print(f"   📦 Created product: {product_name}")
+                        
+                        monthly_sale = MonthlySale(
+                            product_id=product.id,
+                        month=month,
                                     quantity=outward_qty,
-                                    sale_price=outward_rate,
+                        sale_price=outward_rate,
                                     direct_cost=0.0,
                                     inward_quantity=0.0,
-                                    inward_rate=0.0,
-                                    inward_value=0.0,
+                        inward_rate=0.0,
+                        inward_value=0.0,
                                     inhouse_production=outward_qty,
-                                    wastage=0.0
-                                )
-                                db.add(monthly_sale)
-                                sales_created += 1
+                        wastage=0.0
+                        )
+                        db.add(monthly_sale)
+                        sales_created += 1
                                 print(f"   💰 Created sale (inhouse): {outward_qty}{outward_unit} @ ₹{outward_rate}")
-                                
-                                parsed_data.append(ExcelRowData(
-                                    month=month,
-                                    particulars=particulars,
-                                    type="Inhouse",
-                                    inward_quantity=0.0,
-                                    inward_rate=0.0,
-                                    inward_value=0.0,
+                        
+                        parsed_data.append(ExcelRowData(
+                        month=month,
+                        particulars=particulars,
+                        type="Inhouse",
+                        inward_quantity=0.0,
+                        inward_rate=0.0,
+                        inward_value=0.0,
                                     outward_quantity=outward_qty,
-                                    outward_rate=outward_rate,
+                        outward_rate=outward_rate,
                                     outward_value=outward_value,
                                     inhouse_production=outward_qty,
-                                    wastage=0.0
-                                ))
+                        wastage=0.0
+                        ))
                                 continue
-                        else:
+                else:
                             # For "Outsourced" products: ALWAYS split if harvest exists
                             # inhouse_qty = min(harvest_qty, outward_qty) - the portion from harvest
                             # outsourced_qty = max(0, outward_qty - harvest_qty) - the purchased portion
@@ -2034,51 +2045,51 @@ async def upload_excel(file: UploadFile = File(...), db: Session = Depends(get_d
                             # Type is "Outsourced" but no harvest data - treat as "Outsourced"
                             product_name = f"{particulars} (Outsourced)"
                             source = "outsourced"
-                        
-                        # Create or get product
-                        product = db.query(Product).filter(Product.name == product_name).first()
-                        if not product:
-                            product = Product(
-                                name=product_name,
+                    
+                    # Create or get product
+                    product = db.query(Product).filter(Product.name == product_name).first()
+                    if not product:
+                        product = Product(
+                            name=product_name,
                                 source="inhouse" if source == "both" else source,  # Default to inhouse for "Both" without harvest data
-                                unit=outward_unit if outward_unit else "kg"
-                            )
-                            db.add(product)
-                            db.commit()
-                            db.refresh(product)
-                            products_created += 1
-                            print(f"   📦 Created product: {product_name} (no harvest data, using as-is)")
-                        
-                        # Create monthly sale record
-                        monthly_sale = MonthlySale(
-                            product_id=product.id,
-                            month=month,
-                            quantity=outward_qty,
-                            sale_price=outward_rate,
-                            direct_cost=inward_value if inward_value > 0 else (inward_qty * inward_rate),
-                            inward_quantity=inward_qty,
-                            inward_rate=inward_rate,
-                            inward_value=inward_value,
-                            inhouse_production=inhouse_production,
-                            wastage=wastage
+                            unit=outward_unit if outward_unit else "kg"
                         )
-                        
-                        db.add(monthly_sale)
-                        sales_created += 1
+                        db.add(product)
+                        db.commit()
+                        db.refresh(product)
+                        products_created += 1
+                            print(f"   📦 Created product: {product_name} (no harvest data, using as-is)")
+                    
+                    # Create monthly sale record
+                    monthly_sale = MonthlySale(
+                        product_id=product.id,
+                        month=month,
+                        quantity=outward_qty,
+                        sale_price=outward_rate,
+                        direct_cost=inward_value if inward_value > 0 else (inward_qty * inward_rate),
+                        inward_quantity=inward_qty,
+                        inward_rate=inward_rate,
+                        inward_value=inward_value,
+                        inhouse_production=inhouse_production,
+                        wastage=wastage
+                    )
+                    
+                    db.add(monthly_sale)
+                    sales_created += 1
                         print(f"   💰 Created sale ({source}): {outward_qty}{outward_unit} @ ₹{outward_rate}")
-                        
-                        # Add to parsed data
-                        parsed_data.append(ExcelRowData(
-                            month=month,
-                            particulars=particulars,
-                            type=product_type,
-                            inward_quantity=inward_qty,
-                            inward_rate=inward_rate,
-                            inward_value=inward_value,
-                            outward_quantity=outward_qty,
-                            outward_rate=outward_rate,
-                            outward_value=outward_value,
-                            inhouse_production=inhouse_production,
+                    
+                    # Add to parsed data
+                    parsed_data.append(ExcelRowData(
+                        month=month,
+                        particulars=particulars,
+                        type=product_type,
+                        inward_quantity=inward_qty,
+                        inward_rate=inward_rate,
+                        inward_value=inward_value,
+                        outward_quantity=outward_qty,
+                        outward_rate=outward_rate,
+                        outward_value=outward_value,
+                        inhouse_production=inhouse_production,
                             wastage=wastage
                         ))
                         # Skip the duplicate parsed_data.append below
@@ -3219,20 +3230,20 @@ def split_inhouse_outsourced(row):
     """
     # Return single record as-is (no splitting based on inward/outward difference)
     records = []
-    records.append({
-        'month': row['month'],
-        'particulars': row['particulars'],
+        records.append({
+            'month': row['month'],
+            'particulars': row['particulars'],
         'type': row.get('type', 'Outsourced'),  # Use the Type from the row
-        'inward_qty': row['inward_qty'],
-        'outward_qty': row['outward_qty'],
-        'inward_rate': row['inward_rate'],
-        'outward_rate': row['outward_rate'],
-        'inward_value': row['inward_qty'] * row['inward_rate'],
-        'outward_value': row['outward_qty'] * row['outward_rate'],
+            'inward_qty': row['inward_qty'],
+            'outward_qty': row['outward_qty'],
+            'inward_rate': row['inward_rate'],
+            'outward_rate': row['outward_rate'],
+            'inward_value': row['inward_qty'] * row['inward_rate'],
+            'outward_value': row['outward_qty'] * row['outward_rate'],
         'inhouse_production': 0,  # Will be set based on Type column, not inward/outward difference
         'wastage': 0,
-        'unit': row['outward_unit']
-    })
+            'unit': row['outward_unit']
+        })
     
     return records
 
@@ -3506,9 +3517,9 @@ def parse_purple_patch_pl(file_path, db):
                             print(f"📅 Period detected: {period} (from row {idx+1}, col {col_idx+1})")
                             break
                     if period != "Unknown":
-                        break
-                if period != "Unknown":
                     break
+            if period != "Unknown":
+                break
         
         if period == "Unknown":
             print("⚠️  Period not detected, using default")
@@ -3601,10 +3612,10 @@ def parse_purple_patch_pl(file_path, db):
                             # Check if amount is small (likely from overview table)
                             amount = parse_numeric_robust(amount_raw)
                             if amount < 1000:
-                                continue
-                            
-                            # Use robust number parser
-                            amount = parse_numeric_robust(amount_raw)
+                    continue
+                
+                        # Use robust number parser
+                        amount = parse_numeric_robust(amount_raw)
                         
                         if particulars and amount != 0:
                             # Normalize the particulars name for matching
@@ -3657,7 +3668,7 @@ def parse_purple_patch_pl(file_path, db):
                         if pd.isna(particulars_raw) or str(particulars_raw).strip() == '':
                             continue
                         
-                        particulars = str(particulars_raw).strip()
+                                        particulars = str(particulars_raw).strip()
                         
                         # Skip category headers
                         category_headers = [
@@ -3694,9 +3705,9 @@ def parse_purple_patch_pl(file_path, db):
                             if any(keyword in particulars.upper() for keyword in overview_keywords):
                                 continue
                             
-                            amount = parse_numeric_robust(amount_raw) if pd.notna(amount_raw) else 0.0
-                            
-                            if amount != 0:
+                                            amount = parse_numeric_robust(amount_raw) if pd.notna(amount_raw) else 0.0
+                                            
+                                            if amount != 0:
                                 # Normalize and check whitelist
                                 normalized_particulars = normalize_name(particulars)
                                 
@@ -3714,15 +3725,15 @@ def parse_purple_patch_pl(file_path, db):
                                     if not matched:
                                         continue
                                 
-                                if particulars not in exclude_items:
-                                    data_rows.append({
-                                        'particulars': particulars,
-                                        'amount': amount,
-                                        'type': template_mapping.get(particulars, 'B')
-                                    })
+                                                if particulars not in exclude_items:
+                                                    data_rows.append({
+                                                        'particulars': particulars,
+                                                        'amount': amount,
+                                                        'type': template_mapping.get(particulars, 'B')
+                                                    })
                                     print(f"   📊 Found (Strategy 3): {particulars} = ₹{amount:,.2f}")
-                except (IndexError, KeyError, ValueError):
-                    continue
+                            except (IndexError, KeyError, ValueError):
+                                continue
         
         # Strategy 3: Try column B (index 1) and C (index 2) as fallback
         if len(data_rows) == 0:
@@ -3883,67 +3894,67 @@ def parse_purple_patch_pl(file_path, db):
                     print(f"   ✏️  Updated cost: {particulars} ({preferred_match.category}) = ₹{amount:,.2f} (selected from {len(all_matches)} matches)")
             else:
                 # Create new cost
-                if item_type == 'I':
-                    # 100% inhouse
-                    cost = Cost(
-                        name=particulars,
-                        amount=amount,
-                        applies_to="inhouse",
-                        cost_type="common",
-                        basis="hybrid",
+            if item_type == 'I':
+                # 100% inhouse
+                cost = Cost(
+                    name=particulars,
+                    amount=amount,
+                    applies_to="inhouse",
+                    cost_type="common",
+                    basis="hybrid",
                         month="2025-04",  # Use standard format
-                        is_fixed="variable",
-                        category="pl_import",
-                        pl_classification="I",
-                        original_amount=amount,
-                        allocation_ratio=1.0,
-                        source_file="pl_upload",
-                        pl_period=period
-                    )
-                    db.add(cost)
-                    costs_created += 1
-                    print(f"   📦 Created I cost: {particulars} = ₹{amount:,.2f} (100% inhouse)")
-                    
-                elif item_type == 'O':
-                    # 100% outsourced
-                    cost = Cost(
-                        name=particulars,
-                        amount=amount,
-                        applies_to="outsourced",
-                        cost_type="common",
-                        basis="hybrid",
-                        month="2025-04",
-                        is_fixed="variable",
-                        category="pl_import",
-                        pl_classification="O",
-                        original_amount=amount,
-                        allocation_ratio=1.0,
-                        source_file="pl_upload",
-                        pl_period=period
-                    )
-                    db.add(cost)
-                    costs_created += 1
-                    print(f"   📦 Created O cost: {particulars} = ₹{amount:,.2f} (100% outsourced)")
-                    
-                else:  # B - single pooled cost; allocate later by hybrid across all products
-                    cost_both = Cost(
-                        name=particulars,
-                        amount=amount,
-                        applies_to="both",
-                        cost_type="common",
-                        basis="hybrid",  # allocate by hybrid (weight + value), alpha set in allocator
-                        month="2025-04",
-                        is_fixed="variable",
-                        category="pl_import",
-                        pl_classification="B",
-                        original_amount=amount,
-                        allocation_ratio=None,
-                        source_file="pl_upload",
-                        pl_period=period
-                    )
-                    db.add(cost_both)
-                    costs_created += 1
-                    print(f"   📦 Created B cost (single): {particulars} = ₹{amount:,.2f} (applies_to=both, basis=weight)")
+                    is_fixed="variable",
+                    category="pl_import",
+                    pl_classification="I",
+                    original_amount=amount,
+                    allocation_ratio=1.0,
+                    source_file="pl_upload",
+                    pl_period=period
+                )
+                db.add(cost)
+                costs_created += 1
+                print(f"   📦 Created I cost: {particulars} = ₹{amount:,.2f} (100% inhouse)")
+                
+            elif item_type == 'O':
+                # 100% outsourced
+                cost = Cost(
+                    name=particulars,
+                    amount=amount,
+                    applies_to="outsourced",
+                    cost_type="common",
+                    basis="hybrid",
+                    month="2025-04",
+                    is_fixed="variable",
+                    category="pl_import",
+                    pl_classification="O",
+                    original_amount=amount,
+                    allocation_ratio=1.0,
+                    source_file="pl_upload",
+                    pl_period=period
+                )
+                db.add(cost)
+                costs_created += 1
+                print(f"   📦 Created O cost: {particulars} = ₹{amount:,.2f} (100% outsourced)")
+                
+            else:  # B - single pooled cost; allocate later by hybrid across all products
+                cost_both = Cost(
+                    name=particulars,
+                    amount=amount,
+                    applies_to="both",
+                    cost_type="common",
+                    basis="hybrid",  # allocate by hybrid (weight + value), alpha set in allocator
+                    month="2025-04",
+                    is_fixed="variable",
+                    category="pl_import",
+                    pl_classification="B",
+                    original_amount=amount,
+                    allocation_ratio=None,
+                    source_file="pl_upload",
+                    pl_period=period
+                )
+                db.add(cost_both)
+                costs_created += 1
+                print(f"   📦 Created B cost (single): {particulars} = ₹{amount:,.2f} (applies_to=both, basis=weight)")
         
         db.commit()
         
@@ -4414,9 +4425,9 @@ async def upload_cost_sheet(file: UploadFile = File(...), db: Session = Depends(
             }
         
         finally:
-            # Clean up temp file
+        # Clean up temp file
             if os.path.exists(tmp_file_path):
-                os.unlink(tmp_file_path)
+        os.unlink(tmp_file_path)
         
     except Exception as e:
         import traceback
@@ -4708,9 +4719,9 @@ async def upload_harvest_data(file: UploadFile = File(...), db: Session = Depend
                 })
             
             print(f"📊 Returning {len(parsed_harvest)} harvest records for display")
-            
-            return {
-                "success": True,
+        
+        return {
+            "success": True,
                 "message": f"Successfully uploaded {harvest_records_created} harvest records",
                 "harvest_records_created": harvest_records_created,
                 "period": period or "Unknown",
@@ -4719,7 +4730,7 @@ async def upload_harvest_data(file: UploadFile = File(...), db: Session = Depend
         
         finally:
             os.unlink(tmp_file_path)
-    
+        
     except Exception as e:
         import traceback
         print(f"💥 Harvest Data upload failed: {str(e)}")
