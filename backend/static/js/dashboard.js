@@ -589,26 +589,84 @@ function displayCosts(costs) {
                     <td colspan="7" style="padding: 10px; font-size: 14px;">${heading}</td>
                 </tr>
             `;
-            
+
+            // Special configuration row for FIXED COST CAT - II
+            if (categoryKey === 'fixed_cost_cat_ii') {
+                const fixedCosts = costsByCategory[categoryKey];
+                const totalFc2 = fixedCosts.reduce((sum, c) => sum + (c.amount || 0), 0);
+
+                const strawberryCost = fixedCosts.find(c => c.name.toLowerCase().includes('strawberry'));
+                const greensCost = fixedCosts.find(c => c.name.toLowerCase().includes('greens'));
+                const openFieldCost = fixedCosts.find(c => c.name.toLowerCase().includes('open field'));
+                const aggregationCost = fixedCosts.find(c => c.name.toLowerCase().includes('aggregation'));
+
+                const pct = (cost) => totalFc2 > 0 && cost ? ((cost.amount / totalFc2) * 100).toFixed(1) : '';
+
+                tableHTML += `
+                    <tr>
+                        <td colspan="7" style="padding: 12px 20px; background-color: #f9fafb;">
+                            <div style="display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-end;">
+                                <div style="font-weight: 600; margin-right: 8px;">Fixed Cost II Split (% of total):</div>
+                                <div style="display: flex; flex-wrap: wrap; gap: 8px;">
+                                    <label style="font-size: 12px;">
+                                        Strawberry
+                                        <input id="fc2-strawberry-pct" type="number" min="0" max="100" step="0.1"
+                                           value="${pct(strawberryCost)}"
+                                           style="width: 70px; margin-left: 4px;">
+                                    </label>
+                                    <label style="font-size: 12px;">
+                                        Greens
+                                        <input id="fc2-greens-pct" type="number" min="0" max="100" step="0.1"
+                                           value="${pct(greensCost)}"
+                                           style="width: 70px; margin-left: 4px;">
+                                    </label>
+                                    <label style="font-size: 12px;">
+                                        Open Field
+                                        <input id="fc2-openfield-pct" type="number" min="0" max="100" step="0.1"
+                                           value="${pct(openFieldCost)}"
+                                           style="width: 70px; margin-left: 4px;">
+                                    </label>
+                                    <label style="font-size: 12px;">
+                                        Aggregation
+                                        <input id="fc2-aggregation-pct" type="number" min="0" max="100" step="0.1"
+                                           value="${pct(aggregationCost)}"
+                                           style="width: 70px; margin-left: 4px;">
+                                    </label>
+                                </div>
+                                <div style="margin-left: auto; display: flex; align-items: center; gap: 8px;">
+                                    <span id="fc2-total-label" style="font-size: 12px; color: #6b7280;">
+                                        Total Fixed Cost II: ₹${formatNumber(totalFc2)}
+                                    </span>
+                                    <button type="button" class="btn btn-sm btn-primary"
+                                        onclick='applyFixedCostIISplits(${JSON.stringify(fixedCosts)})'>
+                                        Apply Split
+                                    </button>
+                                </div>
+                            </div>
+                        </td>
+                    </tr>
+                `;
+            }
+
             costsByCategory[categoryKey].forEach(cost => {
-        tableHTML += `
-            <tr>
+                tableHTML += `
+                    <tr>
                         <td style="padding-left: 20px;">${cost.name}</td>
-                <td>₹${formatNumber(cost.amount)}</td>
-                <td><span class="badge badge-info">${cost.applies_to}</span></td>
-                <td>${cost.cost_type}</td>
-                <td>${cost.basis}</td>
-                <td><span class="badge badge-secondary">${cost.category}</span></td>
-                <td>
-                    <button class="btn btn-sm btn-secondary" onclick="editCost(${cost.id})">
-                        <i class="fas fa-edit"></i>
-                    </button>
-                    <button class="btn btn-sm btn-danger" onclick="deleteCost(${cost.id})">
-                        <i class="fas fa-trash"></i>
-                    </button>
-                </td>
-            </tr>
-        `;
+                        <td>₹${formatNumber(cost.amount)}</td>
+                        <td><span class="badge badge-info">${cost.applies_to}</span></td>
+                        <td>${cost.cost_type}</td>
+                        <td>${cost.basis}</td>
+                        <td><span class="badge badge-secondary">${cost.category}</span></td>
+                        <td>
+                            <button class="btn btn-sm btn-secondary" onclick="editCost(${cost.id})">
+                                <i class="fas fa-edit"></i>
+                            </button>
+                            <button class="btn btn-sm btn-danger" onclick="deleteCost(${cost.id})">
+                                <i class="fas fa-trash"></i>
+                            </button>
+                        </td>
+                    </tr>
+                `;
             });
         }
     });
@@ -647,6 +705,96 @@ function displayCosts(costs) {
     
     tableHTML += '</tbody></table>';
     container.innerHTML = tableHTML;
+}
+
+// Apply user-defined split for FIXED COST CAT - II
+async function applyFixedCostIISplits(fixedCosts) {
+    try {
+        const strawberryPct = parseFloat(document.getElementById('fc2-strawberry-pct').value || '0');
+        const greensPct = parseFloat(document.getElementById('fc2-greens-pct').value || '0');
+        const openFieldPct = parseFloat(document.getElementById('fc2-openfield-pct').value || '0');
+        const aggregationPct = parseFloat(document.getElementById('fc2-aggregation-pct').value || '0');
+
+        const totalPct = strawberryPct + greensPct + openFieldPct + aggregationPct;
+        if (Math.abs(totalPct - 100) > 0.01) {
+            showAlert('Fixed Cost II percentages must add up to 100%.', 'error');
+            return;
+        }
+
+        const totalFc2 = fixedCosts.reduce((sum, c) => sum + (c.amount || 0), 0);
+        if (totalFc2 <= 0) {
+            showAlert('Total Fixed Cost II amount is zero. Nothing to split.', 'error');
+            return;
+        }
+
+        // Helper to find or create cost slots
+        const findByName = (keyword) =>
+            fixedCosts.find(c => c.name.toLowerCase().includes(keyword));
+
+        const strawberryCost = findByName('strawberry');
+        const greensCost = findByName('greens');
+        const openFieldCost = findByName('open field');
+        const aggregationCost = findByName('aggregation');
+
+        const targets = [
+            { pct: strawberryPct, cost: strawberryCost, label: 'Strawberry' },
+            { pct: greensPct, cost: greensCost, label: 'Greens' },
+            { pct: openFieldPct, cost: openFieldCost, label: 'Open Field' },
+            { pct: aggregationPct, cost: aggregationCost, label: 'Aggregation' },
+        ];
+
+        // Compute new amounts
+        let remaining = totalFc2;
+        const updates = targets.map((t, idx) => {
+            const isLast = idx === targets.length - 1;
+            let amount = 0;
+            if (t.pct > 0) {
+                if (isLast) {
+                    amount = remaining;
+                } else {
+                    amount = Math.round((totalFc2 * (t.pct / 100)) * 100) / 100;
+                    remaining -= amount;
+                }
+            }
+            return { ...t, amount };
+        });
+
+        // Call backend to update existing costs (we do not auto-create new costs here)
+        for (const u of updates) {
+            if (!u.cost) {
+                if (u.pct > 0) {
+                    console.warn(`No existing Fixed Cost II row found for ${u.label}; skipping.`);
+                }
+                continue;
+            }
+
+            // Only send fields allowed by CostUpdate schema (amount, etc.)
+            const payload = {
+                amount: u.amount
+            };
+
+            const response = await fetch(`${API_BASE}/costs/${u.cost.id}`, {
+                method: 'PUT',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify(payload)
+            });
+
+            if (!response.ok) {
+                const err = await response.json().catch(() => ({}));
+                console.error('Error updating Fixed Cost II split:', err);
+                showAlert(`Error updating Fixed Cost II (${u.label})`, 'error');
+                return;
+            }
+        }
+
+        showAlert('Fixed Cost II split updated successfully.', 'success');
+        loadCosts();
+    } catch (error) {
+        console.error('Error applying Fixed Cost II split:', error);
+        showAlert('Unexpected error while updating Fixed Cost II split.', 'error');
+    }
 }
 
 // Form handlers

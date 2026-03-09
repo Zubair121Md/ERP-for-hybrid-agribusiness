@@ -352,13 +352,12 @@ This document explains **exactly** how each cost category is allocated to produc
 - **Formula:** `(Product Sales_kg / Total Sales_kg) × ₹90,560`
 
 #### **8C. WASTAGE- FARM** (₹979,018)
-- **Basis:** Production KG (inward quantity for outsourced products)
-- **Applies To:** Outsourced products only
-- **Formula:** `(Product Production_kg / Total Outsourced Production_kg) × ₹979,018`
+- **Basis:** Production KG (inward quantity)
+- **Applies To:** Inhouse products only
+- **Formula:** `(Product Production_kg / Total Inhouse Production_kg) × ₹979,018`
 
 **What This Means:** 
-- **OWN FARM wastage**: Allocated based on inhouse production volume
-- **FARM wastage**: Allocated based on outsourced production volume (outsourced-only cost)
+- **OWN FARM & FARM wastage**: Allocated based on production volume (inhouse only)
 - **DISPATCH wastage**: Allocated based on sales volume (all products) - this represents wastage during delivery/dispatch
 
 ---

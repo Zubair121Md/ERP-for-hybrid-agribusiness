@@ -555,12 +555,12 @@ class CostAllocationEngine:
         fixed_cost_category = None
         
         if is_fixed_cost_cat_ii:
-            # Extract category from cost name
-            if "STRAWBERRY" in cost_name_upper and "60" in cost_name_upper:
+            # Extract category from cost name based on keywords (no hardcoded percentages)
+            if "STRAWBERRY" in cost_name_upper:
                 fixed_cost_category = "strawberry"
-            elif "GREENS" in cost_name_upper and "25" in cost_name_upper:
+            elif "GREENS" in cost_name_upper:
                 fixed_cost_category = "greens"
-            elif "AGGREGATION" in cost_name_upper and "15" in cost_name_upper:
+            elif "AGGREGATION" in cost_name_upper:
                 fixed_cost_category = "aggregation"
         
         # Check if this is a VARIABLE COST that needs section-based filtering
@@ -639,12 +639,12 @@ class CostAllocationEngine:
                 product_name_upper = (product.name or "").upper().strip()
                 
                 if fixed_cost_category == "strawberry":
-                    # FIXED COST CAT - II (Strawberry 60%): Only apply to strawberry products (inhouse)
+                    # FIXED COST CAT - II (Strawberry): Only apply to strawberry products (inhouse)
                     if product.source != "inhouse" or "STRAWBERRY" not in product_name_upper:
                         continue
                 
                 elif fixed_cost_category == "greens":
-                    # FIXED COST CAT - II (Greens 25%): Only apply to greens/lettuce products (inhouse)
+                    # FIXED COST CAT - II (Greens): Only apply to greens/lettuce products (inhouse)
                     # Match products with "greens", "lettuce", "micro", "salad", or other greens keywords
                     if product.source != "inhouse":
                         continue
@@ -657,7 +657,7 @@ class CostAllocationEngine:
                         continue
                 
                 elif fixed_cost_category == "aggregation":
-                    # FIXED COST CAT - II (Aggregation 15%): Only apply to outsourced products
+                    # FIXED COST CAT - II (Aggregation): Only apply to outsourced products
                     if product.source != "outsourced":
                         continue
             
@@ -4263,7 +4263,7 @@ async def upload_cost_sheet(file: UploadFile = File(...), db: Session = Depends(
                 print(f"   ⚠️  FIXED COST CAT - I is 0 or not found")
             
             # ============================================================
-            # 2) FIXED COST CAT - II  →  60% Strawberry, 25% Greens, 15% Aggregation
+            # 2) FIXED COST CAT - II  →  Strawberry, Greens, Aggregation (percentages configurable)
             # ============================================================
             fc2 = expenses.get('fixed_cost_cat_ii', {}).get('total', 0.0)
             print(f"   📊 FIXED COST CAT - II: ₹{fc2:,.2f}")
@@ -4273,17 +4273,17 @@ async def upload_cost_sheet(file: UploadFile = File(...), db: Session = Depends(
                 greens_pct = splits.get('greens', 0.25)
                 agg_pct = splits.get('aggregation', 0.15)
                 
-                save_cost("FIXED COST CAT - II (Strawberry 60%)", round(fc2 * straw_pct, 2),
+                save_cost("FIXED COST CAT - II - Strawberry", round(fc2 * straw_pct, 2),
                           "inhouse", "fixed_cost_cat_ii",
                           "production_kg",  # Basis: Production KG
                           is_fixed="fixed", cost_type="inhouse-only", pl_class="B")
                 
-                save_cost("FIXED COST CAT - II (Greens 25%)", round(fc2 * greens_pct, 2),
+                save_cost("FIXED COST CAT - II - Greens", round(fc2 * greens_pct, 2),
                           "inhouse", "fixed_cost_cat_ii",
                           "production_kg",  # Basis: Production KG
                           is_fixed="fixed", cost_type="inhouse-only", pl_class="B")
                 
-                save_cost("FIXED COST CAT - II (Aggregation 15%)", round(fc2 * agg_pct, 2),
+                save_cost("FIXED COST CAT - II - Aggregation", round(fc2 * agg_pct, 2),
                           "outsourced", "fixed_cost_cat_ii",
                           "production_kg",  # Basis: Production KG
                           is_fixed="fixed", cost_type="common", pl_class="B")
@@ -4427,9 +4427,9 @@ async def upload_cost_sheet(file: UploadFile = File(...), db: Session = Depends(
                     elif 'FARM' in wname and 'OWN' not in wname:
                         save_cost(
                             f"WASTAGE- FARM",
-                            wit['amount'], "outsourced", "wastage_shortage",
-                            "production_kg",  # Basis: Production KG (outsourced only)
-                            cost_type="outsourced-only", pl_class="O"
+                            wit['amount'], "inhouse", "wastage_shortage",
+                            "production_kg",  # Basis: Production KG (inhouse only)
+                            cost_type="inhouse-only", pl_class="B"
                         )
                     else:
                         save_cost(
