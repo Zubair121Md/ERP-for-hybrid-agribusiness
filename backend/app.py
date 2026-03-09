@@ -4427,9 +4427,9 @@ async def upload_cost_sheet(file: UploadFile = File(...), db: Session = Depends(
                     elif 'FARM' in wname and 'OWN' not in wname:
                         save_cost(
                             f"WASTAGE- FARM",
-                            wit['amount'], "inhouse", "wastage_shortage",
-                            "production_kg",  # Basis: Production KG (inhouse only)
-                            cost_type="inhouse-only", pl_class="B"
+                            wit['amount'], "outsourced", "wastage_shortage",
+                            "production_kg",  # Basis: Production KG (outsourced only)
+                            cost_type="outsourced-only", pl_class="O"
                         )
                     else:
                         save_cost(
