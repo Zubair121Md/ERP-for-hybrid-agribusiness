@@ -864,13 +864,47 @@ class CostAllocationEngine:
             return sale.quantity
         
         elif cost.basis == "hybrid":
-            # Legacy hybrid basis - convert to weight-only for consistency
-            # Use weight (kg) as the basis - this ensures all allocations are weight-based
+            # NEW LOGIC: Different allocation for inhouse-specific costs (I items)
+            # Get product source
+            product_source = product.source if hasattr(product, 'source') else None
+            is_inhouse = product_source == "inhouse"
+            
+            # Check if this is an inhouse-specific cost (I classification like Cultivation, Wastage)
+            is_inhouse_cost = cost.pl_classification == "I" if hasattr(cost, 'pl_classification') and cost.pl_classification else False
+            
+            # For inhouse products with inhouse-specific costs (I items):
+            # Allocate by WEIGHT ONLY - these are direct production costs proportional to quantity produced
+            # Examples: Cultivation Expenses I, Wastage-in Farm (Quality Check) I, Rejection Own Farm Harvest I
+            # These costs scale directly with production volume, not profitability
+            # NOTE: For graded products (A/B/C) from same harvest, this ensures fair per-kg allocation
+            if is_inhouse and is_inhouse_cost:
+                qty_kg = get_quantity_kg(sale.quantity)
+                if qty_kg > 0:
+                    return qty_kg  # Pure weight-based allocation for cultivation/wastage costs
+                # Fallback to revenue if no weight conversion
+                return sale.quantity * sale.sale_price
+            
+            # For all other products (outsourced products, or inhouse products with B costs):
+            # Use standard hybrid: 20% weight + 80% gross profit
+            # This balances resource consumption with profitability for shared overhead costs
+            # Weight part (20%): Use ACTUAL weight in kg (with EA→kg conversion where applicable)
             qty_kg = get_quantity_kg(sale.quantity)
-            if qty_kg > 0:
-                return qty_kg  # Pure weight-based allocation
-            # Fallback to quantity if no weight conversion available
-            return sale.quantity
+            weight_part = qty_kg
+            
+            # Gross Profit part (80%): Revenue - Direct Cost
+            revenue = sale.quantity * sale.sale_price
+            direct_cost = sale.direct_cost or 0.0
+            gross_profit = max(0.0, revenue - direct_cost)  # Ensure non-negative
+            
+            # IMPORTANT: For inhouse products, if direct_cost is 0, gross_profit = revenue
+            # This means high-revenue products (like A Grade) get 80% of allocation based on revenue
+            # Lower-revenue products (like C Grade) get penalized even if they're same product family
+            # Current logic: 20% weight + 80% revenue (since direct_cost = 0 for inhouse)
+            
+            # Combined basis: 20% weight + 80% gross profit
+            # Weight and profit are on different scales, but this creates fair balance
+            # High-profit products still get most allocation (80%), but weight matters (20%)
+            return 0.20 * weight_part + 0.80 * gross_profit
         
         return 0.0
     
@@ -887,7 +921,7 @@ class CostAllocationEngine:
                 product_allocations[allocation.product_id] = []
             product_allocations[allocation.product_id].append(allocation)
         
-        # Calculate per-product costs and profits
+        # Calculate per-product costs and profits (including CP-based margin)
         products_data = []
         total_revenue = 0.0
         total_costs = 0.0
@@ -908,7 +942,9 @@ class CostAllocationEngine:
             revenue = sale.quantity * sale.sale_price
             profit = revenue - total_cost
             cost_per_kg = total_cost / sale.quantity if sale.quantity > 0 else 0
-            profit_margin = (profit / revenue * 100) if revenue > 0 else 0
+            # Margin based on Cost Price (CP): (SP - CP) / CP * 100
+            margin_per_kg = sale.sale_price - cost_per_kg if cost_per_kg > 0 else 0
+            margin_pct_cp = (margin_per_kg / cost_per_kg * 100) if cost_per_kg > 0 else 0
             
             # Cost breakdown by category
             for allocation in allocated_costs:
@@ -930,7 +966,10 @@ class CostAllocationEngine:
                 "revenue": revenue,
                 "profit": profit,
                 "cost_per_kg": cost_per_kg,
-                "profit_margin": profit_margin,
+                "margin_per_kg": margin_per_kg,
+                # Keep key name "profit_margin" for backwards compatibility,
+                # but now it represents margin % on Cost Price (CP).
+                "profit_margin": margin_pct_cp,
                 "allocations": [
                     {
                         "cost_name": a.cost.name,
@@ -957,24 +996,25 @@ class CostAllocationEngine:
         # Calculate top products
         top_products = products_data[:5]  # Top 5 by profit
         
+        # Aggregate-level margins also on CP basis: Profit ÷ Total Cost
         return {
             "month": month,
             "products": products_data,
             "total_revenue": total_revenue,
             "total_costs": total_costs,
             "total_profit": total_revenue - total_costs,
-            "profit_margin": ((total_revenue - total_costs) / total_revenue * 100) if total_revenue > 0 else 0,
+            "profit_margin": ((total_revenue - total_costs) / total_costs * 100) if total_costs > 0 else 0,
             "inhouse_summary": {
                 "revenue": inhouse_revenue,
                 "costs": inhouse_costs,
                 "profit": inhouse_revenue - inhouse_costs,
-                "profit_margin": ((inhouse_revenue - inhouse_costs) / inhouse_revenue * 100) if inhouse_revenue > 0 else 0
+                "profit_margin": ((inhouse_revenue - inhouse_costs) / inhouse_costs * 100) if inhouse_costs > 0 else 0
             },
             "outsourced_summary": {
                 "revenue": outsourced_revenue,
                 "costs": outsourced_costs,
                 "profit": outsourced_revenue - outsourced_costs,
-                "profit_margin": ((outsourced_revenue - outsourced_costs) / outsourced_revenue * 100) if outsourced_revenue > 0 else 0
+                "profit_margin": ((outsourced_revenue - outsourced_costs) / outsourced_costs * 100) if outsourced_costs > 0 else 0
             },
             "cost_breakdown": cost_breakdown,
             "top_products": top_products
@@ -1106,7 +1146,8 @@ async def get_dashboard_stats(db: Session = Depends(get_db)):
     
     total_costs = total_direct_costs + total_shared_costs
     total_profit = total_revenue - total_costs
-    profit_margin = (total_profit / total_revenue * 100) if total_revenue > 0 else 0
+    # Dashboard margin also on CP basis: Profit ÷ Total Cost
+    profit_margin = (total_profit / total_costs * 100) if total_costs > 0 else 0
     
     # Source-wise breakdown
     inhouse_sales = [s for s in sales if s.product.source == "inhouse"]
@@ -3121,7 +3162,7 @@ def parse_purple_patch_auto_mode(df, db, month="2025-04"):
             amount=fixed_cost_1_total,
             applies_to="both",
             cost_type="common",
-            basis="sales_kg",  # Weight-based: Sales KG
+            basis="hybrid",
             month=month,
             is_fixed="fixed",
             category="fixed_cost_1",
@@ -3141,7 +3182,7 @@ def parse_purple_patch_auto_mode(df, db, month="2025-04"):
             amount=fixed_cost_2_strawberry,
             applies_to="inhouse",  # Strawberry is inhouse
             cost_type="common",
-            basis="production_kg",  # Weight-based: Production KG
+            basis="hybrid",
             month=month,
             is_fixed="fixed",
             category="fixed_cost_2_strawberry",
@@ -3159,7 +3200,7 @@ def parse_purple_patch_auto_mode(df, db, month="2025-04"):
             amount=fixed_cost_2_greens,
             applies_to="inhouse",
             cost_type="common",
-            basis="production_kg",  # Weight-based: Production KG
+            basis="hybrid",
             month=month,
             is_fixed="fixed",
             category="fixed_cost_2_greens",
@@ -3177,7 +3218,7 @@ def parse_purple_patch_auto_mode(df, db, month="2025-04"):
             amount=fixed_cost_2_aggregation,
             applies_to="both",
             cost_type="common",
-            basis="purchase_kg",  # Weight-based: Purchase KG (for outsourced products)
+            basis="hybrid",
             month=month,
             is_fixed="fixed",
             category="fixed_cost_2_aggregation",
@@ -3204,20 +3245,12 @@ def parse_purple_patch_auto_mode(df, db, month="2025-04"):
             applies_to = variable_cost_allocation.get(category_name, 'both')
             pl_class = "I" if applies_to == "inhouse" else ("O" if applies_to == "outsourced" else "B")
             
-            # Determine weight-based basis for variable costs
-            if category_name == "Packing":
-                basis_type = "handled_kg"  # Handled KG for packing (all products)
-            elif category_name == "Aggregation":
-                basis_type = "purchase_kg"  # Purchase KG for aggregation (outsourced)
-            else:
-                basis_type = "production_kg"  # Production KG for inhouse variable costs
-            
             cost = Cost(
                 name=f"Variable Cost - {category_name}",
                 amount=amount,
                 applies_to=applies_to,
                 cost_type="common",
-                basis=basis_type,  # Weight-based allocation
+                basis="hybrid",
                 month=month,
                 is_fixed="variable",
                 category=f"variable_cost_{category_name.lower().replace(' ', '_')}",
@@ -3245,18 +3278,12 @@ def parse_purple_patch_auto_mode(df, db, month="2025-04"):
                 pl_class = "B"
                 applies_to = "both"
             
-            # Determine weight-based basis for additional costs
-            if "Vehicle" in cost_name or "VEHICLE" in cost_name.upper():
-                basis_type = "handled_kg"  # Handled KG for vehicle costs
-            else:
-                basis_type = "sales_kg"  # Sales KG for distribution, marketing, others
-            
             cost = Cost(
                 name=cost_name,
                 amount=cost_info['amount'],
                 applies_to=applies_to,
                 cost_type="common",
-                basis=basis_type,  # Weight-based allocation
+                basis="hybrid",
                 month=month,
                 is_fixed="variable" if cost_name != "Purchase Accounts" else "variable",
                 category=cost_name.lower().replace(' ', '_').replace('&', '_'),
@@ -3984,13 +4011,13 @@ def parse_purple_patch_pl(file_path, db):
             else:
                 # Create new cost
                 if item_type == 'I':
-                    # 100% inhouse - use production_kg for weight-based allocation
+                    # 100% inhouse
                     cost = Cost(
                         name=particulars,
                         amount=amount,
                         applies_to="inhouse",
                         cost_type="common",
-                        basis="production_kg",  # Weight-based: Production KG
+                        basis="hybrid",
                         month="2025-04",  # Use standard format
                         is_fixed="variable",
                         category="pl_import",
@@ -4005,13 +4032,13 @@ def parse_purple_patch_pl(file_path, db):
                     print(f"   📦 Created I cost: {particulars} = ₹{amount:,.2f} (100% inhouse)")
                     
                 elif item_type == 'O':
-                    # 100% outsourced - use purchase_kg for weight-based allocation
+                    # 100% outsourced
                     cost = Cost(
                         name=particulars,
                         amount=amount,
                         applies_to="outsourced",
                         cost_type="common",
-                        basis="purchase_kg",  # Weight-based: Purchase KG
+                        basis="hybrid",
                         month="2025-04",
                         is_fixed="variable",
                         category="pl_import",
@@ -4025,13 +4052,13 @@ def parse_purple_patch_pl(file_path, db):
                     costs_created += 1
                     print(f"   📦 Created O cost: {particulars} = ₹{amount:,.2f} (100% outsourced)")
                     
-                else:  # B - single pooled cost; allocate by weight across all products
+                else:  # B - single pooled cost; allocate later by hybrid across all products
                     cost_both = Cost(
                         name=particulars,
                         amount=amount,
                         applies_to="both",
                         cost_type="common",
-                        basis="sales_kg",  # Weight-based: Sales KG (all products)
+                        basis="hybrid",  # allocate by hybrid (weight + value), alpha set in allocator
                         month="2025-04",
                         is_fixed="variable",
                         category="pl_import",
@@ -4218,7 +4245,7 @@ async def upload_cost_sheet(file: UploadFile = File(...), db: Session = Depends(
                 costs_updated = 0  # reset since we're replacing
             
             # ============================================================
-            # 1) FIXED COST CAT - I  →  All products proportional by Sales KG (weight-based)
+            # 1) FIXED COST CAT - I  →  All products proportional by Sales Value
             # ============================================================
             fc1 = expenses.get('fixed_cost_cat_i', {}).get('total', 0.0)
             # CORRECTION: Excel line items sum to 393,350 but should be 390,350
@@ -4230,7 +4257,7 @@ async def upload_cost_sheet(file: UploadFile = File(...), db: Session = Depends(
                 print(f"   📊 FIXED COST CAT - I: ₹{fc1:,.2f}")
             if fc1 > 0:
                 save_cost("FIXED COST CAT - I", fc1, "both", "fixed_cost_cat_i",
-                          "sales_kg",  # Basis: Sales KG (weight-based)
+                          "sales_value",  # Basis: Sales Value (revenue)
                           is_fixed="fixed", pl_class="B")
             else:
                 print(f"   ⚠️  FIXED COST CAT - I is 0 or not found")
@@ -4309,10 +4336,10 @@ async def upload_cost_sheet(file: UploadFile = File(...), db: Session = Depends(
             # ============================================================
             # 4) DISTRIBUTION, MARKETING, VEHICLE, OTHERS
             # ============================================================
-            # Basis mapping per COST_ALLOCATION.md - All allocations now weight-based (kg)
+            # Basis mapping per COST_ALLOCATION.md
             cat_basis_map = {
                 'distribution_cost':    'sales_kg',      # Sales KG
-                'marketing_expenses':   'sales_kg',      # Sales KG (changed from Sales Value to weight-based)
+                'marketing_expenses':   'sales_value',   # Sales Value
                 'vehicle_running_cost': 'handled_kg',    # Handled KG (trucks move weight, not revenue)
                 'others':               'sales_kg',      # Sales KG
             }
@@ -4890,4 +4917,5 @@ async def get_excel_preview(month: str, db: Session = Depends(get_db)):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000, reload=True)
+    # Use import string so uvicorn reload works correctly
+    uvicorn.run("app:app", host="0.0.0.0", port=8000, reload=True)

@@ -1513,12 +1513,12 @@ function formatNumber(num) {
 function showLoading(containerId) {
     const container = document.getElementById(containerId);
     if (container) {
-        container.innerHTML = `
-            <div class="loading">
-                <div class="spinner"></div>
-                <p>Loading...</p>
-            </div>
-        `;
+    container.innerHTML = `
+        <div class="loading">
+            <div class="spinner"></div>
+            <p>Loading...</p>
+        </div>
+    `;
     }
 }
 
