@@ -560,6 +560,8 @@ class CostAllocationEngine:
                 fixed_cost_category = "strawberry"
             elif "GREENS" in cost_name_upper:
                 fixed_cost_category = "greens"
+            elif "OPEN FIELD" in cost_name_upper:
+                fixed_cost_category = "open_field"
             elif "AGGREGATION" in cost_name_upper:
                 fixed_cost_category = "aggregation"
         
@@ -587,9 +589,19 @@ class CostAllocationEngine:
             elif "AGGREGATION" in cost_name_upper:
                 cost_section = "Aggregation"
         
-        # Load section mappings if needed
+        # Load section mappings if needed (for VARIABLE COST sections or FC2 Open Field)
         section_mappings = {}
         product_name_normalized_map = {}  # For flexible matching
+        if fixed_cost_category == "open_field":
+            # Load Open Field section mappings for FC2 Open Field allocation
+            mappings = self.db.query(ProductSectionMapping).filter(
+                ProductSectionMapping.section == "Open Field"
+            ).all()
+            for m in mappings:
+                product_name_upper = m.product_name.upper().strip()
+                section_mappings[product_name_upper] = m.section
+                normalized = re.sub(r'[^A-Z0-9]', '', product_name_upper)
+                product_name_normalized_map[normalized] = m.section
         if cost_section:
             # Query mappings - handle Polyhouse sections specially
             if cost_section == "Polyhouse":
@@ -654,6 +666,25 @@ class CostAllocationEngine:
                                      "OREGANO", "SAGE", "THYME", "TARRAGON", "LEEKS", "ASPARAGUS",
                                      "BOK", "MIXED"]
                     if not any(keyword in product_name_upper for keyword in greens_keywords):
+                        continue
+                
+                elif fixed_cost_category == "open_field":
+                    # FIXED COST CAT - II (Open Field): Only apply to inhouse Open Field section products
+                    if product.source != "inhouse":
+                        continue
+                    product_mapped = False
+                    if section_mappings:
+                        if product_name_upper in section_mappings:
+                            product_mapped = True
+                        if not product_mapped:
+                            product_normalized = re.sub(r'[^A-Z0-9]', '', product_name_upper)
+                            if product_normalized in product_name_normalized_map:
+                                product_mapped = True
+                    if not product_mapped:
+                        open_field_keywords = ["CABBAGE", "ONION", "ZUCCHINI", "BEETROOT", "CARROT", "BROCCOLI", "RADISH", "TURNIP", "RHUBARB", "FENNEL", "POTATO", "BEANS", "HARICOT"]
+                        if any(keyword in product_name_upper for keyword in open_field_keywords):
+                            product_mapped = True
+                    if not product_mapped:
                         continue
                 
                 elif fixed_cost_category == "aggregation":
@@ -4263,29 +4294,42 @@ async def upload_cost_sheet(file: UploadFile = File(...), db: Session = Depends(
                 print(f"   ⚠️  FIXED COST CAT - I is 0 or not found")
             
             # ============================================================
-            # 2) FIXED COST CAT - II  →  Strawberry, Greens, Aggregation (percentages configurable)
+            # 2) FIXED COST CAT - II  →  Strawberry, Greens, Open Field, Aggregation (4 sections)
             # ============================================================
             fc2 = expenses.get('fixed_cost_cat_ii', {}).get('total', 0.0)
             print(f"   📊 FIXED COST CAT - II: ₹{fc2:,.2f}")
             if fc2 > 0:
                 splits = expenses.get('fixed_cost_cat_ii', {}).get('splits', {})
-                straw_pct = splits.get('strawberry', 0.60)
+                straw_pct = splits.get('strawberry', 0.50)
                 greens_pct = splits.get('greens', 0.25)
+                open_field_pct = splits.get('open_field', 0.10)
                 agg_pct = splits.get('aggregation', 0.15)
+                # Normalize to sum to 1.0 in case of drift
+                total_pct = straw_pct + greens_pct + open_field_pct + agg_pct
+                if total_pct > 0:
+                    straw_pct /= total_pct
+                    greens_pct /= total_pct
+                    open_field_pct /= total_pct
+                    agg_pct /= total_pct
                 
                 save_cost("FIXED COST CAT - II - Strawberry", round(fc2 * straw_pct, 2),
                           "inhouse", "fixed_cost_cat_ii",
-                          "production_kg",  # Basis: Production KG
+                          "production_kg",
                           is_fixed="fixed", cost_type="inhouse-only", pl_class="B")
                 
                 save_cost("FIXED COST CAT - II - Greens", round(fc2 * greens_pct, 2),
                           "inhouse", "fixed_cost_cat_ii",
-                          "production_kg",  # Basis: Production KG
+                          "production_kg",
+                          is_fixed="fixed", cost_type="inhouse-only", pl_class="B")
+                
+                save_cost("FIXED COST CAT - II - Open Field", round(fc2 * open_field_pct, 2),
+                          "inhouse", "fixed_cost_cat_ii",
+                          "production_kg",
                           is_fixed="fixed", cost_type="inhouse-only", pl_class="B")
                 
                 save_cost("FIXED COST CAT - II - Aggregation", round(fc2 * agg_pct, 2),
                           "outsourced", "fixed_cost_cat_ii",
-                          "production_kg",  # Basis: Production KG
+                          "production_kg",
                           is_fixed="fixed", cost_type="common", pl_class="B")
             
             # ============================================================

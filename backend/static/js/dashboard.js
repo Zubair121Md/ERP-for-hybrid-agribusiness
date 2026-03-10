@@ -759,10 +759,41 @@ async function applyFixedCostIISplits(fixedCosts) {
             return { ...t, amount };
         });
 
-        // Call backend to update existing costs (we do not auto-create new costs here)
+        // Get month from any existing FC2 cost (for creating missing Open Field row). Backend expects YYYY-MM.
+        const existingCost = strawberryCost || greensCost || aggregationCost;
+        let fc2Month = existingCost ? (existingCost.month || '2025-04') : '2025-04';
+        if (typeof fc2Month === 'string' && fc2Month.length > 7) {
+            const match = fc2Month.match(/(\d{4})-(\d{2})/);
+            fc2Month = match ? `${match[1]}-${match[2]}` : '2025-04';
+        }
+
         for (const u of updates) {
             if (!u.cost) {
-                if (u.pct > 0) {
+                if (u.label === 'Open Field') {
+                    // Always create missing FIXED COST CAT - II - Open Field so all 4 sections exist.
+                    // Backend requires amount > 0; use 0.01 if 0 so row is created, then Apply Split again to set real amount.
+                    const createPayload = {
+                        name: 'FIXED COST CAT - II - Open Field',
+                        amount: u.amount > 0 ? u.amount : 0.01,
+                        applies_to: 'inhouse',
+                        cost_type: 'inhouse-only',
+                        basis: 'production_kg',
+                        month: fc2Month,
+                        is_fixed: 'fixed',
+                        category: 'fixed_cost_cat_ii'
+                    };
+                    const createRes = await fetch(`${API_BASE}/costs/`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(createPayload)
+                    });
+                    if (!createRes.ok) {
+                        const err = await createRes.json().catch(() => ({}));
+                        console.error('Error creating Fixed Cost II Open Field:', err);
+                        showAlert('Error creating Fixed Cost II - Open Field row.', 'error');
+                        return;
+                    }
+                } else if (u.pct > 0) {
                     console.warn(`No existing Fixed Cost II row found for ${u.label}; skipping.`);
                 }
                 continue;
