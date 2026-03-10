@@ -1490,6 +1490,15 @@ async function generateReport() {
             fetch(`${API_BASE}/costs`)
         ]);
         
+        if (!salesResponse.ok) {
+            const errText = await salesResponse.text();
+            throw new Error(errText && errText.length < 150 ? errText : 'Sales request failed');
+        }
+        if (!costsResponse.ok) {
+            const errText = await costsResponse.text();
+            throw new Error(errText && errText.length < 150 ? errText : 'Costs request failed');
+        }
+        
         const sales = await salesResponse.json();
         const costs = await costsResponse.json();
         
@@ -1499,7 +1508,7 @@ async function generateReport() {
         
     } catch (error) {
         console.error('Error generating report:', error);
-        showAlert('Error generating report', 'error');
+        showAlert('Error generating report: ' + (error.message || 'Unknown error'), 'error');
     }
 }
 

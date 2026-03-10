@@ -1690,18 +1690,27 @@
     window.handleExcelUpload = handleExcelUpload;
     
     
-    // Export Allocation as Excel
+    // Export Allocation as Excel (API returns the file directly, not JSON)
     async function exportAllocationXLSX() {
         try {
             const monthSel = document.getElementById('allocation-month');
             const month = monthSel ? encodeURIComponent(monthSel.value) : 'any';
             const resp = await fetch(`/api/export/${month}/xlsx`);
-            const data = await resp.json();
-            if (data && data.download_url) {
-                window.location.href = data.download_url + `?t=${Date.now()}`;
-            } else {
-                alert('Export failed. Please run allocation first.');
+            if (!resp.ok) {
+                const text = await resp.text();
+                const msg = text && text.length < 200 ? text : resp.statusText || 'Server error';
+                alert('Export failed: ' + msg);
+                return;
             }
+            const blob = await resp.blob();
+            const url = window.URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `report_${month || 'report'}.xlsx`;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            window.URL.revokeObjectURL(url);
         } catch (e) {
             console.error('Export error:', e);
             alert('Export failed: ' + e.message);

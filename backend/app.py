@@ -965,7 +965,9 @@ class CostAllocationEngine:
         cost_breakdown = {}
         
         for product_id, sale in sales_map.items():
-            product = product_map[product_id]
+            product = product_map.get(product_id)
+            if not product:
+                continue  # Skip orphaned sales (product deleted or inactive)
             allocated_costs = product_allocations.get(product_id, [])
             
             total_allocated = sum(a.allocated_amount for a in allocated_costs)
