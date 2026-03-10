@@ -982,7 +982,7 @@
                             <h3 class="table-title">Cost Allocation</h3>
                             <div class="table-actions">
                                 <select id="allocation-month" class="btn btn-secondary">
-                                    <option value="">Select month</option>
+                                    <option value="2025-04-24 00:00:00">April 2025</option>
                                 </select>
                                 <button class="btn btn-primary" onclick="runAllocation()">
                                     <i class="fas fa-calculator"></i>
@@ -1006,9 +1006,6 @@
                         <div class="table-header">
                             <h3 class="table-title">Monthly Reports</h3>
                             <div class="table-actions">
-                                <select id="report-month" class="btn btn-secondary">
-                                    <option value="">Select month</option>
-                                </select>
                                 <button class="btn btn-primary" onclick="generateReport()">
                                     <i class="fas fa-file-alt"></i>
                                     Generate Report
@@ -1016,10 +1013,6 @@
                                 <button class="btn btn-secondary" onclick="exportReport()">
                                     <i class="fas fa-download"></i>
                                     Export CSV
-                                </button>
-                                <button class="btn btn-secondary" onclick="exportReportXLSX()">
-                                    <i class="fas fa-file-excel"></i>
-                                    Export Excel
                                 </button>
                             </div>
                         </div>
@@ -1701,11 +1694,17 @@
     async function exportAllocationXLSX() {
         try {
             const monthSel = document.getElementById('allocation-month');
-            const month = monthSel ? encodeURIComponent(monthSel.value) : 'any';
+            const month = monthSel ? encodeURIComponent(monthSel.value || 'any') : 'any';
             const resp = await fetch(`/api/export/${month}/xlsx`);
             if (!resp.ok) {
                 const text = await resp.text();
-                const msg = text && text.length < 200 ? text : resp.statusText || 'Server error';
+                let msg = resp.statusText || 'Server error';
+                try {
+                    const j = JSON.parse(text);
+                    if (j.detail) msg = typeof j.detail === 'string' ? j.detail : JSON.stringify(j.detail);
+                } catch (_) {
+                    if (text && text.length < 300) msg = text;
+                }
                 alert('Export failed: ' + msg);
                 return;
             }
