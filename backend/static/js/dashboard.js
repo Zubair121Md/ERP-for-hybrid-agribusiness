@@ -91,7 +91,6 @@ function showTab(tabName) {
         'sales': { title: 'Sales', subtitle: 'Track Monthly Sales Data' },
         'costs': { title: 'Costs', subtitle: 'Manage Operational Costs' },
         'allocation': { title: 'Allocation', subtitle: 'Cost Distribution Analysis' },
-        'reports': { title: 'Reports', subtitle: 'Generate & Export Reports' },
         'data-upload': { title: 'Data Upload', subtitle: 'Upload Sales & P&L Data' },
         'harvest-mapping': { title: 'Harvest & Mapping', subtitle: 'Upload Harvest Data & Product-Section Mappings' },
         'settings': { title: 'Settings', subtitle: 'System Configuration' }
