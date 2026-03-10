@@ -1564,149 +1564,183 @@ async def get_product_cost_breakdown(product_id: int, db: Session = Depends(get_
     
     return cost_breakdown
 
+@app.get("/api/months")
+async def get_available_months(db: Session = Depends(get_db)):
+    """Return distinct months (YYYY-MM) from sales, sorted descending for dropdowns."""
+    rows = db.query(MonthlySale.month).distinct().all()
+    seen = set()
+    for (m,) in rows:
+        if m is None:
+            continue
+        s = str(m).strip()
+        if len(s) >= 7:
+            norm = s[:7]
+        else:
+            norm = s
+        if norm:
+            seen.add(norm)
+    months = sorted(seen, reverse=True)
+    return {"months": months}
+
 @app.get("/api/report/{month}")
 async def get_monthly_report(month: str, db: Session = Depends(get_db)):
     engine = CostAllocationEngine(db)
-    # Build maps from DB so report has data
     products = db.query(Product).filter(Product.is_active == True).all()
     product_map = {p.id: p for p in products}
     monthly_sales = db.query(MonthlySale).all()
     sales_map = {s.product_id: s for s in monthly_sales}
     return engine._generate_monthly_report(month, product_map, sales_map)
 
+def _normalize_report_month(month: str) -> str:
+    """Normalize month to YYYY-MM for filenames and display."""
+    if not month or not month.strip():
+        return "report"
+    s = month.strip()
+    if len(s) >= 7 and s[4] == "-":
+        return s[:7]
+    if len(s) >= 10 and s[4] == "-" and s[7] == "-":
+        return s[:7]
+    return s.replace(" ", "-")[:7] if len(s) >= 7 else s
+
 # Export endpoints
 @app.get("/api/export/{month}/csv")
 async def export_monthly_csv(month: str, db: Session = Depends(get_db)):
     """Export monthly report as CSV - Returns file directly for Render compatibility"""
-    engine = CostAllocationEngine(db)
-    # Build maps from DB so report has data
-    products = db.query(Product).filter(Product.is_active == True).all()
-    product_map = {p.id: p for p in products}
-    monthly_sales = db.query(MonthlySale).all()
-    sales_map = {s.product_id: s for s in monthly_sales}
-    report = engine._generate_monthly_report(month, product_map, sales_map)
-    
-    # Create DataFrame
-    df = pd.DataFrame(report['products'])
-    
-    # Return as direct download (no file saved to disk - Render filesystem is ephemeral)
-    output = io.StringIO()
-    df.to_csv(output, index=False)
-    output.seek(0)
-    
-    return StreamingResponse(
-        iter([output.getvalue()]),
-        media_type="text/csv",
-        headers={"Content-Disposition": f"attachment; filename=report_{month}.csv"}
-    )
+    try:
+        month_norm = _normalize_report_month(month)
+        engine = CostAllocationEngine(db)
+        products = db.query(Product).filter(Product.is_active == True).all()
+        product_map = {p.id: p for p in products}
+        monthly_sales = db.query(MonthlySale).all()
+        sales_map = {s.product_id: s for s in monthly_sales}
+        report = engine._generate_monthly_report(month_norm, product_map, sales_map)
+        products_list = report.get("products") or []
+        # Only scalar columns so CSV/Excel never see list/dict cells
+        rows = [{k: v for k, v in p.items() if k != "allocations"} for p in products_list]
+        df = pd.DataFrame(rows) if rows else pd.DataFrame()
+        output = io.StringIO()
+        df.to_csv(output, index=False)
+        output.seek(0)
+        return StreamingResponse(
+            iter([output.getvalue()]),
+            media_type="text/csv",
+            headers={"Content-Disposition": f"attachment; filename=report_{month_norm}.csv"}
+        )
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Export failed: {str(e)}")
 
 @app.get("/api/export/{month}/xlsx")
 async def export_monthly_xlsx(month: str, db: Session = Depends(get_db)):
     """Export monthly report as Excel with multiple sheets"""
-    engine = CostAllocationEngine(db)
-    # Build maps from DB so report has data
-    products = db.query(Product).filter(Product.is_active == True).all()
-    product_map = {p.id: p for p in products}
-    monthly_sales = db.query(MonthlySale).all()
-    sales_map = {s.product_id: s for s in monthly_sales}
-    report = engine._generate_monthly_report(month, product_map, sales_map)
-    
-    # Build DataFrames
-    products_df = pd.DataFrame(report['products'])
-    
-    # Build formatted Product-wise Allocation Results as requested
-    formatted_rows = []
-    # Sort by profit desc to match expected view
-    products_sorted = sorted(report['products'], key=lambda x: x.get('profit', 0), reverse=True)
-    for p in products_sorted:
-        # Build friendly quantity string with EA/grams handling
-        pname = (p.get('product_name') or '').lower()
-        unit = (p.get('unit') or 'kg')
-        qty = p.get('quantity', 0)
-        ea_units = ['EA','EACH','PC','PCS','UNIT','UNITS']
-        if unit.upper() in ea_units:
-            # Special cases: hampers → show EA only; mushroom/corn → show EA with grams and kg
-            if 'hamper' in pname:
-                qty_str = f"{qty} EA"
-            elif ('button mushroom' in pname) or ('baby corn' in pname):
-                grams_per_ea = 200.0
-                kg_equiv = (qty * grams_per_ea) / 1000.0
-                qty_str = f"{qty} EA (200 g ea, {kg_equiv:.2f} kg)"
+    try:
+        month_norm = _normalize_report_month(month)
+        engine = CostAllocationEngine(db)
+        products = db.query(Product).filter(Product.is_active == True).all()
+        product_map = {p.id: p for p in products}
+        monthly_sales = db.query(MonthlySale).all()
+        sales_map = {s.product_id: s for s in monthly_sales}
+        report = engine._generate_monthly_report(month_norm, product_map, sales_map)
+        products_list = report.get("products") or []
+        # Raw products: only scalar fields (no allocations list) so Excel never gets complex types
+        raw_rows = [{k: v for k, v in p.items() if k != "allocations"} for p in products_list]
+        products_df = pd.DataFrame(raw_rows) if raw_rows else pd.DataFrame()
+
+        products_sorted = sorted(products_list, key=lambda x: x.get("profit", 0), reverse=True)
+        formatted_rows = []
+        for p in products_sorted:
+            pname = (p.get("product_name") or "").lower()
+            unit = (p.get("unit") or "kg")
+            qty = p.get("quantity", 0)
+            ea_units = ["EA", "EACH", "PC", "PCS", "UNIT", "UNITS"]
+            if unit.upper() in ea_units:
+                if "hamper" in pname:
+                    qty_str = f"{qty} EA"
+                elif ("button mushroom" in pname) or ("baby corn" in pname):
+                    kg_equiv = (qty * 200.0) / 1000.0
+                    qty_str = f"{qty} EA (200 g ea, {kg_equiv:.2f} kg)"
+                else:
+                    qty_str = f"{qty} EA"
             else:
-                qty_str = f"{qty} EA"
-        else:
-            qty_str = f"{qty} {unit}"
-        price_str = f"₹{p['sale_price']:,.2f}"
-        direct_cost_str = f"₹{p['direct_cost']:,.2f}"
-        allocated_str = f"₹{p['allocated_costs']:,.2f}"
-        total_cost_str = f"₹{p['total_cost']:,.2f}"
-        revenue_str = f"₹{p['revenue']:,.2f}"
-        profit_str = f"₹{p['profit']:,.2f}"
-        margin_str = f"{p['profit_margin']:.1f}%"
-        formatted_rows.append({
-            'Product': p['product_name'],
-            'Source': p['source'],
-            'Qty': qty_str,
-            'Price': price_str,
-            'Direct Cost': direct_cost_str,
-            'Allocated': allocated_str,
-            'Total Cost': total_cost_str,
-            'Revenue': revenue_str,
-            'Profit': profit_str,
-            'Margin': margin_str,
-        })
-    products_formatted_df = pd.DataFrame(formatted_rows)
-    
-    # Flatten allocations into a table
-    allocations_rows = []
-    for p in report['products']:
-        for a in p.get('allocations', []):
-            allocations_rows.append({
-                'product_id': p['product_id'],
-                'product_name': p['product_name'],
-                'source': p['source'],
-                'cost_name': a['cost_name'],
-                'category': a['category'],
-                'allocated_amount': a['amount']
+                qty_str = f"{qty} {unit}"
+            sale_price = p.get("sale_price", 0)
+            direct_cost = p.get("direct_cost", 0)
+            allocated_costs = p.get("allocated_costs", 0)
+            total_cost = p.get("total_cost", 0)
+            revenue = p.get("revenue", 0)
+            profit = p.get("profit", 0)
+            profit_margin = p.get("profit_margin", 0)
+            formatted_rows.append({
+                "Product": p.get("product_name", ""),
+                "Source": p.get("source", ""),
+                "Qty": qty_str,
+                "Price": f"₹{sale_price:,.2f}",
+                "Direct Cost": f"₹{direct_cost:,.2f}",
+                "Allocated": f"₹{allocated_costs:,.2f}",
+                "Total Cost": f"₹{total_cost:,.2f}",
+                "Revenue": f"₹{revenue:,.2f}",
+                "Profit": f"₹{profit:,.2f}",
+                "Margin": f"{profit_margin:.1f}%",
             })
-    allocations_df = pd.DataFrame(allocations_rows) if allocations_rows else pd.DataFrame(columns=['product_id','product_name','source','cost_name','category','allocated_amount'])
-    
-    # Summary sheet
-    summary_rows = [
-        {'metric': 'total_revenue', 'value': report['total_revenue']},
-        {'metric': 'total_costs', 'value': report['total_costs']},
-        {'metric': 'total_profit', 'value': report['total_revenue'] - report['total_costs']},
-        {'metric': 'profit_margin_%', 'value': report['profit_margin']},
-        {'metric': 'inhouse_revenue', 'value': report['inhouse_summary']['revenue']},
-        {'metric': 'inhouse_costs', 'value': report['inhouse_summary']['costs']},
-        {'metric': 'inhouse_profit', 'value': report['inhouse_summary']['profit']},
-        {'metric': 'inhouse_profit_margin_%', 'value': report['inhouse_summary']['profit_margin']},
-        {'metric': 'outsourced_revenue', 'value': report['outsourced_summary']['revenue']},
-        {'metric': 'outsourced_costs', 'value': report['outsourced_summary']['costs']},
-        {'metric': 'outsourced_profit', 'value': report['outsourced_summary']['profit']},
-        {'metric': 'outsourced_profit_margin_%', 'value': report['outsourced_summary']['profit_margin']},
-    ]
-    # Add cost breakdown rows
-    for category, amount in report.get('cost_breakdown', {}).items():
-        summary_rows.append({'metric': f'cost_{category}', 'value': amount})
-    summary_df = pd.DataFrame(summary_rows)
-    
-    # Return as direct download (no file saved to disk - Render filesystem is ephemeral)
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-        summary_df.to_excel(writer, index=False, sheet_name='Summary')
-        products_df.to_excel(writer, index=False, sheet_name='Products (Raw)')
-        # Sheet name exactly as requested
-        products_formatted_df.to_excel(writer, index=False, sheet_name='Product-wise Allocation Results')
-        allocations_df.to_excel(writer, index=False, sheet_name='Allocations')
-    
-    output.seek(0)
-    
-    return StreamingResponse(
-        output,
-        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": f"attachment; filename=report_{month}.xlsx"}
-    )
+        products_formatted_df = pd.DataFrame(formatted_rows)
+
+        allocations_rows = []
+        for p in products_list:
+            for a in p.get("allocations", []):
+                allocations_rows.append({
+                    "product_id": p.get("product_id"),
+                    "product_name": p.get("product_name", ""),
+                    "source": p.get("source", ""),
+                    "cost_name": a.get("cost_name", ""),
+                    "category": a.get("category", ""),
+                    "allocated_amount": a.get("amount", 0),
+                })
+        allocations_df = (
+            pd.DataFrame(allocations_rows)
+            if allocations_rows
+            else pd.DataFrame(columns=["product_id", "product_name", "source", "cost_name", "category", "allocated_amount"])
+        )
+
+        inhouse = report.get("inhouse_summary") or {}
+        outsourced = report.get("outsourced_summary") or {}
+        summary_rows = [
+            {"metric": "total_revenue", "value": report.get("total_revenue", 0)},
+            {"metric": "total_costs", "value": report.get("total_costs", 0)},
+            {"metric": "total_profit", "value": (report.get("total_revenue", 0) - report.get("total_costs", 0))},
+            {"metric": "profit_margin_%", "value": report.get("profit_margin", 0)},
+            {"metric": "inhouse_revenue", "value": inhouse.get("revenue", 0)},
+            {"metric": "inhouse_costs", "value": inhouse.get("costs", 0)},
+            {"metric": "inhouse_profit", "value": inhouse.get("profit", 0)},
+            {"metric": "inhouse_profit_margin_%", "value": inhouse.get("profit_margin", 0)},
+            {"metric": "outsourced_revenue", "value": outsourced.get("revenue", 0)},
+            {"metric": "outsourced_costs", "value": outsourced.get("costs", 0)},
+            {"metric": "outsourced_profit", "value": outsourced.get("profit", 0)},
+            {"metric": "outsourced_profit_margin_%", "value": outsourced.get("profit_margin", 0)},
+        ]
+        for category, amount in report.get("cost_breakdown", {}).items():
+            summary_rows.append({"metric": f"cost_{category}", "value": amount})
+        summary_df = pd.DataFrame(summary_rows)
+
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+            summary_df.to_excel(writer, index=False, sheet_name="Summary")
+            products_df.to_excel(writer, index=False, sheet_name="Products (Raw)")
+            products_formatted_df.to_excel(writer, index=False, sheet_name="Product-wise Allocation Results")
+            allocations_df.to_excel(writer, index=False, sheet_name="Allocations")
+        output.seek(0)
+
+        return StreamingResponse(
+            output,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": f"attachment; filename=report_{month_norm}.xlsx"},
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Export failed: {str(e)}")
 
 # Excel Upload endpoints
 @app.post("/api/upload-excel")

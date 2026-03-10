@@ -112,10 +112,55 @@ function showTab(tabName) {
         loadSales();
     } else if (tabName === 'costs') {
         loadCosts();
+    } else if (tabName === 'allocation') {
+        ensureAllocationMonthOptions();
+    } else if (tabName === 'reports') {
+        ensureReportMonthOptions();
     } else if (tabName === 'harvest-mapping') {
-        // No data loading needed for harvest-mapping tab
         console.log('✅ Harvest & Mapping tab activated');
     }
+}
+
+async function ensureReportMonthOptions() {
+    const sel = document.getElementById('report-month');
+    if (!sel) return;
+    try {
+        const r = await fetch(`${API_BASE}/months`);
+        if (!r.ok) return;
+        const data = await r.json();
+        const months = data.months || [];
+        const currentVal = sel.value;
+        sel.innerHTML = '<option value="">Select month</option>';
+        months.forEach(m => {
+            const opt = document.createElement('option');
+            opt.value = m;
+            opt.textContent = m;
+            sel.appendChild(opt);
+        });
+        if (months.length && currentVal && months.includes(currentVal)) sel.value = currentVal;
+        else if (months.length) sel.value = months[0];
+    } catch (e) { console.error('Load months failed', e); }
+}
+
+async function ensureAllocationMonthOptions() {
+    const sel = document.getElementById('allocation-month');
+    if (!sel) return;
+    try {
+        const r = await fetch(`${API_BASE}/months`);
+        if (!r.ok) return;
+        const data = await r.json();
+        const months = data.months || [];
+        const currentVal = sel.value;
+        sel.innerHTML = '<option value="">Select month</option>';
+        months.forEach(m => {
+            const opt = document.createElement('option');
+            opt.value = m;
+            opt.textContent = m;
+            sel.appendChild(opt);
+        });
+        if (months.length && currentVal && months.includes(currentVal)) sel.value = currentVal;
+        else if (months.length) sel.value = months[0];
+    } catch (e) { console.error('Load allocation months failed', e); }
 }
 
 // Load dashboard data
@@ -1475,85 +1520,38 @@ document.addEventListener('click', function(event) {
     }
 });
 
-// Report functions
+// Report functions - use backend allocation report API for consistent, reusable data
 async function generateReport() {
+    const monthSel = document.getElementById('report-month');
+    const month = monthSel ? monthSel.value : '';
+    if (!month) {
+        showAlert('Please select a month', 'error');
+        return;
+    }
     try {
         showLoading('report-results');
-        
-        // Get all data instead of month-based report
-        const [salesResponse, costsResponse] = await Promise.all([
-            fetch(`${API_BASE}/sales`),
-            fetch(`${API_BASE}/costs`)
-        ]);
-        
-        if (!salesResponse.ok) {
-            const errText = await salesResponse.text();
-            throw new Error(errText && errText.length < 150 ? errText : 'Sales request failed');
+        const response = await fetch(`${API_BASE}/report/${encodeURIComponent(month)}`);
+        if (!response.ok) {
+            const errText = await response.text();
+            throw new Error(errText && errText.length < 200 ? errText : 'Report request failed');
         }
-        if (!costsResponse.ok) {
-            const errText = await costsResponse.text();
-            throw new Error(errText && errText.length < 150 ? errText : 'Costs request failed');
-        }
-        
-        const sales = await salesResponse.json();
-        const costs = await costsResponse.json();
-        
-        // Generate report from all data
-        const result = generateReportFromData(sales, costs);
+        const result = await response.json();
         displayReportResults(result);
-        
     } catch (error) {
         console.error('Error generating report:', error);
         showAlert('Error generating report: ' + (error.message || 'Unknown error'), 'error');
+        document.getElementById('report-results').innerHTML = '<p>Could not load report.</p>';
     }
-}
-
-function generateReportFromData(sales, costs) {
-    // Calculate totals
-    const totalRevenue = sales.reduce((sum, sale) => sum + (sale.quantity * sale.sale_price), 0);
-    const totalDirectCosts = sales.reduce((sum, sale) => sum + sale.direct_cost, 0);
-    const totalSharedCosts = costs.reduce((sum, cost) => sum + cost.amount, 0);
-    const totalCosts = totalDirectCosts + totalSharedCosts;
-    const totalProfit = totalRevenue - totalCosts;
-    
-    // Group by product
-    const productStats = {};
-    sales.forEach(sale => {
-        const productName = sale.product_name;
-        if (!productStats[productName]) {
-            productStats[productName] = {
-                name: productName,
-                quantity: 0,
-                revenue: 0,
-                direct_cost: 0,
-                source: sale.product?.source || 'unknown'
-            };
-        }
-        productStats[productName].quantity += sale.quantity;
-        productStats[productName].revenue += sale.quantity * sale.sale_price;
-        productStats[productName].direct_cost += sale.direct_cost;
-    });
-    
-    // Calculate top products
-    const topProducts = Object.values(productStats)
-        .sort((a, b) => b.revenue - a.revenue)
-        .slice(0, 10);
-    
-    return {
-        total_revenue: totalRevenue,
-        total_costs: totalCosts,
-        total_profit: totalProfit,
-        total_direct_costs: totalDirectCosts,
-        total_shared_costs: totalSharedCosts,
-        top_products: topProducts,
-        product_count: Object.keys(productStats).length,
-        sales_count: sales.length
-    };
 }
 
 function displayReportResults(result) {
     const container = document.getElementById('report-results');
-    
+    const products = result.products || [];
+    const totalRevenue = result.total_revenue ?? 0;
+    const totalCosts = result.total_costs ?? 0;
+    const totalProfit = (result.total_revenue ?? 0) - (result.total_costs ?? 0);
+    const profitMargin = typeof result.profit_margin === 'number' ? result.profit_margin : 0;
+
     let html = `
         <div class="stats-grid" style="margin-bottom: 20px;">
             <div class="stat-card revenue">
@@ -1561,31 +1559,30 @@ function displayReportResults(result) {
                     <span class="stat-title">Total Revenue</span>
                     <i class="fas fa-chart-line stat-icon"></i>
                 </div>
-                <div class="stat-value">₹${formatNumber(result.total_revenue)}</div>
+                <div class="stat-value">₹${formatNumber(totalRevenue)}</div>
             </div>
             <div class="stat-card costs">
                 <div class="stat-header">
                     <span class="stat-title">Total Costs</span>
                     <i class="fas fa-dollar-sign stat-icon"></i>
                 </div>
-                <div class="stat-value">₹${formatNumber(result.total_costs)}</div>
+                <div class="stat-value">₹${formatNumber(totalCosts)}</div>
             </div>
             <div class="stat-card profit">
                 <div class="stat-header">
                     <span class="stat-title">Net Profit</span>
                     <i class="fas fa-trophy stat-icon"></i>
                 </div>
-                <div class="stat-value">₹${formatNumber(result.total_profit)}</div>
+                <div class="stat-value">₹${formatNumber(totalProfit)}</div>
             </div>
             <div class="stat-card products">
                 <div class="stat-header">
                     <span class="stat-title">Profit Margin</span>
                     <i class="fas fa-percentage stat-icon"></i>
                 </div>
-                <div class="stat-value">${result.profit_margin.toFixed(1)}%</div>
+                <div class="stat-value">${profitMargin.toFixed(1)}%</div>
             </div>
         </div>
-        
         <h3>Detailed Product Analysis</h3>
         <table class="table">
             <thead>
@@ -1604,60 +1601,88 @@ function displayReportResults(result) {
             </thead>
             <tbody>
     `;
-    
-    result.products.forEach(product => {
-        const qtyText = formatQtyDisplay(product.product_name, product.unit, product.quantity);
+    products.forEach(product => {
+        const qtyText = formatQtyDisplay(product.product_name || '', product.unit || 'kg', product.quantity || 0);
+        const margin = typeof product.profit_margin === 'number' ? product.profit_margin : 0;
         html += `
             <tr>
-                <td><strong>${product.product_name}</strong></td>
-                <td><span class="badge ${product.source === 'inhouse' ? 'badge-success' : 'badge-info'}">${product.source}</span></td>
+                <td><strong>${(product.product_name || 'Unknown')}</strong></td>
+                <td><span class="badge ${product.source === 'inhouse' ? 'badge-success' : 'badge-info'}">${product.source || 'unknown'}</span></td>
                 <td>${qtyText}</td>
-                <td>₹${product.sale_price}</td>
-                <td>₹${formatNumber(product.direct_cost)}</td>
-                <td>₹${formatNumber(product.allocated_costs)}</td>
-                <td>₹${formatNumber(product.total_cost)}</td>
-                <td>₹${formatNumber(product.revenue)}</td>
-                <td class="${product.profit >= 0 ? 'text-success' : 'text-danger'}">₹${formatNumber(product.profit)}</td>
-                <td>${product.profit_margin.toFixed(1)}%</td>
+                <td>₹${formatNumber(product.sale_price || 0)}</td>
+                <td>₹${formatNumber(product.direct_cost || 0)}</td>
+                <td>₹${formatNumber(product.allocated_costs || 0)}</td>
+                <td>₹${formatNumber(product.total_cost || 0)}</td>
+                <td>₹${formatNumber(product.revenue || 0)}</td>
+                <td class="${(product.profit || 0) >= 0 ? 'text-success' : 'text-danger'}">₹${formatNumber(product.profit || 0)}</td>
+                <td>${margin.toFixed(1)}%</td>
             </tr>
         `;
     });
-    
     html += '</tbody></table>';
     container.innerHTML = html;
 }
 
-// Export functions
+// Export functions - use backend export API for same data as report
 async function exportReport() {
+    const monthSel = document.getElementById('report-month');
+    const month = monthSel ? monthSel.value : '';
+    if (!month) {
+        showAlert('Please select a month', 'error');
+        return;
+    }
     try {
-        // Get all data and generate CSV
-        const [salesResponse, costsResponse] = await Promise.all([
-            fetch(`${API_BASE}/sales`),
-            fetch(`${API_BASE}/costs`)
-        ]);
-        
-        const sales = await salesResponse.json();
-        const costs = await costsResponse.json();
-        
-        // Generate CSV content
-        const csvContent = generateCSVContent(sales, costs);
-        
-        // Create download link
-        const blob = new Blob([csvContent], { type: 'text/csv' });
+        const resp = await fetch(`${API_BASE}/export/${encodeURIComponent(month)}/csv`);
+        if (!resp.ok) {
+            const text = await resp.text();
+            const msg = (text && text.length < 200) ? text : resp.statusText || 'Export failed';
+            showAlert(msg, 'error');
+            return;
+        }
+        const blob = await resp.blob();
         const url = window.URL.createObjectURL(blob);
-        const link = document.createElement('a');
-        link.href = url;
-        link.download = `report_all_data.csv`;
-        link.click();
-        
-        // Clean up
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `report_${month}.csv`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
         window.URL.revokeObjectURL(url);
-        
         showAlert('Report exported successfully!', 'success');
-        
     } catch (error) {
         console.error('Error exporting report:', error);
-        showAlert('Error exporting report', 'error');
+        showAlert('Error exporting report: ' + (error.message || 'Unknown error'), 'error');
+    }
+}
+
+async function exportReportXLSX() {
+    const monthSel = document.getElementById('report-month');
+    const month = monthSel ? monthSel.value : '';
+    if (!month) {
+        showAlert('Please select a month', 'error');
+        return;
+    }
+    try {
+        const resp = await fetch(`${API_BASE}/export/${encodeURIComponent(month)}/xlsx`);
+        if (!resp.ok) {
+            const text = await resp.text();
+            const msg = (text && text.length < 200) ? text : resp.statusText || 'Export failed';
+            showAlert(msg, 'error');
+            return;
+        }
+        const blob = await resp.blob();
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `report_${month}.xlsx`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        window.URL.revokeObjectURL(url);
+        showAlert('Excel exported successfully!', 'success');
+    } catch (error) {
+        console.error('Error exporting Excel:', error);
+        showAlert('Error exporting Excel: ' + (error.message || 'Unknown error'), 'error');
     }
 }
 

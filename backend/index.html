@@ -982,7 +982,7 @@
                             <h3 class="table-title">Cost Allocation</h3>
                             <div class="table-actions">
                                 <select id="allocation-month" class="btn btn-secondary">
-                                    <option value="2025-04-24 00:00:00">April 2025</option>
+                                    <option value="">Select month</option>
                                 </select>
                                 <button class="btn btn-primary" onclick="runAllocation()">
                                     <i class="fas fa-calculator"></i>
@@ -1006,6 +1006,9 @@
                         <div class="table-header">
                             <h3 class="table-title">Monthly Reports</h3>
                             <div class="table-actions">
+                                <select id="report-month" class="btn btn-secondary">
+                                    <option value="">Select month</option>
+                                </select>
                                 <button class="btn btn-primary" onclick="generateReport()">
                                     <i class="fas fa-file-alt"></i>
                                     Generate Report
@@ -1013,6 +1016,10 @@
                                 <button class="btn btn-secondary" onclick="exportReport()">
                                     <i class="fas fa-download"></i>
                                     Export CSV
+                                </button>
+                                <button class="btn btn-secondary" onclick="exportReportXLSX()">
+                                    <i class="fas fa-file-excel"></i>
+                                    Export Excel
                                 </button>
                             </div>
                         </div>
