@@ -198,32 +198,28 @@ function displayDashboardStats(stats) {
     statsGrid.innerHTML = statsHTML;
 }
 
-// Load top products
+// Load top products (from allocation report so we get profit, costs, margin, source)
 async function loadTopProducts() {
     try {
-        // Get all sales data instead of month-based report
-        const response = await fetch(`${API_BASE}/sales`);
-        const sales = await response.json();
-        
-        // Calculate top products from all sales data
-        const productStats = {};
-        sales.forEach(sale => {
-            const productName = sale.product_name;
-            if (!productStats[productName]) {
-                productStats[productName] = {
-                    name: productName,
-                    revenue: 0,
-                    quantity: 0
-                };
-            }
-            productStats[productName].revenue += sale.quantity * sale.sale_price;
-            productStats[productName].quantity += sale.quantity;
-        });
-        
-        const topProducts = Object.values(productStats)
-            .sort((a, b) => b.revenue - a.revenue)
-            .slice(0, 5);
-        
+        const salesRes = await fetch(`${API_BASE}/sales`);
+        if (!salesRes.ok) {
+            document.getElementById('top-products-table').innerHTML = '<p>No data available</p>';
+            return;
+        }
+        const sales = await salesRes.json();
+        if (!Array.isArray(sales) || sales.length === 0) {
+            displayTopProducts([]);
+            return;
+        }
+        const months = [...new Set(sales.map(s => s.month).filter(Boolean))].sort().reverse();
+        const month = months[0];
+        const reportRes = await fetch(`${API_BASE}/report/${encodeURIComponent(month)}`);
+        if (!reportRes.ok) {
+            document.getElementById('top-products-table').innerHTML = '<p>Report not available</p>';
+            return;
+        }
+        const report = await reportRes.json();
+        const topProducts = report.top_products || [];
         displayTopProducts(topProducts);
     } catch (error) {
         console.error('Error loading top products:', error);
