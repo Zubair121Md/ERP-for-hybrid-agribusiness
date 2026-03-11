@@ -2,7 +2,7 @@ from fastapi import FastAPI, HTTPException, Depends, status, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, StreamingResponse
-from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, ForeignKey, Text, Boolean
+from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, ForeignKey, Text, Boolean, func
 from sqlalchemy.orm import declarative_base, sessionmaker, Session, relationship
 from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any, Union
@@ -963,12 +963,20 @@ class CostAllocationEngine:
         # Calculate per-product costs and profits (including CP-based margin)
         products_data = []
         total_revenue = 0.0
-        total_costs = 0.0
+        # IMPORTANT: For aggregated "total_costs" we only want P&L (allocated) costs
+        # so that it lines up with the P&L Total Expenses from the uploaded sheet.
+        total_costs = 0.0  # P&L costs only (sum of allocated costs)
+        total_full_costs = 0.0  # Direct cost + allocated (for margin denominators)
+        total_profit = 0.0      # Profit after BOTH direct + P&L costs
         
         inhouse_revenue = 0.0
-        inhouse_costs = 0.0
+        inhouse_costs = 0.0          # P&L costs only (allocated)
+        inhouse_full_costs = 0.0     # Direct + allocated
+        inhouse_profit = 0.0         # Profit after BOTH direct + P&L
         outsourced_revenue = 0.0
-        outsourced_costs = 0.0
+        outsourced_costs = 0.0       # P&L costs only (allocated)
+        outsourced_full_costs = 0.0  # Direct + allocated
+        outsourced_profit = 0.0      # Profit after BOTH direct + P&L
         
         cost_breakdown = {}
         
@@ -982,6 +990,7 @@ class CostAllocationEngine:
                 direct_cost = 0.0
             
             total_allocated = sum(a.allocated_amount for a in allocated_costs)
+            # Full economic cost for the product (used for per-product profit & CP margin)
             total_cost = direct_cost + total_allocated
             revenue = (sale.quantity or 0) * (sale.sale_price or 0)
             profit = revenue - total_cost
@@ -1027,14 +1036,21 @@ class CostAllocationEngine:
             
             products_data.append(product_data)
             total_revenue += revenue
-            total_costs += total_cost
+
+            # Aggregated P&L-only costs (for alignment with P&L Total Expenses)
+            total_costs += total_allocated
+            total_full_costs += total_cost
+            total_profit += profit
             
             if product.source == "inhouse":
                 inhouse_revenue += revenue
-                inhouse_costs += total_cost
+                inhouse_costs += total_allocated
+                inhouse_full_costs += total_cost
+                inhouse_profit += profit
             else:
                 outsourced_revenue += revenue
-                outsourced_costs += total_cost
+                outsourced_costs += total_allocated
+                outsourced_full_costs += total_cost
         
         # Sort products by profit (DSA optimization)
         products_data.sort(key=lambda x: x["profit"], reverse=True)
@@ -1042,25 +1058,38 @@ class CostAllocationEngine:
         # Calculate top products
         top_products = products_data[:5]  # Top 5 by profit
         
-        # Aggregate-level margins also on CP basis: Profit ÷ Total Cost
+        # Aggregate-level margins on CP basis, using full costs (direct + P&L).
+        overall_margin = ((total_profit / total_full_costs) * 100) if total_full_costs > 0 else 0
+        inhouse_margin = ((inhouse_profit / inhouse_full_costs) * 100) if inhouse_full_costs > 0 else 0
+        outsourced_margin = ((outsourced_profit / outsourced_full_costs) * 100) if outsourced_full_costs > 0 else 0
+        
+        # IMPORTANT: "total_costs" at the report level should line up with the
+        # P&L Total Expenses from the uploaded sheet. That is the sum of all
+        # cost_sheet_upload Cost rows (including Purchase Accounts).
+        pnl_total = self.db.query(func.sum(Cost.amount)).filter(
+            Cost.source_file == "cost_sheet_upload"
+        ).scalar() or 0.0
+        total_costs = pnl_total
+        
         return {
             "month": month,
             "products": products_data,
             "total_revenue": total_revenue,
             "total_costs": total_costs,
-            "total_profit": total_revenue - total_costs,
-            "profit_margin": ((total_revenue - total_costs) / total_costs * 100) if total_costs > 0 else 0,
+            # Profit after BOTH direct + allocated P&L costs
+            "total_profit": total_profit,
+            "profit_margin": overall_margin,
             "inhouse_summary": {
                 "revenue": inhouse_revenue,
                 "costs": inhouse_costs,
-                "profit": inhouse_revenue - inhouse_costs,
-                "profit_margin": ((inhouse_revenue - inhouse_costs) / inhouse_costs * 100) if inhouse_costs > 0 else 0
+                "profit": inhouse_profit,
+                "profit_margin": inhouse_margin
             },
             "outsourced_summary": {
                 "revenue": outsourced_revenue,
                 "costs": outsourced_costs,
-                "profit": outsourced_revenue - outsourced_costs,
-                "profit_margin": ((outsourced_revenue - outsourced_costs) / outsourced_costs * 100) if outsourced_costs > 0 else 0
+                "profit": outsourced_profit,
+                "profit_margin": outsourced_margin
             },
             "cost_breakdown": cost_breakdown,
             "top_products": top_products
@@ -1190,10 +1219,18 @@ async def get_dashboard_stats(db: Session = Depends(get_db)):
         else:
             print(f"📊 Dashboard: No costs in system")
     
-    total_costs = total_direct_costs + total_shared_costs
-    total_profit = total_revenue - total_costs
-    # Dashboard margin also on CP basis: Profit ÷ Total Cost
-    profit_margin = (total_profit / total_costs * 100) if total_costs > 0 else 0
+    # Compute full economic costs (direct + allocated) for profit/margin,
+    # but show P&L Total Expenses as "Total Costs" on the dashboard card so
+    # it matches the P&L sheet.
+    total_full_costs = total_direct_costs + total_shared_costs
+    # Sum of all P&L expenses from the uploaded cost sheet (including Purchase Accounts)
+    pnl_total = db.query(func.sum(Cost.amount)).filter(
+        Cost.source_file == "cost_sheet_upload"
+    ).scalar() or 0.0
+    total_costs = pnl_total
+    total_profit = total_revenue - total_full_costs
+    # Dashboard margin on CP basis: Profit ÷ full cost (direct + P&L)
+    profit_margin = (total_profit / total_full_costs * 100) if total_full_costs > 0 else 0
     
     # Source-wise breakdown
     inhouse_sales = [s for s in sales if s.product.source == "inhouse"]
@@ -1739,8 +1776,11 @@ async def export_monthly_xlsx(month: str, db: Session = Depends(get_db)):
         # Summary sheet
         summary_rows = [
             {'metric': 'total_revenue', 'value': report.get('total_revenue', 0)},
+            # total_costs in the report is P&L-only (allocated) cost so it lines up
+            # with the P&L Total Expenses. total_profit already includes BOTH direct
+            # + P&L costs.
             {'metric': 'total_costs', 'value': report.get('total_costs', 0)},
-            {'metric': 'total_profit', 'value': (report.get('total_revenue', 0) - report.get('total_costs', 0))},
+            {'metric': 'total_profit', 'value': report.get('total_profit', 0)},
             {'metric': 'profit_margin_%', 'value': report.get('profit_margin', 0)},
             {'metric': 'inhouse_revenue', 'value': report.get('inhouse_summary', {}).get('revenue', 0)},
             {'metric': 'inhouse_costs', 'value': report.get('inhouse_summary', {}).get('costs', 0)},
@@ -1984,8 +2024,8 @@ async def upload_excel(file: UploadFile = File(...), db: Session = Depends(get_d
                 source = "inhouse" if product_type.lower() in ["in-house", "inhouse", "in house"] else "outsourced"
                 
                 # NEW LOGIC: Check harvest data for "Both" AND "Outsourced" products
-                # Reason: "Outsourced" products might contain harvest goods that aren't properly separated
-                # If harvest data exists, we split: harvest_qty = inhouse, (outward_qty - harvest_qty) = outsourced
+                # IMPORTANT: Only split when there is a clear, direct match between
+                # the sales name and the harvest name. No fuzzy/partial matching.
                 should_check_harvest = product_type.lower() in ["both", "b", "outsourced", "outsource"]
                 
                 if should_check_harvest:
@@ -1993,62 +2033,21 @@ async def upload_excel(file: UploadFile = File(...), db: Session = Depends(get_d
                     harvest_qty = 0.0
                     harvest_record = None
                     
-                    # Try multiple matching strategies for flexible product name matching
-                    # Strategy 1: Exact match (case-insensitive)
-                    harvest_record = db.query(HarvestData).filter(
-                        HarvestData.product_name.ilike(particulars)
-                    ).first()
-                    
-                    # Strategy 2: Contains match
-                    if not harvest_record:
-                        harvest_record = db.query(HarvestData).filter(
-                            HarvestData.product_name.ilike(f"%{particulars}%")
-                        ).first()
-                    
-                    # Strategy 3: Reverse contains (harvest name contains sales name)
-                    if not harvest_record:
-                        harvest_record = db.query(HarvestData).filter(
-                            HarvestData.product_name.ilike(f"%{particulars.split()[0]}%")
-                        ).first()
-                    
-                    # Strategy 4: Normalized match (remove spaces, special chars)
-                    if not harvest_record:
-                        import re
-                        particulars_normalized = re.sub(r'[^A-Z0-9]', '', particulars.upper())
-                        all_harvest = db.query(HarvestData).all()
-                        for h in all_harvest:
-                            h_normalized = re.sub(r'[^A-Z0-9]', '', h.product_name.upper())
-                            if particulars_normalized == h_normalized or \
-                               (len(particulars_normalized) > 5 and particulars_normalized in h_normalized) or \
-                               (len(h_normalized) > 5 and h_normalized in particulars_normalized):
-                                harvest_record = h
-                                break
-                    
-                    # Strategy 5: Partial word matching (e.g., "Cabbage Red" matches "Micro Greens-Red Cabbage")
-                    # Split sales name into significant words and try to match harvest products containing those words
-                    if not harvest_record:
-                        import re
-                        # Extract significant words (longer than 2 chars, ignore common words)
-                        sales_words = [w.upper() for w in particulars.split() if len(w) > 2]
-                        # Remove common words that don't help matching
-                        common_words = {'MICRO', 'GREENS', 'WITH', 'LEAVES', 'BABY', 'FRESH', 'OOTY'}
-                        sales_words = [w for w in sales_words if w not in common_words]
-                        
-                        if sales_words:
-                            all_harvest = db.query(HarvestData).all()
-                            for h in all_harvest:
-                                h_upper = h.product_name.upper()
-                                # Check if all significant words from sales name appear in harvest name
-                                # Or if harvest name contains key words from sales name
-                                if all(word in h_upper for word in sales_words) or \
-                                   any(word in h_upper for word in sales_words if len(word) > 4):
-                                    harvest_record = h
-                                    print(f"   ✅ Matched '{particulars}' to harvest '{h.product_name}' (partial word match: {sales_words})")
-                                    break
-                    
-                    if harvest_record:
-                        harvest_qty = harvest_record.quantity
-                        print(f"   🌾 Found harvest data for '{particulars}': {harvest_qty} kg (matched to '{harvest_record.product_name}')")
+                    # STRICT MATCHING:
+                    # Only treat as inhouse+outsourced split if there is an exact
+                    # name match between sales and harvest (ignoring surrounding spaces).
+                    # Example: "BLUEBERRY A GRADE" matches ONLY a harvest row whose
+                    # product_name is exactly "BLUEBERRY A GRADE" (any case).
+                    trimmed = particulars.strip()
+                    if trimmed:
+                        matching_harvest = db.query(HarvestData).filter(
+                            HarvestData.product_name.ilike(trimmed)
+                        ).all()
+                        if matching_harvest:
+                            harvest_qty = sum(float(h.quantity or 0.0) for h in matching_harvest)
+                            # Use the first record just for display
+                            sample = matching_harvest[0]
+                            print(f"   🌾 Found harvest data for '{particulars}': {harvest_qty} kg (aggregated across {len(matching_harvest)} rows; example '{sample.product_name}' in {sample.section})")
                     
                     # If we have harvest data, split into inhouse + outsourced
                     # For "Both" products: split if sales > harvest
@@ -4480,32 +4479,14 @@ async def upload_cost_sheet(file: UploadFile = File(...), db: Session = Depends(
             # ============================================================
             # 5) PURCHASE ACCOUNTS → Direct Cost (No Allocation)
             # ============================================================
-            # NOTE: Purchase Accounts are NOT allocated - they are direct costs
-            # Each outsourced product uses its direct purchase value (inward_value)
-            # We still create the cost record for tracking, but allocation engine should skip it
+            # NOTE: Purchase Accounts are NOT allocated - they are direct costs.
+            # Each outsourced product uses its direct purchase value (inward_value).
+            # We only care about the TOTAL from the P&L, not individual lines,
+            # so that categories match the sheet exactly.
             purchase_data = expenses.get('purchase_accounts', {})
             purchase_total = purchase_data.get('total', 0.0)
-            purchase_items = purchase_data.get('items', [])
             
-            if purchase_items:
-                for pit in purchase_items:
-                    save_cost(
-                        f"PURCHASE ACCOUNTS - {pit['name']}",
-                        pit['amount'], "outsourced", "purchase_accounts",
-                        "direct_cost",  # Direct Cost - No Allocation
-                        cost_type="purchase-only", pl_class="O"
-                    )
-                # Check if items sum matches total, add remainder if needed
-                items_sum = sum(it['amount'] for it in purchase_items)
-                remainder = purchase_total - items_sum
-                if abs(remainder) > 1:
-                    save_cost(
-                        "PURCHASE ACCOUNTS - Other",
-                        remainder, "outsourced", "purchase_accounts",
-                        "direct_cost",  # Direct Cost - No Allocation
-                        cost_type="purchase-only", pl_class="O"
-                    )
-            elif purchase_total > 0:
+            if purchase_total > 0:
                 save_cost(
                     "PURCHASE ACCOUNTS", purchase_total, "outsourced", "purchase_accounts",
                     "direct_cost",  # Direct Cost - No Allocation
@@ -4513,57 +4494,17 @@ async def upload_cost_sheet(file: UploadFile = File(...), db: Session = Depends(
                 )
             
             # ============================================================
-            # 6) WASTAGE & SHORTAGE → sub-items with specific allocation
+            # 6) WASTAGE & SHORTAGE → single category, as per P&L
             # ============================================================
+            # We only use the TOTAL from the sheet ("WASTAGE & SHORTAGE"),
+            # not each line item, so the category list matches the P&L.
             wastage_data = expenses.get('wastage_shortage', {})
             wastage_total = wastage_data.get('total', 0.0)
-            wastage_items = wastage_data.get('items', [])
             
-            if wastage_items:
-                for wit in wastage_items:
-                    wname = wit['name'].upper()
-                    if 'OWN FARM' in wname:
-                        save_cost(
-                            f"WASTAGE-OWN FARM",
-                            wit['amount'], "inhouse", "wastage_shortage",
-                            "production_kg",  # Basis: Production KG (inhouse only)
-                            cost_type="inhouse-only", pl_class="B"
-                        )
-                    elif 'DISPATCH' in wname:
-                        save_cost(
-                            f"WASTAGE-DISPATCH",
-                            wit['amount'], "both", "wastage_shortage",
-                            "sales_kg",  # Basis: Sales KG (all products)
-                            pl_class="B"
-                        )
-                    elif 'FARM' in wname and 'OWN' not in wname:
-                        save_cost(
-                            f"WASTAGE- FARM",
-                            wit['amount'], "inhouse", "wastage_shortage",
-                            "production_kg",  # Basis: Production KG (inhouse only)
-                            cost_type="inhouse-only", pl_class="B"
-                        )
-                    else:
-                        save_cost(
-                            f"WASTAGE - {wit['name']}",
-                            wit['amount'], "both", "wastage_shortage",
-                            "sales_kg",  # Default: Sales KG
-                            pl_class="B"
-                        )
-                # Check if items sum matches total, add remainder
-                items_sum = sum(it['amount'] for it in wastage_items)
-                remainder = wastage_total - items_sum
-                if abs(remainder) > 1:
-                    save_cost(
-                        "WASTAGE - Other",
-                        remainder, "both", "wastage_shortage",
-                        "sales_kg",  # Default: Sales KG
-                        pl_class="B"
-                    )
-            elif wastage_total > 0:
+            if wastage_total > 0:
                 save_cost(
                     "WASTAGE & SHORTAGE", wastage_total, "both", "wastage_shortage",
-                    "sales_kg",  # Default: Sales KG
+                    "sales_kg",  # Default: Sales KG (all products)
                     pl_class="B"
                 )
             

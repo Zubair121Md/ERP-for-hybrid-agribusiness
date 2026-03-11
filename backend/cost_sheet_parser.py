@@ -159,9 +159,19 @@ def parse_cost_sheet(file_path: str) -> Dict[str, Any]:
                             is_section_header = True
                             print(f"[PARSER] Row {idx}: Detected section header for {detected_sub}")
                             break
+                # OR: header-style row with keyword and a total, but without "A) ...:"
+                # e.g. "AGGREGATION    184347.10" (no colon in the label)
+                elif c1_upper in VAR_SUB_MAP and total_val > 0:
+                    detected_sub = VAR_SUB_MAP[c1_upper]
+                    is_section_header = True
+                    print(f"[PARSER] Row {idx}: Detected bare section header for {detected_sub} (total={total_val})")
                 
                 # SECOND: If not a section header, check for keyword in row (line items)
-                if not detected_sub:
+                # Only use keyword-based detection to START a subcategory when we
+                # are not already inside one. This prevents lines like
+                # "PACKING MATERIALS (OTHERS)" under AGGREGATION from incorrectly
+                # switching the subcategory to PACKING.
+                if not detected_sub and current_variable_sub is None:
                     for keyword, sub_key in VAR_SUB_MAP.items():
                         if keyword in c1_upper:
                             detected_sub = sub_key

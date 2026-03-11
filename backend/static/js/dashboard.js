@@ -48,10 +48,10 @@ function setupEventListeners() {
         });
     });
     
-    // Form submissions
-    document.getElementById('product-form').addEventListener('submit', handleProductSubmit);
-    document.getElementById('sales-form').addEventListener('submit', handleSalesSubmit);
-    document.getElementById('cost-form').addEventListener('submit', handleCostSubmit);
+    // Form submissions (use unified submit handlers that support add + edit modes)
+    document.getElementById('product-form').addEventListener('submit', submitProductForm);
+    document.getElementById('sales-form').addEventListener('submit', submitSalesForm);
+    document.getElementById('cost-form').addEventListener('submit', submitCostForm);
     
     // Month filters removed - now using all data
 }
