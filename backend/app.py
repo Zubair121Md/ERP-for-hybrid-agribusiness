@@ -656,7 +656,9 @@ class CostAllocationEngine:
             
             # Category-based filtering for FIXED COST CAT - II
             if fixed_cost_category:
-                product_name_upper = (product.name or "").upper().strip()
+                product_name_upper_raw = (product.name or "").upper().strip()
+                # Strip source suffixes like "(INHOUSE)" / "(OUTSOURCED)" for matching
+                product_name_upper = re.sub(r"\s*\((INHOUSE|OUTSOURCED)\)\s*$", "", product_name_upper_raw)
                 
                 if fixed_cost_category == "strawberry":
                     # FIXED COST CAT - II (Strawberry): Only apply to strawberry products (inhouse)
@@ -726,7 +728,9 @@ class CostAllocationEngine:
                     continue
                 
                 # Apply section-based filtering
-                product_name_upper = (product.name or "").upper().strip()
+                product_name_upper_raw = (product.name or "").upper().strip()
+                # Strip source suffixes like "(INHOUSE)" / "(OUTSOURCED)" for matching
+                product_name_upper = re.sub(r"\s*\((INHOUSE|OUTSOURCED)\)\s*$", "", product_name_upper_raw)
                 product_mapped = False
                 
                 # First, try section mappings if available
