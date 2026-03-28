@@ -817,31 +817,29 @@ class CostAllocationEngine:
         is_ea = unit_upper in ['EA', 'EACH', 'PC', 'PCS', 'UNIT', 'UNITS']
         is_hamper = "hamper" in pname
 
-        # Special handling for hampers:
-        # Hampers are assembled products, not directly cultivated, so:
-        # - EXCLUDED from I costs (Cultivation, Wastage-in Farm) - return 0 (no allocation)
-        # - Use REVENUE-only for all other costs (B costs, O costs)
-        if is_hamper:
-            # Check if this is an inhouse-specific cost (I classification)
-            is_inhouse_cost = cost.pl_classification == "I" if hasattr(cost, 'pl_classification') and cost.pl_classification else False
-            if is_inhouse_cost:
-                # Hampers don't consume cultivation/wastage costs - they're assembled from already-produced items
-                return 0.0
-            # For all other costs, use revenue-based allocation
-            return sale.quantity * sale.sale_price
-        
-        # Helper function to convert quantity to kg
         def get_quantity_kg(qty):
             if hasattr(product, 'unit') and product.unit and product.unit.upper() in ['EA', 'EACH', 'PC', 'PCS', 'UNIT', 'UNITS']:
                 qty_kg = _to_kg(product.name, qty, product.unit)
                 if qty_kg > 0:
                     return qty_kg
             return qty
+
+        # Special handling for hampers:
+        # Hampers are assembled products, not directly cultivated, so:
+        # - EXCLUDED from I costs (Cultivation, Wastage-in Farm) - return 0 (no allocation)
+        # - For other costs: allocate by sold quantity in kg (no revenue basis)
+        if is_hamper:
+            # Check if this is an inhouse-specific cost (I classification)
+            is_inhouse_cost = cost.pl_classification == "I" if hasattr(cost, 'pl_classification') and cost.pl_classification else False
+            if is_inhouse_cost:
+                # Hampers don't consume cultivation/wastage costs - they're assembled from already-produced items
+                return 0.0
+            return get_quantity_kg(sale.quantity)
         
-        # NEW BASIS TYPES according to COST_ALLOCATION.md
+        # NEW BASIS TYPES — all monetary allocation drivers use kg equivalents only
         if cost.basis == "sales_value":
-            # Sales Value = Outward Quantity × Sale Price (Revenue)
-                return sale.quantity * sale.sale_price
+            # Legacy name: treat as sales kg (no revenue weighting)
+            return get_quantity_kg(sale.quantity)
         
         elif cost.basis == "sales_kg":
             # Sales KG = Outward Quantity (quantity actually sold)
@@ -895,59 +893,19 @@ class CostAllocationEngine:
             return get_quantity_kg(sale.quantity)
         
         elif cost.basis == "value":
-            # Use REVENUE (not purchase cost) for fair allocation
-            # Purchase cost is already accounted for in direct_cost - don't penalize twice
-            # Revenue reflects business contribution and is fair to both inhouse and outsourced
-            return sale.quantity * sale.sale_price
+            # Legacy: was revenue; now kg-only (sold quantity in kg)
+            return get_quantity_kg(sale.quantity)
         
         elif cost.basis == "trips":
-            # For trips, use value-based to avoid unit issues
-            if is_ea:
-                return sale.quantity * sale.sale_price
-            return sale.quantity
+            # Legacy: now kg-only
+            return get_quantity_kg(sale.quantity)
         
         elif cost.basis == "hybrid":
-            # NEW LOGIC: Different allocation for inhouse-specific costs (I items)
-            # Get product source
-            product_source = product.source if hasattr(product, 'source') else None
-            is_inhouse = product_source == "inhouse"
-            
-            # Check if this is an inhouse-specific cost (I classification like Cultivation, Wastage)
-            is_inhouse_cost = cost.pl_classification == "I" if hasattr(cost, 'pl_classification') and cost.pl_classification else False
-            
-            # For inhouse products with inhouse-specific costs (I items):
-            # Allocate by WEIGHT ONLY - these are direct production costs proportional to quantity produced
-            # Examples: Cultivation Expenses I, Wastage-in Farm (Quality Check) I, Rejection Own Farm Harvest I
-            # These costs scale directly with production volume, not profitability
-            # NOTE: For graded products (A/B/C) from same harvest, this ensures fair per-kg allocation
-            if is_inhouse and is_inhouse_cost:
-                qty_kg = get_quantity_kg(sale.quantity)
-                if qty_kg > 0:
-                    return qty_kg  # Pure weight-based allocation for cultivation/wastage costs
-                # Fallback to revenue if no weight conversion
-                return sale.quantity * sale.sale_price
-            
-            # For all other products (outsourced products, or inhouse products with B costs):
-            # Use standard hybrid: 20% weight + 80% gross profit
-            # This balances resource consumption with profitability for shared overhead costs
-            # Weight part (20%): Use ACTUAL weight in kg (with EA→kg conversion where applicable)
+            # Pure kg (sold quantity); no revenue weighting
             qty_kg = get_quantity_kg(sale.quantity)
-            weight_part = qty_kg
-            
-            # Gross Profit part (80%): Revenue - Direct Cost
-            revenue = sale.quantity * sale.sale_price
-            direct_cost = sale.direct_cost or 0.0
-            gross_profit = max(0.0, revenue - direct_cost)  # Ensure non-negative
-            
-            # IMPORTANT: For inhouse products, if direct_cost is 0, gross_profit = revenue
-            # This means high-revenue products (like A Grade) get 80% of allocation based on revenue
-            # Lower-revenue products (like C Grade) get penalized even if they're same product family
-            # Current logic: 20% weight + 80% revenue (since direct_cost = 0 for inhouse)
-            
-            # Combined basis: 20% weight + 80% gross profit
-            # Weight and profit are on different scales, but this creates fair balance
-            # High-profit products still get most allocation (80%), but weight matters (20%)
-            return 0.20 * weight_part + 0.80 * gross_profit
+            if qty_kg > 0:
+                return qty_kg
+            return float(sale.quantity) if sale.quantity else 0.0
         
         return 0.0
     
@@ -4347,7 +4305,7 @@ async def upload_cost_sheet(file: UploadFile = File(...), db: Session = Depends(
                 costs_updated = 0  # reset since we're replacing
             
             # ============================================================
-            # 1) FIXED COST CAT - I  →  All products proportional by Sales Value
+            # 1) FIXED COST CAT - I  →  All products proportional by Sales KG
             # ============================================================
             fc1 = expenses.get('fixed_cost_cat_i', {}).get('total', 0.0)
             # CORRECTION: Excel line items sum to 393,350 but should be 390,350
@@ -4359,7 +4317,7 @@ async def upload_cost_sheet(file: UploadFile = File(...), db: Session = Depends(
                 print(f"   📊 FIXED COST CAT - I: ₹{fc1:,.2f}")
             if fc1 > 0:
                 save_cost("FIXED COST CAT - I", fc1, "both", "fixed_cost_cat_i",
-                          "sales_value",  # Basis: Sales Value (revenue)
+                          "sales_kg",
                           is_fixed="fixed", pl_class="B")
             else:
                 print(f"   ⚠️  FIXED COST CAT - I is 0 or not found")
@@ -4453,10 +4411,10 @@ async def upload_cost_sheet(file: UploadFile = File(...), db: Session = Depends(
             # ============================================================
             # Basis mapping per COST_ALLOCATION.md
             cat_basis_map = {
-                'distribution_cost':    'sales_kg',      # Sales KG
-                'marketing_expenses':   'sales_value',   # Sales Value
-                'vehicle_running_cost': 'handled_kg',    # Handled KG (trucks move weight, not revenue)
-                'others':               'sales_kg',      # Sales KG
+                'distribution_cost':    'sales_kg',
+                'marketing_expenses':   'sales_kg',
+                'vehicle_running_cost': 'handled_kg',
+                'others':               'sales_kg',
             }
             
             for cat_key, cat_name in [
