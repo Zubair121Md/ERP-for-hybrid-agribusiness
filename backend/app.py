@@ -29,7 +29,7 @@ REGEX_PATTERNS = {
 
 # Database setup - Support both SQLite (local) and PostgreSQL (production)
 def _normalize_postgres_url(url: str) -> str:
-    """Strip whitespace, accept postgres://, and require SSL for public Render Postgres hosts."""
+    """Strip whitespace, accept postgres://, and default sslmode=require for hosted Postgres (Render, Supabase)."""
     u = (url or "").strip()
     if u.startswith("postgres://"):
         u = "postgresql://" + u[len("postgres://") :]
@@ -39,7 +39,7 @@ def _normalize_postgres_url(url: str) -> str:
     host = (parsed.hostname or "").lower()
     if not host:
         return u
-    if "postgres.render.com" in host:
+    if "postgres.render.com" in host or host.endswith(".supabase.co"):
         q = dict(parse_qsl(parsed.query, keep_blank_values=True))
         q.setdefault("sslmode", "require")
         return urlunparse(parsed._replace(query=urlencode(q)))
