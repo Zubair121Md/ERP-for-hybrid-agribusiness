@@ -53,7 +53,7 @@ def parse_cost_sheet(file_path: str) -> Dict[str, Any]:
         # Category totals
         expenses = {
             'fixed_cost_cat_i':     {'total': 0.0, 'items': []},
-            'fixed_cost_cat_ii':    {'total': 0.0, 'items': [], 'splits': {'strawberry': 0.60, 'greens': 0.25, 'aggregation': 0.15}},
+            'fixed_cost_cat_ii':    {'total': 0.0, 'items': [], 'splits': {'strawberry': 0.50, 'greens': 0.25, 'open_field': 0.10, 'aggregation': 0.15}},
             'variable_cost':        {'total': 0.0, 'subcategories': {}},
             'distribution_cost':    {'total': 0.0, 'items': []},
             'marketing_expenses':   {'total': 0.0, 'items': []},
@@ -345,15 +345,18 @@ def parse_cost_sheet(file_path: str) -> Dict[str, Any]:
                     expenses[cat_key]['total'] = items_sum
                     print(f"[PARSER] Calculated {cat_key} from items: {items_sum:,.2f}")
 
-        # ---- Percentage splits for Fixed Cost Cat II ----
-        # Scan for "STRAWBERRY -60 %", "GREENS -25 %", "AGGREGATION - 15 %"
+        # ---- Percentage splits for Fixed Cost Cat II (default 50 / 25 / 10 / 15) ----
         for idx in range(len(df)):
             row = df.iloc[idx]
             c4 = _str(row, 4).strip().upper()
-            if 'STRAWBERRY' in c4 and '60' in c4:
+            if 'STRAWBERRY' in c4 and '50' in c4:
+                expenses['fixed_cost_cat_ii']['splits']['strawberry'] = 0.50
+            elif 'STRAWBERRY' in c4 and '60' in c4:
                 expenses['fixed_cost_cat_ii']['splits']['strawberry'] = 0.60
             elif 'GREENS' in c4 and '25' in c4:
                 expenses['fixed_cost_cat_ii']['splits']['greens'] = 0.25
+            elif 'OPEN FIELD' in c4 and '10' in c4:
+                expenses['fixed_cost_cat_ii']['splits']['open_field'] = 0.10
             elif 'AGGREGATION' in c4 and '15' in c4:
                 expenses['fixed_cost_cat_ii']['splits']['aggregation'] = 0.15
 

@@ -47,6 +47,12 @@ def _normalize_postgres_url(url: str) -> str:
     return u
 
 
+def _is_fixed_cost_cat_ii_name(name: Optional[str]) -> bool:
+    """True for Fixed Cost Cat II lines (cost sheet or auto-upload naming)."""
+    u = (name or "").upper().replace("  ", " ")
+    return "FIXED COST CAT - II" in u or "FIXED COST CATEGORY II" in u
+
+
 def _supabase_prefer_ipv4_connect_args(database_url: str) -> dict:
     """
     Render (and similar hosts) often have no IPv6 egress. Supabase may resolve db.*.supabase.co
@@ -609,8 +615,8 @@ class CostAllocationEngine:
         
         cost_name_upper = (cost.name or "").upper()
         
-        # Check if this is FIXED COST CAT - II that needs category-based filtering
-        is_fixed_cost_cat_ii = "FIXED COST CAT - II" in cost_name_upper
+        # FC II: pooled rupee amount for one bucket; split only among that bucket's products by sales kg
+        is_fixed_cost_cat_ii = _is_fixed_cost_cat_ii_name(cost.name)
         fixed_cost_category = None
         
         if is_fixed_cost_cat_ii:
@@ -907,6 +913,10 @@ class CostAllocationEngine:
         outsourced_profit = 0.0      # Profit after BOTH direct + P&L
         
         cost_breakdown = {}
+        # Sum of sales kg across products in sales_map (one row per product_id: last sale wins if duplicates)
+        total_sales_kg_basis = sum(
+            _sale_quantity_kg(s) for s in sales_map.values()
+        )
         
         for product_id, sale in sales_map.items():
             product = product_map.get(product_id)
@@ -1021,7 +1031,17 @@ class CostAllocationEngine:
                 "profit_margin": outsourced_margin
             },
             "cost_breakdown": cost_breakdown,
-            "top_products": top_products
+            "top_products": top_products,
+            "allocation_basis": {
+                "total_sales_kg": total_sales_kg_basis,
+                "description": (
+                    "Sales kg = outward sold quantity in kg per product (EA converted where configured). "
+                    "FC I: amount × (product_kg / total_sales_kg) over all products with sales. "
+                    "FC II: each line is already X% of FC II total; that rupee pool splits by "
+                    "(product_kg / sum kg in that bucket only). "
+                    "Variable costs: same within OPEN FIELD / LETTUCE / STRAWBERRY / etc."
+                ),
+            },
         }
 
 # API Endpoints
@@ -2628,6 +2648,7 @@ def parse_purple_patch_auto_mode(df, db, month="2025-04"):
     fixed_cost_2_items = []  # Individual cost items
     fixed_cost_2_strawberry = 0.0
     fixed_cost_2_greens = 0.0
+    fixed_cost_2_open_field = 0.0
     fixed_cost_2_aggregation = 0.0
     fixed_cost_2_total = 0.0
     
@@ -2657,31 +2678,45 @@ def parse_purple_patch_auto_mode(df, db, month="2025-04"):
                         print(f"   ✅ Found FIXED COST CAT - II Total: ₹{fixed_cost_2_total:,.2f} at row {idx + 1}")
                         break
             
-            # Look for apportionment rows (STRAWBERRY -60%, GREENS -25%, AGGREGATION -15%)
-            if 'STRAWBERRY' in row_str and ('60' in row_str or '%' in row_str):
-                # Extract the apportioned amount (usually a number in the row)
+            # Apportionment rows (e.g. Strawberry 50%/60%, Greens 25%, Open Field 10%, Aggregation 15%)
+            if 'STRAWBERRY' in row_str and ('50' in row_str or '60' in row_str or '%' in row_str):
                 for col in range(len(row)):
                     val = parse_numeric_robust(row.iloc[col])
-                    if 1000 < val < 100000:  # Apportioned amount should be reasonable
+                    if 1000 < val < 100000:
                         fixed_cost_2_strawberry = val
-                        print(f"   ✅ Found FIXED COST CAT - II Strawberry (60%): ₹{fixed_cost_2_strawberry:,.2f}")
+                        print(f"   ✅ Found FIXED COST CAT - II Strawberry: ₹{fixed_cost_2_strawberry:,.2f}")
                         break
             
-            if ('GREENS' in row_str or 'GREEN' in row_str) and ('25' in row_str or '%' in row_str):
+            if ('GREENS' in row_str or 'GREEN' in row_str) and 'OPEN FIELD' not in row_str and ('25' in row_str or '%' in row_str):
                 for col in range(len(row)):
                     val = parse_numeric_robust(row.iloc[col])
                     if 1000 < val < 100000:
                         fixed_cost_2_greens = val
-                        print(f"   ✅ Found FIXED COST CAT - II Greens (25%): ₹{fixed_cost_2_greens:,.2f}")
+                        print(f"   ✅ Found FIXED COST CAT - II Greens: ₹{fixed_cost_2_greens:,.2f}")
+                        break
+            
+            if 'OPEN FIELD' in row_str and 'VARIABLE' not in row_str and ('10' in row_str or '%' in row_str):
+                for col in range(len(row)):
+                    val = parse_numeric_robust(row.iloc[col])
+                    if 1000 < val < 1000000:
+                        fixed_cost_2_open_field = val
+                        print(f"   ✅ Found FIXED COST CAT - II Open Field: ₹{fixed_cost_2_open_field:,.2f}")
                         break
             
             if 'AGGREGATION' in row_str and ('15' in row_str or '%' in row_str):
                 for col in range(len(row)):
                     val = parse_numeric_robust(row.iloc[col])
-                    if 1000 < val < 1000000:  # Aggregation can be larger
+                    if 1000 < val < 1000000:
                         fixed_cost_2_aggregation = val
-                        print(f"   ✅ Found FIXED COST CAT - II Aggregation (15%): ₹{fixed_cost_2_aggregation:,.2f}")
+                        print(f"   ✅ Found FIXED COST CAT - II Aggregation: ₹{fixed_cost_2_aggregation:,.2f}")
                         break
+        
+        # Open Field FC II line missing: assign material remainder of FC II total
+        if fixed_cost_2_total > 0 and fixed_cost_2_open_field <= 0:
+            remainder = fixed_cost_2_total - fixed_cost_2_strawberry - fixed_cost_2_greens - fixed_cost_2_aggregation
+            if remainder > 100:
+                fixed_cost_2_open_field = remainder
+                print(f"   ✅ FC II Open Field (remainder of FC II total): ₹{fixed_cost_2_open_field:,.2f}")
     
     # ============================================
     # STEP 4: Extract VARIABLE COST blocks (A-F)
@@ -3184,10 +3219,10 @@ def parse_purple_patch_auto_mode(df, db, month="2025-04"):
     # ============================================
     print("📊 Step 7: Creating Cost records...")
     
-    # FIXED COST CAT - I: Allocate to all products (B classification)
+    # FIXED COST CAT - I: same naming as cost-sheet path so FC II bucket rules apply
     if fixed_cost_1_total > 0:
         cost = Cost(
-            name="Fixed Cost Category I",
+            name="FIXED COST CAT - I",
             amount=fixed_cost_1_total,
             applies_to="both",
             cost_type="common",
@@ -3202,14 +3237,14 @@ def parse_purple_patch_auto_mode(df, db, month="2025-04"):
         )
         db.add(cost)
         costs_created += 1
-        print(f"   💰 Created Fixed Cost I: ₹{fixed_cost_1_total:,.2f}")
+        print(f"   💰 Created FIXED COST CAT - I: ₹{fixed_cost_1_total:,.2f}")
     
-    # FIXED COST CAT - II: Apportioned costs
+    # FIXED COST CAT - II: rupee pools split within each bucket by sales kg
     if fixed_cost_2_strawberry > 0:
         cost = Cost(
-            name="Fixed Cost Category II - Strawberry",
+            name="FIXED COST CAT - II - Strawberry",
             amount=fixed_cost_2_strawberry,
-            applies_to="inhouse",  # Strawberry is inhouse
+            applies_to="inhouse",
             cost_type="common",
             basis="sales_kg",
             month=month,
@@ -3225,7 +3260,7 @@ def parse_purple_patch_auto_mode(df, db, month="2025-04"):
     
     if fixed_cost_2_greens > 0:
         cost = Cost(
-            name="Fixed Cost Category II - Greens",
+            name="FIXED COST CAT - II - Greens",
             amount=fixed_cost_2_greens,
             applies_to="inhouse",
             cost_type="common",
@@ -3241,11 +3276,29 @@ def parse_purple_patch_auto_mode(df, db, month="2025-04"):
         db.add(cost)
         costs_created += 1
     
+    if fixed_cost_2_open_field > 0:
+        cost = Cost(
+            name="FIXED COST CAT - II - Open Field",
+            amount=fixed_cost_2_open_field,
+            applies_to="inhouse",
+            cost_type="common",
+            basis="sales_kg",
+            month=month,
+            is_fixed="fixed",
+            category="fixed_cost_2_open_field",
+            pl_classification="I",
+            original_amount=fixed_cost_2_open_field,
+            allocation_ratio=1.0,
+            source_file="auto_mode_upload"
+        )
+        db.add(cost)
+        costs_created += 1
+    
     if fixed_cost_2_aggregation > 0:
         cost = Cost(
-            name="Fixed Cost Category II - Aggregation",
+            name="FIXED COST CAT - II - Aggregation",
             amount=fixed_cost_2_aggregation,
-            applies_to="both",
+            applies_to="outsourced",
             cost_type="common",
             basis="sales_kg",
             month=month,
@@ -3362,6 +3415,7 @@ def parse_purple_patch_auto_mode(df, db, month="2025-04"):
             "fixed_cost_1_total": fixed_cost_1_total,
             "fixed_cost_2_strawberry": fixed_cost_2_strawberry,
             "fixed_cost_2_greens": fixed_cost_2_greens,
+            "fixed_cost_2_open_field": fixed_cost_2_open_field,
             "fixed_cost_2_aggregation": fixed_cost_2_aggregation
         }
     }
