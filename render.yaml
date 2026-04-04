@@ -1,6 +1,7 @@
-# Web service + optional Render Postgres. To use Supabase instead: remove the fromDatabase block
-# below and set DATABASE_URL in the Render dashboard to your Supabase connection string
-# (Transaction pooler, port 6543, add ?sslmode=require if required). Also set ERP_COMPANY_NAME etc.
+# Set DATABASE_URL in the Render dashboard (Environment) to your Postgres URI.
+# Do not commit real URLs or passwords to git.
+# If the password contains @ # : etc., URL-encode it or use the "connection string" copy from the host UI.
+# Append ?sslmode=require if the provider requires SSL (common for cloud Postgres).
 
 services:
   - type: web
@@ -11,17 +12,10 @@ services:
     startCommand: cd backend && uvicorn app:app --host 0.0.0.0 --port $PORT
     envVars:
       - key: DATABASE_URL
-        fromDatabase:
-          name: erp-db
-          property: connectionString
+        sync: false
       - key: ERP_COMPANY_NAME
         sync: false
       - key: ERP_COMPANY_TAGLINE
         sync: false
       - key: ERP_LOGO_URL
         sync: false
-
-databases:
-  - name: erp-db
-    plan: free
-    databaseName: erp_agribusiness
