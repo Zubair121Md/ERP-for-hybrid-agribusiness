@@ -6,12 +6,11 @@ services:
     buildCommand: pip install -r backend/requirements.txt
     startCommand: cd backend && uvicorn app:app --host 0.0.0.0 --port $PORT
     envVars:
+      # Set DATABASE_URL in the Render Dashboard (Supabase: Project Settings → Database → URI).
+      # Use the pooler URI if recommended; append ?sslmode=require if not already present.
+      # Do NOT use fromDatabase here — that injects Render Postgres (dpg-…) and overrides Supabase.
       - key: DATABASE_URL
-        fromDatabase:
-          name: erp-db
-          property: connectionString
+        sync: false
 
-databases:
-  - name: erp-db
-    plan: free
-    databaseName: erp_agribusiness
+# No Render-managed Postgres — database is external (e.g. Supabase).
+# If you still have an old "erp-db" on Render, you can delete it from the dashboard to avoid confusion.
