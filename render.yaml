@@ -6,8 +6,8 @@ services:
     buildCommand: pip install -r backend/requirements.txt
     startCommand: cd backend && uvicorn app:app --host 0.0.0.0 --port $PORT
     envVars:
-      # Set DATABASE_URL in the Render Dashboard (Supabase: Project Settings → Database → URI).
-      # Use the pooler URI if recommended; append ?sslmode=require if not already present.
+      # Set DATABASE_URL in the Render Dashboard (Supabase → Database → URI, or pooler :6543).
+      # If direct db.*.supabase.co fails with "Network is unreachable", the app forces IPv4 for Supabase hosts.
       # Do NOT use fromDatabase here — that injects Render Postgres (dpg-…) and overrides Supabase.
       - key: DATABASE_URL
         sync: false

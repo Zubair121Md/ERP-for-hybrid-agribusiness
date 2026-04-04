@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 import io
 import re
+import socket
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 # OPTIMIZED: Pre-compile regex patterns for better performance (compile once, use many times)
@@ -46,6 +47,30 @@ def _normalize_postgres_url(url: str) -> str:
     return u
 
 
+def _supabase_prefer_ipv4_connect_args(database_url: str) -> dict:
+    """
+    Render (and similar hosts) often have no IPv6 egress. Supabase may resolve db.*.supabase.co
+    to IPv6 first → "Network is unreachable". libpq can connect via IPv4 using hostaddr while
+    keeping host= for TLS server name verification.
+    """
+    parsed = urlparse(database_url)
+    if parsed.scheme not in ("postgresql", "postgres"):
+        return {}
+    host = (parsed.hostname or "").lower()
+    if not host:
+        return {}
+    if not (host.endswith(".supabase.co") or "pooler.supabase.com" in host):
+        return {}
+    port = parsed.port or 5432
+    try:
+        infos = socket.getaddrinfo(host, port, socket.AF_INET, socket.SOCK_STREAM)
+    except OSError:
+        return {}
+    if not infos:
+        return {}
+    return {"hostaddr": infos[0][4][0]}
+
+
 _raw_db_url = os.getenv("DATABASE_URL", "sqlite:///./fruit_vegetable_costs.db")
 DATABASE_URL = (
     _normalize_postgres_url(_raw_db_url)
@@ -55,8 +80,8 @@ DATABASE_URL = (
 
 # Handle connection args based on database type
 if DATABASE_URL.startswith("postgresql"):
-    # PostgreSQL doesn't need check_same_thread
-    engine = create_engine(DATABASE_URL)
+    _pg_extra = _supabase_prefer_ipv4_connect_args(DATABASE_URL)
+    engine = create_engine(DATABASE_URL, connect_args=_pg_extra)
 else:
     # SQLite needs check_same_thread=False for FastAPI
     engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
