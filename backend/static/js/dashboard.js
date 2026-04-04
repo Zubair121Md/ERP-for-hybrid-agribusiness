@@ -4,33 +4,6 @@ let currentTab = 'dashboard';
 let charts = {};
 let currentData = {};
 
-async function loadBranding() {
-    try {
-        const r = await fetch(`${API_BASE}/branding`);
-        if (!r.ok) return;
-        const b = await r.json();
-        const name = (b.company_name || 'Hybrid Agribusiness ERP').trim() || 'Hybrid Agribusiness ERP';
-        document.title = `${name} — Cost Allocation`;
-        const nameEl = document.getElementById('brand-company-name');
-        const tagEl = document.getElementById('brand-tagline');
-        const img = document.getElementById('brand-logo-img');
-        if (nameEl) nameEl.textContent = name;
-        if (tagEl) {
-            let t = (b.company_tagline || '').trim();
-            if (t && t.toLowerCase() === name.toLowerCase()) t = '';
-            tagEl.textContent = t;
-            tagEl.style.display = t ? 'block' : 'none';
-        }
-        if (img && b.logo_url) {
-            img.src = b.logo_url;
-            img.alt = '';
-            img.setAttribute('role', 'presentation');
-        }
-    } catch (e) {
-        console.warn('Branding load failed', e);
-    }
-}
-
 // Quantity display formatter for EA and KG
 function formatQtyDisplay(productName, unit, quantity) {
     const name = (productName || '').toLowerCase();
@@ -47,7 +20,6 @@ function formatQtyDisplay(productName, unit, quantity) {
 
 // Initialize dashboard
 document.addEventListener('DOMContentLoaded', function() {
-    loadBranding();
     initializeSidebar();
     initializeDashboard();
     loadDashboardData();
@@ -142,8 +114,6 @@ function showTab(tabName) {
     } else if (tabName === 'harvest-mapping') {
         // No data loading needed for harvest-mapping tab
         console.log('✅ Harvest & Mapping tab activated');
-    } else if (tabName === 'data-upload' && typeof window.updatePLPreview === 'function') {
-        window.updatePLPreview();
     }
 }
 

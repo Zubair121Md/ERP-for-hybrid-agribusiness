@@ -1,8 +1,3 @@
-# Set DATABASE_URL in the Render dashboard (Environment) to your Postgres URI.
-# Do not commit real URLs or passwords to git.
-# If the password contains @ # : etc., URL-encode it or use the "connection string" copy from the host UI.
-# Append ?sslmode=require if the provider requires SSL (common for cloud Postgres).
-
 services:
   - type: web
     name: erp-agribusiness
@@ -12,10 +7,11 @@ services:
     startCommand: cd backend && uvicorn app:app --host 0.0.0.0 --port $PORT
     envVars:
       - key: DATABASE_URL
-        sync: false
-      - key: ERP_COMPANY_NAME
-        sync: false
-      - key: ERP_COMPANY_TAGLINE
-        sync: false
-      - key: ERP_LOGO_URL
-        sync: false
+        fromDatabase:
+          name: erp-db
+          property: connectionString
+
+databases:
+  - name: erp-db
+    plan: free
+    databaseName: erp_agribusiness

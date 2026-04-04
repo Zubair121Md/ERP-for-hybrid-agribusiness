@@ -26,14 +26,13 @@ REGEX_PATTERNS = {
     'quantity_unit': re.compile(r'([\d,]+\.?\d*)\s*([A-Za-z]*)'),
 }
 
-# Database setup - Support both SQLite (local) and PostgreSQL / Supabase (production).
-# Supabase: Project Settings → Database → copy "URI" and set DATABASE_URL (use pooler on port 6543 for serverless).
-# Example: postgresql://postgres.[ref]:[password]@aws-0-[region].pooler.supabase.com:6543/postgres?sslmode=require
+# Database setup - Support both SQLite (local) and PostgreSQL (production)
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./fruit_vegetable_costs.db")
 
 # Handle connection args based on database type
 if DATABASE_URL.startswith("postgresql"):
-    engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+    # PostgreSQL doesn't need check_same_thread
+    engine = create_engine(DATABASE_URL)
 else:
     # SQLite needs check_same_thread=False for FastAPI
     engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
@@ -60,45 +59,84 @@ def _to_kg(product_name: str, quantity: float, unit: str) -> float:
     return quantity
 
 
-def _quantity_as_sales_kg(product, quantity: float) -> float:
-    """Outward quantity in kg for splits — matches sales_kg basis in CostAllocationEngine (EA→kg when defined)."""
-    if product is None:
-        return float(quantity or 0)
-    unit_upper = (getattr(product, "unit", None) or "").upper()
-    if unit_upper in ['EA', 'EACH', 'PC', 'PCS', 'UNIT', 'UNITS']:
-        qk = _to_kg(getattr(product, "name", "") or "", float(quantity or 0), product.unit)
-        if qk > 0:
-            return qk
-    return float(quantity or 0)
+def _sale_quantity_kg(sale) -> float:
+    """Outward sold quantity in kg — same basis as cost allocation (EA/PCS uses _to_kg when mapped)."""
+    product = getattr(sale, "product", None)
+    qty = float(sale.quantity or 0)
+    if not product:
+        return qty
+    unit = (getattr(product, "unit", None) or "").strip()
+    if unit.upper() in ["EA", "EACH", "PC", "PCS", "UNIT", "UNITS"]:
+        qty_kg = _to_kg(product.name or "", qty, unit)
+        if qty_kg > 0:
+            return qty_kg
+    return qty
 
 
-def compute_inhouse_outsourced_ratios(db: Session, alpha: Optional[float] = None) -> tuple:
+def compute_inhouse_outsourced_ratios(db: Session, alpha: float = 0.5) -> tuple:
     """
-    Inhouse vs outsourced shares of total sales kg (no revenue).
-    Used to split B-class P&L pools. ``alpha`` is ignored (backward compatible).
+    Compute dynamic segment ratios from current sales data
+    OPTIMIZED: Single-pass iteration with pre-loaded product map
+    Time Complexity: O(n) where n = number of sales records
+    
+    Args:
+        db: Database session
+        alpha: Weight for weight vs value (0.5 = 50% weight, 50% value)
+    
+    Returns:
+        (inhouse_ratio, outsourced_ratio) tuple
     """
+    # OPTIMIZED: Load all products once into a map for O(1) lookup
     products = db.query(Product).all()
-    product_map = {p.id: p for p in products}
-    sales = db.query(MonthlySale).all()
-    in_kg = 0.0
-    out_kg = 0.0
+    product_map = {p.id: p for p in products}  # O(m) where m = products
+    
+    # OPTIMIZED: Single query with join, iterate once
+    sales = db.query(MonthlySale).all()  # O(n) where n = sales
+    in_w = 0.0; out_w = 0.0
+    in_v = 0.0; out_v = 0.0
+    
+    # Single-pass iteration: O(n)
     for s in sales:
         product = product_map.get(s.product_id)
         if not product:
             continue
-        qkg = _quantity_as_sales_kg(product, s.quantity or 0)
+
+        qty_kg = _sale_quantity_kg(s)
+        rev = s.quantity * s.sale_price
+
         if product.source == "inhouse":
-            in_kg += qkg
+            in_w += qty_kg
+            in_v += rev
         else:
-            out_kg += qkg
-    total_kg = in_kg + out_kg
-    if total_kg <= 0:
-        in_ratio, out_ratio = 0.1822, 0.8178
+            out_w += qty_kg
+            out_v += rev
+
+    # Compute shares with safety - O(1)
+    total_w = in_w + out_w
+    total_v = in_v + out_v
+    in_w_share = (in_w / total_w) if total_w > 0 else 0.0
+    out_w_share = (out_w / total_w) if total_w > 0 else 0.0
+    in_v_share = (in_v / total_v) if total_v > 0 else 0.0
+    out_v_share = (out_v / total_v) if total_v > 0 else 0.0
+
+    # Hybrid segment ratio: α*weight + (1-α)*value
+    in_ratio = alpha * in_w_share + (1 - alpha) * in_v_share
+    out_ratio = alpha * out_w_share + (1 - alpha) * out_v_share
+    
+    # Normalize in case of numeric drift
+    total = in_ratio + out_ratio
+    if total > 0:
+        in_ratio /= total
+        out_ratio /= total
     else:
-        in_ratio = in_kg / total_kg
-        out_ratio = out_kg / total_kg
-    print(f"📊 SEGMENT RATIOS (sales kg only):")
-    print(f"   📦 Inhouse {in_kg:,.2f} kg ({in_ratio:.1%}), Outsourced {out_kg:,.2f} kg ({out_ratio:.1%})")
+        # Fallback if no data
+        in_ratio, out_ratio = 0.1822, 0.8178
+
+    print(f"📊 DYNAMIC SEGMENT RATIOS (α={alpha:.2f}: 1=sales kg only, 0=revenue only):")
+    print(f"   📦 Weight: Inhouse {in_w:.2f}kg ({in_w_share:.1%}), Outsourced {out_w:.2f}kg ({out_w_share:.1%})")
+    print(f"   💰 Value: Inhouse ₹{in_v:,.2f} ({in_v_share:.1%}), Outsourced ₹{out_v:,.2f} ({out_v_share:.1%})")
+    print(f"   🎯 Final: Inhouse {in_ratio:.4f} ({in_ratio:.1%}), Outsourced {out_ratio:.4f} ({out_ratio:.1%})")
+    
     return in_ratio, out_ratio
 
 # Database Models
@@ -421,10 +459,8 @@ def get_db():
 class CostAllocationEngine:
     def __init__(self, db: Session):
         self.db = db
-        # Shared overhead: proportional to declared basis (sales_kg, production_kg, handled_kg, etc.).
-        # Segment split for B pools uses sales kg only (see compute_inhouse_outsourced_ratios).
-        self.OVERHEAD_CAP_FACTOR = None
-    
+        # Allocatable overhead splits by sold quantity (kg) per product; purchase/direct lines are not allocated.
+
     def allocate_costs_for_month(self, month: str) -> Dict[str, Any]:
         """Enhanced allocation function - works with all data regardless of month"""
         
@@ -474,7 +510,7 @@ class CostAllocationEngine:
             raise HTTPException(status_code=500, detail=f"Allocation failed: {str(e)}")
     
     def _allocate_single_cost(self, cost: Cost, product_map: Dict, sales_map: Dict, month: str, allocated_so_far: Dict[int, float], cap_by_product: Dict[int, float]):
-        """Allocate one cost across applicable products in proportion to each product's basis (kg drivers, not revenue)."""
+        """Allocate one pooled cost to applicable products in proportion to each line's sales kg."""
         
         # SKIP PURCHASE ACCOUNTS - they are direct costs, not allocated
         # According to COST_ALLOCATION.md: PURCHASE ACCOUNTS use direct_cost basis and are NOT allocated
@@ -489,7 +525,7 @@ class CostAllocationEngine:
         if not applicable_products:
             return
         
-        # Step 2: Total basis then proportional shares (no revenue in basis)
+        # Step 2: Total sales kg over applicable products, then proportional split
         total_basis = self._compute_total_basis(cost, applicable_products, sales_map)
         
         if total_basis == 0:
@@ -779,99 +815,16 @@ class CostAllocationEngine:
         # Get product to access unit information
         product = sale.product
         pname = (product.name or "").lower()
-        unit_upper = (product.unit or "").upper() if hasattr(product, 'unit') and product.unit else ""
-        is_ea = unit_upper in ['EA', 'EACH', 'PC', 'PCS', 'UNIT', 'UNITS']
         is_hamper = "hamper" in pname
 
-        def get_quantity_kg(qty):
-            if hasattr(product, 'unit') and product.unit and product.unit.upper() in ['EA', 'EACH', 'PC', 'PCS', 'UNIT', 'UNITS']:
-                qty_kg = _to_kg(product.name, qty, product.unit)
-                if qty_kg > 0:
-                    return qty_kg
-            return qty
-
-        # Special handling for hampers:
-        # Hampers are assembled products, not directly cultivated, so:
-        # - EXCLUDED from I costs (Cultivation, Wastage-in Farm) - return 0 (no allocation)
-        # - For all other costs (B, O), allocate by sales kg
+        # Hampers: no allocation for inhouse-specific (I) cultivation/wastage costs; otherwise sales kg like others
         if is_hamper:
-            # Check if this is an inhouse-specific cost (I classification)
             is_inhouse_cost = cost.pl_classification == "I" if hasattr(cost, 'pl_classification') and cost.pl_classification else False
             if is_inhouse_cost:
-                # Hampers don't consume cultivation/wastage costs - they're assembled from already-produced items
                 return 0.0
-            # For all other costs, allocate by sales kg (not revenue)
-            return get_quantity_kg(sale.quantity)
-        
-        # NEW BASIS TYPES — all value-style bases use sales kg for allocation (user policy)
-        if cost.basis == "sales_value":
-            # Stored as sales_value in DB for legacy rows; allocate by sales kg only
-            return get_quantity_kg(sale.quantity)
-        
-        elif cost.basis == "sales_kg":
-            # Sales KG = Outward Quantity (quantity actually sold)
-            return get_quantity_kg(sale.quantity)
-        
-        elif cost.basis == "production_kg":
-            # Production KG = Quantity produced or handled
-            # For inhouse products: use inhouse_production (harvested quantity)
-            # For outsourced products: use inward_quantity (purchased quantity)
-            if product.source == "inhouse":
-                # For inhouse products, production = harvested quantity
-                if sale.inhouse_production > 0:
-                    if is_ea:
-                        return get_quantity_kg(sale.inhouse_production)
-                    return sale.inhouse_production
-                # Fallback to quantity if inhouse_production not set
-                if is_ea:
-                    return get_quantity_kg(sale.quantity)
-                return sale.quantity
-            else:
-                # For outsourced products, use inward_quantity (purchased quantity)
-                if is_ea:
-                    return get_quantity_kg(sale.inward_quantity) if sale.inward_quantity > 0 else get_quantity_kg(sale.quantity)
-                return sale.inward_quantity if sale.inward_quantity > 0 else sale.quantity
-        
-        elif cost.basis == "handled_kg":
-            # Handled KG = Quantity (sold/dispatched) - for packing & logistics
-            # This represents what was actually handled/dispatched, not what was produced
-            # Use quantity (sold) for all products (both inhouse and outsourced)
-            if is_ea:
-                return get_quantity_kg(sale.quantity)
-            return sale.quantity
-        
-        elif cost.basis == "purchase_kg":
-            # Purchase KG = Inward Quantity for outsourced products (quantity purchased)
-            # Only applies to outsourced products
-            if product.source == "outsourced":
-                if is_ea:
-                    return get_quantity_kg(sale.inward_quantity) if sale.inward_quantity > 0 else get_quantity_kg(sale.quantity)
-                return sale.inward_quantity if sale.inward_quantity > 0 else sale.quantity
-            return 0.0  # Not applicable to inhouse products
-        
-        elif cost.basis == "direct_cost":
-            # Direct Cost = Inward Value (for PURCHASE ACCOUNTS - no allocation, just direct assignment)
-            # This should not be used for allocation, but return inward_value for reference
-            return sale.inward_value if sale.inward_value > 0 else 0.0
-        
-        # LEGACY BASIS TYPES (for backward compatibility)
-        elif cost.basis == "weight":
-            # Use REAL weight - no damping. High-volume products consume more resources and should pay proportionally
-            return get_quantity_kg(sale.quantity)
-        
-        elif cost.basis == "value":
-            # Legacy "value" basis: allocate by sales kg only (not revenue)
-            return get_quantity_kg(sale.quantity)
-        
-        elif cost.basis == "trips":
-            # Allocate by sales kg
-            return get_quantity_kg(sale.quantity)
-        
-        elif cost.basis == "hybrid":
-            # Legacy DB rows: same driver as sales_kg (outward quantity as kg)
-            return get_quantity_kg(sale.quantity)
-        
-        return 0.0
+
+        # Allocatable costs: share ∝ sales kg (cost.basis is metadata only, except direct_cost rows which are never allocated).
+        return _sale_quantity_kg(sale)
     
     def _generate_monthly_report(self, month: str, product_map: Dict, sales_map: Dict) -> Dict[str, Any]:
         """Generate comprehensive report with enhanced analytics (ignores month)"""
@@ -920,10 +873,11 @@ class CostAllocationEngine:
             total_cost = direct_cost + total_allocated
             revenue = (sale.quantity or 0) * (sale.sale_price or 0)
             profit = revenue - total_cost
-            qty = sale.quantity or 0
-            cost_per_kg = total_cost / qty if qty > 0 else 0
+            qty_kg = _sale_quantity_kg(sale)
+            cost_per_kg = total_cost / qty_kg if qty_kg > 0 else 0
+            revenue_per_kg = revenue / qty_kg if qty_kg > 0 else 0.0
             # Margin based on Cost Price (CP): (SP - CP) / CP * 100
-            margin_per_kg = (sale.sale_price or 0) - cost_per_kg if cost_per_kg > 0 else 0
+            margin_per_kg = revenue_per_kg - cost_per_kg if qty_kg > 0 else 0.0
             margin_pct_cp = (margin_per_kg / cost_per_kg * 100) if cost_per_kg > 0 else 0
             
             # Cost breakdown by category
@@ -1030,26 +984,12 @@ async def root():
 async def health_check():
     return {"status": "healthy", "timestamp": datetime.utcnow()}
 
-@app.get("/api/branding")
-async def get_branding():
-    """UI branding from environment (deploy-time). Optional logo_url for Supabase Storage or CDN."""
-    name = os.getenv("ERP_COMPANY_NAME", "Hybrid Agribusiness ERP").strip() or "Hybrid Agribusiness ERP"
-    tagline = (os.getenv("ERP_COMPANY_TAGLINE") or "").strip()
-    logo = (os.getenv("ERP_LOGO_URL") or "/static/images/PP.jpg").strip()
-    return {
-        "company_name": name,
-        "company_tagline": tagline,
-        "logo_url": logo,
-        "database": "postgresql" if DATABASE_URL.startswith("postgresql") else "sqlite",
-    }
-
 @app.get("/api")
 @app.get("/api/info")
 async def api_info():
     """Return API information and version"""
-    _title = os.getenv("ERP_COMPANY_NAME", "Hybrid Agribusiness ERP").strip() or "Hybrid Agribusiness ERP"
     return {
-        "message": f"{_title} — Hybrid agribusiness cost allocation",
+        "message": "Purple Patch Farms ERP - Hybrid Agribusiness Management System",
         "version": "2.0.0",
         "description": "A comprehensive cost allocation system for fruit and vegetable farming operations",
         "features": [
@@ -1590,8 +1530,10 @@ async def get_product_cost_breakdown(product_id: int, db: Session = Depends(get_
     cost_breakdown["total_cost"] = sale.direct_cost + cost_breakdown["total_allocated"]
     cost_breakdown["profit"] = cost_breakdown["revenue"] - cost_breakdown["total_cost"]
     cost_breakdown["profit_margin"] = (cost_breakdown["profit"] / cost_breakdown["revenue"] * 100) if cost_breakdown["revenue"] > 0 else 0
-    cost_breakdown["cost_per_kg"] = cost_breakdown["total_cost"] / sale.quantity if sale.quantity > 0 else 0
-    
+    _qkg = _sale_quantity_kg(sale)
+    cost_breakdown["cost_per_kg"] = cost_breakdown["total_cost"] / _qkg if _qkg > 0 else 0
+    cost_breakdown["sales_kg"] = _qkg
+
     return cost_breakdown
 
 @app.get("/api/report/{month}")
@@ -3315,13 +3257,14 @@ def parse_purple_patch_auto_mode(df, db, month="2025-04"):
             else:  # 'both'
                 pl_class = "B"
                 applies_to = "both"
-            
+
+            _basis = "direct_cost" if cost_name == "Purchase Accounts" else "sales_kg"
             cost = Cost(
                 name=cost_name,
                 amount=cost_info['amount'],
                 applies_to=applies_to,
                 cost_type="common",
-                basis="sales_kg",
+                basis=_basis,
                 month=month,
                 is_fixed="variable" if cost_name != "Purchase Accounts" else "variable",
                 category=cost_name.lower().replace(' ', '_').replace('&', '_'),
@@ -3973,8 +3916,8 @@ def parse_purple_patch_pl(file_path, db):
         
         print(f"📊 Found {len(data_rows)} data rows")
         
-        # Split B pools: inhouse vs outsourced share of total sales kg
-        inhouse_ratio, outsourced_ratio = compute_inhouse_outsourced_ratios(db)
+        # Segment mix from actual sales (alpha=1 → share by sales kg only)
+        inhouse_ratio, outsourced_ratio = compute_inhouse_outsourced_ratios(db, alpha=1.0)
         
         # First, delete any existing totals that shouldn't be there
         total_names_to_delete = [
@@ -4089,7 +4032,7 @@ def parse_purple_patch_pl(file_path, db):
                     costs_created += 1
                     print(f"   📦 Created O cost: {particulars} = ₹{amount:,.2f} (100% outsourced)")
                     
-                else:  # B — pooled; split to segments by sales-kg ratio, then allocate by sales_kg
+                else:  # B - pooled; allocate across products by sales kg
                     cost_both = Cost(
                         name=particulars,
                         amount=amount,
@@ -4282,7 +4225,7 @@ async def upload_cost_sheet(file: UploadFile = File(...), db: Session = Depends(
                 costs_updated = 0  # reset since we're replacing
             
             # ============================================================
-            # 1) FIXED COST CAT - I  →  All products proportional by Sales Value
+            # 1) FIXED COST CAT - I  →  All products proportional by sales kg
             # ============================================================
             fc1 = expenses.get('fixed_cost_cat_i', {}).get('total', 0.0)
             # CORRECTION: Excel line items sum to 393,350 but should be 390,350
@@ -4294,7 +4237,7 @@ async def upload_cost_sheet(file: UploadFile = File(...), db: Session = Depends(
                 print(f"   📊 FIXED COST CAT - I: ₹{fc1:,.2f}")
             if fc1 > 0:
                 save_cost("FIXED COST CAT - I", fc1, "both", "fixed_cost_cat_i",
-                          "sales_kg",  # Basis: Sales KG
+                          "sales_kg",
                           is_fixed="fixed", pl_class="B")
             else:
                 print(f"   ⚠️  FIXED COST CAT - I is 0 or not found")
@@ -4320,22 +4263,22 @@ async def upload_cost_sheet(file: UploadFile = File(...), db: Session = Depends(
                 
                 save_cost("FIXED COST CAT - II - Strawberry", round(fc2 * straw_pct, 2),
                           "inhouse", "fixed_cost_cat_ii",
-                          "production_kg",
+                          "sales_kg",
                           is_fixed="fixed", cost_type="inhouse-only", pl_class="B")
                 
                 save_cost("FIXED COST CAT - II - Greens", round(fc2 * greens_pct, 2),
                           "inhouse", "fixed_cost_cat_ii",
-                          "production_kg",
+                          "sales_kg",
                           is_fixed="fixed", cost_type="inhouse-only", pl_class="B")
                 
                 save_cost("FIXED COST CAT - II - Open Field", round(fc2 * open_field_pct, 2),
                           "inhouse", "fixed_cost_cat_ii",
-                          "production_kg",
+                          "sales_kg",
                           is_fixed="fixed", cost_type="inhouse-only", pl_class="B")
                 
                 save_cost("FIXED COST CAT - II - Aggregation", round(fc2 * agg_pct, 2),
                           "outsourced", "fixed_cost_cat_ii",
-                          "production_kg",
+                          "sales_kg",
                           is_fixed="fixed", cost_type="common", pl_class="B")
             
             # ============================================================
@@ -4346,12 +4289,12 @@ async def upload_cost_sheet(file: UploadFile = File(...), db: Session = Depends(
             
             # Mapping: subcategory → (applies_to, cost_type, basis)
             var_rules = {
-                'open_field':          ("inhouse", "inhouse-only", "production_kg"),  # Production KG
-                'lettuce':             ("inhouse", "inhouse-only", "production_kg"),  # Production KG
-                'strawberry':          ("inhouse", "inhouse-only", "production_kg"),  # Production KG
-                'raspberry_blueberry': ("inhouse", "inhouse-only", "production_kg"),  # Production KG
-                'packing':             ("both", "common", "handled_kg"),  # Handled KG (ALL products)
-                'aggregation':         ("outsourced", "common", "purchase_kg"),  # Purchase KG
+                'open_field':          ("inhouse", "inhouse-only", "sales_kg"),
+                'lettuce':             ("inhouse", "inhouse-only", "sales_kg"),
+                'strawberry':          ("inhouse", "inhouse-only", "sales_kg"),
+                'raspberry_blueberry': ("inhouse", "inhouse-only", "sales_kg"),
+                'packing':             ("both", "common", "sales_kg"),
+                'aggregation':         ("outsourced", "common", "sales_kg"),
             }
             
             var_display = {
@@ -4370,7 +4313,7 @@ async def upload_cost_sheet(file: UploadFile = File(...), db: Session = Depends(
                     continue
                 variable_total += sub_total
                 display = var_display.get(sub_key, sub_key.upper())
-                applies, ctype, basis_type = var_rules.get(sub_key, ("inhouse", "inhouse-only", "production_kg"))
+                applies, ctype, basis_type = var_rules.get(sub_key, ("inhouse", "inhouse-only", "sales_kg"))
                 items_list = sub_data.get('items', [])
                 items_str = ", ".join([f"{it['name']}=₹{it['amount']:,.0f}" for it in items_list[:5]])
                 if len(items_list) > 5:
@@ -4379,7 +4322,7 @@ async def upload_cost_sheet(file: UploadFile = File(...), db: Session = Depends(
                 save_cost(
                     f"VARIABLE COST - {display}",
                     sub_total, applies, "variable_cost",
-                    basis_type,  # Use the basis type (production_kg, handled_kg, purchase_kg)
+                    basis_type,
                     cost_type=ctype, pl_class="I"
                 )
             
@@ -4390,7 +4333,7 @@ async def upload_cost_sheet(file: UploadFile = File(...), db: Session = Depends(
             cat_basis_map = {
                 'distribution_cost':    'sales_kg',
                 'marketing_expenses':   'sales_kg',
-                'vehicle_running_cost': 'handled_kg',
+                'vehicle_running_cost': 'sales_kg',
                 'others':               'sales_kg',
             }
             
@@ -4495,9 +4438,6 @@ async def upload_cost_sheet(file: UploadFile = File(...), db: Session = Depends(
             print(f"   💵 Costs created: {costs_created}")
             print(f"   ✏️  Costs updated: {costs_updated}")
             
-            in_ratio, out_ratio = compute_inhouse_outsourced_ratios(db)
-            period_display = (period or "").strip() or month
-            
             # Build detailed parsed data for frontend display
             parsed_costs = []
             
@@ -4518,9 +4458,8 @@ async def upload_cost_sheet(file: UploadFile = File(...), db: Session = Depends(
                 "costs_created": costs_created,
                 "costs_updated": costs_updated,
                 "company_name": header_info.get('company_name', ''),
-                "period": period_display,
+                "period": period,
                 "month": month,
-                "ratios": {"inhouse": in_ratio, "outsourced": out_ratio},
                 "total_expenses": final_total,
                 "category_totals": {
                     "fixed_cost_cat_i": fixed_cat_i,
