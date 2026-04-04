@@ -53,7 +53,8 @@ def parse_cost_sheet(file_path: str) -> Dict[str, Any]:
         # Category totals
         expenses = {
             'fixed_cost_cat_i':     {'total': 0.0, 'items': []},
-            'fixed_cost_cat_ii':    {'total': 0.0, 'items': [], 'splits': {'strawberry': 0.50, 'greens': 0.25, 'open_field': 0.10, 'aggregation': 0.15}},
+            # Defaults match classic 3-way sheet (60/25/15); open_field & % updated when rows say so.
+            'fixed_cost_cat_ii':    {'total': 0.0, 'items': [], 'splits': {'strawberry': 0.60, 'greens': 0.25, 'open_field': 0.0, 'aggregation': 0.15}},
             'variable_cost':        {'total': 0.0, 'subcategories': {}},
             'distribution_cost':    {'total': 0.0, 'items': []},
             'marketing_expenses':   {'total': 0.0, 'items': []},
@@ -345,7 +346,7 @@ def parse_cost_sheet(file_path: str) -> Dict[str, Any]:
                     expenses[cat_key]['total'] = items_sum
                     print(f"[PARSER] Calculated {cat_key} from items: {items_sum:,.2f}")
 
-        # ---- Percentage splits for Fixed Cost Cat II (default 50 / 25 / 10 / 15) ----
+        # ---- Percentage splits for Fixed Cost Cat II (read from sheet; defaults 60/25/15 + open_field 0) ----
         for idx in range(len(df)):
             row = df.iloc[idx]
             c4 = _str(row, 4).strip().upper()

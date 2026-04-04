@@ -53,6 +53,31 @@ def _is_fixed_cost_cat_ii_name(name: Optional[str]) -> bool:
     return "FIXED COST CAT - II" in u or "FIXED COST CATEGORY II" in u
 
 
+def _allocation_forced_applies_to(cost_name: Optional[str]) -> Optional[str]:
+    """
+    Pooled costs that must split over sales kg as follows (overrides wrong DB applies_to):
+    - Packing (variable): all inhouse + outsourced
+    - Variable Aggregation: outsourced only
+    - Distribution, Marketing, Vehicle, OTHERS, Wastage & Shortage: all products with sales
+    """
+    u = (cost_name or "").upper()
+    if not u:
+        return None
+    if _is_fixed_cost_cat_ii_name(cost_name):
+        return None
+    if "VARIABLE COST" in u and "PACKING" in u:
+        return "both"
+    if "VARIABLE COST" in u and "AGGREGATION" in u:
+        return "outsourced"
+    if "DISTRIBUTION COST" in u or "MARKETING EXPENSES" in u or "VEHICLE RUNNING COST" in u:
+        return "both"
+    if "WASTAGE" in u and "SHORTAGE" in u:
+        return "both"
+    if u.strip() == "OTHERS":
+        return "both"
+    return None
+
+
 def _supabase_prefer_ipv4_connect_args(database_url: str) -> dict:
     """
     Render (and similar hosts) often have no IPv6 egress. Supabase may resolve db.*.supabase.co
@@ -696,16 +721,17 @@ class CostAllocationEngine:
         for product_id, product in product_map.items():
             if product_id not in sales_map:
                 continue
-                
-            # Standard applies_to filtering
+
+            eff_applies = _allocation_forced_applies_to(cost.name) or cost.applies_to
+            # Standard applies_to filtering (forced scope for pooled sheet/P&L categories)
             matches_applies_to = False
-            if cost.applies_to == "all":
+            if eff_applies == "all":
                 matches_applies_to = True
-            elif cost.applies_to == "inhouse" and product.source == "inhouse":
+            elif eff_applies == "inhouse" and product.source == "inhouse":
                 matches_applies_to = True
-            elif cost.applies_to == "outsourced" and product.source == "outsourced":
+            elif eff_applies == "outsourced" and product.source == "outsourced":
                 matches_applies_to = True
-            elif cost.applies_to == "both" and product.source in ["inhouse", "outsourced"]:
+            elif eff_applies == "both" and product.source in ["inhouse", "outsourced"]:
                 matches_applies_to = True
             
             if not matches_applies_to:
@@ -1037,9 +1063,10 @@ class CostAllocationEngine:
                 "description": (
                     "Sales kg = outward sold quantity in kg per product (EA converted where configured). "
                     "FC I: amount × (product_kg / total_sales_kg) over all products with sales. "
-                    "FC II: each line is already X% of FC II total; that rupee pool splits by "
-                    "(product_kg / sum kg in that bucket only). "
-                    "Variable costs: same within OPEN FIELD / LETTUCE / STRAWBERRY / etc."
+                    "FC II: each line is X% of FC II from the sheet (Purple Patch auto file may use 50/25/10/15 "
+                    "when no bucket amounts exist); pool splits by kg within that bucket only. "
+                    "VARIABLE COST - PACKING: all inhouse+outsourced kg; VARIABLE COST - AGGREGATION: outsourced kg only. "
+                    "DISTRIBUTION / MARKETING / VEHICLE / OTHERS / WASTAGE & SHORTAGE: all products, by sales kg."
                 ),
             },
         }
@@ -2717,6 +2744,18 @@ def parse_purple_patch_auto_mode(df, db, month="2025-04"):
             if remainder > 100:
                 fixed_cost_2_open_field = remainder
                 print(f"   ✅ FC II Open Field (remainder of FC II total): ₹{fixed_cost_2_open_field:,.2f}")
+        
+        # Purple Patch auto Excel only: FC II total present but no bucket rupees parsed → 50/25/10/15 of total
+        if fixed_cost_2_total > 0:
+            parsed_sum = fixed_cost_2_strawberry + fixed_cost_2_greens + fixed_cost_2_open_field + fixed_cost_2_aggregation
+            if parsed_sum <= 0.01:
+                fixed_cost_2_strawberry = round(fixed_cost_2_total * 0.50, 2)
+                fixed_cost_2_greens = round(fixed_cost_2_total * 0.25, 2)
+                fixed_cost_2_open_field = round(fixed_cost_2_total * 0.10, 2)
+                fixed_cost_2_aggregation = round(
+                    fixed_cost_2_total - fixed_cost_2_strawberry - fixed_cost_2_greens - fixed_cost_2_open_field, 2
+                )
+                print("   ✅ FC II: Purple Patch template split 50/25/10/15 (no bucket amounts found)")
     
     # ============================================
     # STEP 4: Extract VARIABLE COST blocks (A-F)
@@ -4351,11 +4390,13 @@ async def upload_cost_sheet(file: UploadFile = File(...), db: Session = Depends(
             fc2 = expenses.get('fixed_cost_cat_ii', {}).get('total', 0.0)
             print(f"   📊 FIXED COST CAT - II: ₹{fc2:,.2f}")
             if fc2 > 0:
+                # Percentages come from the uploaded cost sheet rows when present; else classic 60/25/15.
+                # (50/25/10/15 is used only by the Purple Patch auto Excel path, not default here.)
                 splits = expenses.get('fixed_cost_cat_ii', {}).get('splits', {})
-                straw_pct = splits.get('strawberry', 0.50)
-                greens_pct = splits.get('greens', 0.25)
-                open_field_pct = splits.get('open_field', 0.10)
-                agg_pct = splits.get('aggregation', 0.15)
+                straw_pct = splits.get("strawberry", 0.60)
+                greens_pct = splits.get("greens", 0.25)
+                open_field_pct = splits.get("open_field", 0.0)
+                agg_pct = splits.get("aggregation", 0.15)
                 # Normalize to sum to 1.0 in case of drift
                 total_pct = straw_pct + greens_pct + open_field_pct + agg_pct
                 if total_pct > 0:
