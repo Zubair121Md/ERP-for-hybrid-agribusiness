@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 import io
 import re
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 # OPTIMIZED: Pre-compile regex patterns for better performance (compile once, use many times)
 # Time Complexity: O(1) per match instead of O(m) where m=pattern length
@@ -27,7 +28,30 @@ REGEX_PATTERNS = {
 }
 
 # Database setup - Support both SQLite (local) and PostgreSQL (production)
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./fruit_vegetable_costs.db")
+def _normalize_postgres_url(url: str) -> str:
+    """Strip whitespace, accept postgres://, and require SSL for public Render Postgres hosts."""
+    u = (url or "").strip()
+    if u.startswith("postgres://"):
+        u = "postgresql://" + u[len("postgres://") :]
+    if not u.startswith("postgresql"):
+        return u
+    parsed = urlparse(u)
+    host = (parsed.hostname or "").lower()
+    if not host:
+        return u
+    if "postgres.render.com" in host:
+        q = dict(parse_qsl(parsed.query, keep_blank_values=True))
+        q.setdefault("sslmode", "require")
+        return urlunparse(parsed._replace(query=urlencode(q)))
+    return u
+
+
+_raw_db_url = os.getenv("DATABASE_URL", "sqlite:///./fruit_vegetable_costs.db")
+DATABASE_URL = (
+    _normalize_postgres_url(_raw_db_url)
+    if _raw_db_url.strip().startswith(("postgresql://", "postgres://"))
+    else _raw_db_url.strip()
+)
 
 # Handle connection args based on database type
 if DATABASE_URL.startswith("postgresql"):
