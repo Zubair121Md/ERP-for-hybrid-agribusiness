@@ -16,13 +16,15 @@ async function loadBranding() {
         const img = document.getElementById('brand-logo-img');
         if (nameEl) nameEl.textContent = name;
         if (tagEl) {
-            const t = (b.company_tagline || '').trim();
+            let t = (b.company_tagline || '').trim();
+            if (t && t.toLowerCase() === name.toLowerCase()) t = '';
             tagEl.textContent = t;
             tagEl.style.display = t ? 'block' : 'none';
         }
         if (img && b.logo_url) {
             img.src = b.logo_url;
-            img.alt = name;
+            img.alt = '';
+            img.setAttribute('role', 'presentation');
         }
     } catch (e) {
         console.warn('Branding load failed', e);
@@ -140,6 +142,8 @@ function showTab(tabName) {
     } else if (tabName === 'harvest-mapping') {
         // No data loading needed for harvest-mapping tab
         console.log('✅ Harvest & Mapping tab activated');
+    } else if (tabName === 'data-upload' && typeof window.updatePLPreview === 'function') {
+        window.updatePLPreview();
     }
 }
 

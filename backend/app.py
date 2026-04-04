@@ -4548,6 +4548,9 @@ async def upload_cost_sheet(file: UploadFile = File(...), db: Session = Depends(
             print(f"   💵 Costs created: {costs_created}")
             print(f"   ✏️  Costs updated: {costs_updated}")
             
+            in_ratio, out_ratio = compute_inhouse_outsourced_ratios(db)
+            period_display = (period or "").strip() or month
+            
             # Build detailed parsed data for frontend display
             parsed_costs = []
             
@@ -4568,8 +4571,9 @@ async def upload_cost_sheet(file: UploadFile = File(...), db: Session = Depends(
                 "costs_created": costs_created,
                 "costs_updated": costs_updated,
                 "company_name": header_info.get('company_name', ''),
-                "period": period,
+                "period": period_display,
                 "month": month,
+                "ratios": {"inhouse": in_ratio, "outsourced": out_ratio},
                 "total_expenses": final_total,
                 "category_totals": {
                     "fixed_cost_cat_i": fixed_cat_i,
