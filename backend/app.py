@@ -15,6 +15,10 @@ import io
 import re
 import socket
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
+from decimal import Decimal, getcontext
+
+# High precision for allocation shares (no intentional rupee rounding in the engine)
+getcontext().prec = 28
 
 # OPTIMIZED: Pre-compile regex patterns for better performance (compile once, use many times)
 # Time Complexity: O(1) per match instead of O(m) where m=pattern length
@@ -276,6 +280,8 @@ class Cost(Base):
     allocation_ratio = Column(Float, default=None)    # Ratio used for B items
     source_file = Column(String, default='manual')    # 'excel_upload' or 'manual'
     pl_period = Column(String, default=None)          # '1-Apr-24 to 30-Apr-24'
+    # When set, allocation uses: amount × (product_kg / allocation_denominator_kg) with Decimal math
+    allocation_denominator_kg = Column(Float, nullable=True)
     
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -328,6 +334,67 @@ class User(Base):
 
 # Create tables
 Base.metadata.create_all(bind=engine)
+
+
+def _ensure_allocation_denominator_column():
+    from sqlalchemy import inspect as sa_inspect, text
+    try:
+        insp = sa_inspect(engine)
+        cols = {c["name"] for c in insp.get_columns("costs")}
+    except Exception:
+        return
+    if "allocation_denominator_kg" in cols:
+        return
+    ddl = (
+        "ALTER TABLE costs ADD COLUMN allocation_denominator_kg DOUBLE PRECISION"
+        if DATABASE_URL.startswith("postgresql")
+        else "ALTER TABLE costs ADD COLUMN allocation_denominator_kg FLOAT"
+    )
+    with engine.begin() as conn:
+        conn.execute(text(ddl))
+
+
+_ensure_allocation_denominator_column()
+
+
+# Official kg denominators (management / P&L sheet). Keys = cost names uppercased like saved in DB.
+ALLOCATION_DENOMINATOR_KG_BY_NAME: Dict[str, float] = {
+    "FIXED COST CAT - I": 16511.05,
+    "FIXED COST CAT - II - STRAWBERRY": 2544.8,
+    "FIXED COST CAT - II - GREENS": 2034.45,
+    "FIXED COST CAT - II - OPEN FIELD": 608.6,
+    "FIXED COST CAT - II - AGGREGATION": 11323.195,
+    "VARIABLE COST - OPEN FIELD": 608.6,
+    "VARIABLE COST - LETTUCE": 2034.45,
+    "VARIABLE COST - RASPBERRY & BLUEBERRY": 1816.94,
+    "VARIABLE COST - RASPBERRY&BLUBERRY": 1816.94,
+    "VARIABLE COST - PACKING": 16511.0,
+    "VARIABLE COST - STRAWBERRY": 2544.8,
+    "VARIABLE COST - AGGREGATION": 11323.195,
+    "VARIABLE COST - POLYHOUSE GREENS": 2034.45,
+    "VARIABLE COST - OTHER BERRIES": 1816.94,
+    "DISTRIBUTION COST": 16511.0,
+    "MARKETING EXPENSES": 16511.0,
+    "VEHICLE RUNNING COST": 16511.0,
+    "OTHERS": 16511.0,
+    "WASTAGE & SHORTAGE": 16511.0,
+}
+
+
+def _lookup_allocation_denominator_kg(cost_name: Optional[str]) -> Optional[float]:
+    if not cost_name:
+        return None
+    u = " ".join(cost_name.upper().split())
+    if u in ALLOCATION_DENOMINATOR_KG_BY_NAME:
+        return ALLOCATION_DENOMINATOR_KG_BY_NAME[u]
+    if "VARIABLE COST" in u and "POLYHOUSE" in u and "GREENS" in u:
+        return ALLOCATION_DENOMINATOR_KG_BY_NAME["VARIABLE COST - POLYHOUSE GREENS"]
+    if "VARIABLE COST" in u and ("OTHER BERRIES" in u or "RASPBERRY" in u or "BLUEBERRY" in u or "BLUBERRY" in u):
+        return ALLOCATION_DENOMINATOR_KG_BY_NAME["VARIABLE COST - OTHER BERRIES"]
+    for key in sorted(ALLOCATION_DENOMINATOR_KG_BY_NAME.keys(), key=len, reverse=True):
+        if key in u:
+            return ALLOCATION_DENOMINATOR_KG_BY_NAME[key]
+    return None
 
 # Pydantic models
 class ProductCreate(BaseModel):
@@ -407,6 +474,10 @@ class CostCreate(BaseModel):
     allocation_ratio: Optional[float] = Field(None, ge=0, le=1)
     source_file: Optional[str] = Field(default="manual", max_length=100)
     pl_period: Optional[str] = Field(None, max_length=100)
+    allocation_denominator_kg: Optional[float] = Field(
+        None,
+        description="Official kg base for allocation; amount × (line_kg / this). If null, engine uses name map or sums DB kg.",
+    )
 
 class CostUpdate(BaseModel):
     name: Optional[str] = Field(None, min_length=1, max_length=100)
@@ -416,6 +487,7 @@ class CostUpdate(BaseModel):
     basis: Optional[str] = Field(None, pattern="^(weight|value|trips|hybrid|sales_value|sales_kg|production_kg|handled_kg|purchase_kg|direct_cost)$")
     is_fixed: Optional[str] = Field(None, pattern="^(fixed|variable)$")
     category: Optional[str] = Field(None, max_length=50)
+    allocation_denominator_kg: Optional[float] = None
 
 class CostResponse(BaseModel):
     id: int
@@ -434,8 +506,12 @@ class CostResponse(BaseModel):
     allocation_ratio: Optional[float] = None
     source_file: Optional[str] = None
     pl_period: Optional[str] = None
+    allocation_denominator_kg: Optional[float] = None
     
     created_at: datetime
+
+    class Config:
+        from_attributes = True
 
 class AllocationResponse(BaseModel):
     id: int
@@ -605,13 +681,21 @@ class CostAllocationEngine:
         if not applicable_products:
             return
         
-        # Step 2: Total sales kg over applicable products, then proportional split
-        total_basis = self._compute_total_basis(cost, applicable_products, sales_map)
-        
-        if total_basis == 0:
-            return
-        
-        # Allocate cost proportionally based on basis
+        # Step 2: Denominator kg — DB column, else name lookup (sheet totals), else sum of applicable sales kg
+        den = getattr(cost, "allocation_denominator_kg", None)
+        if den is None or den <= 0:
+            den = _lookup_allocation_denominator_kg(cost.name)
+        if den is not None and den > 0:
+            total_basis_dec = Decimal(str(den))
+        else:
+            total_basis_f = self._compute_total_basis(cost, applicable_products, sales_map)
+            if total_basis_f <= 0:
+                return
+            total_basis_dec = Decimal(str(total_basis_f))
+
+        amount_dec = Decimal(str(cost.amount))
+
+        # Allocate: amount × (product_kg / denominator) with Decimal (no intermediate rupee rounding)
         for product_id, product in applicable_products.items():
             if product_id not in sales_map:
                 continue
@@ -620,7 +704,9 @@ class CostAllocationEngine:
             product_basis = self._compute_product_basis(cost, sale)
             
             if product_basis > 0:
-                allocated_amount = (product_basis / total_basis) * cost.amount
+                pb = Decimal(str(product_basis))
+                allocated_dec = (pb / total_basis_dec) * amount_dec
+                allocated_amount = float(allocated_dec)
 
                 # Store allocation if amount is positive
                 if allocated_amount > 0:
@@ -1061,12 +1147,12 @@ class CostAllocationEngine:
             "allocation_basis": {
                 "total_sales_kg": total_sales_kg_basis,
                 "description": (
-                    "Sales kg = outward sold quantity in kg per product (EA converted where configured). "
-                    "FC I: amount × (product_kg / total_sales_kg) over all products with sales. "
-                    "FC II: each line is X% of FC II from the sheet (Purple Patch auto file may use 50/25/10/15 "
-                    "when no bucket amounts exist); pool splits by kg within that bucket only. "
-                    "VARIABLE COST - PACKING: all inhouse+outsourced kg; VARIABLE COST - AGGREGATION: outsourced kg only. "
-                    "DISTRIBUTION / MARKETING / VEHICLE / OTHERS / WASTAGE & SHORTAGE: all products, by sales kg."
+                    "Allocations use Decimal math (no rupee rounding in the split). "
+                    "When a cost has allocation_denominator_kg (from the cost sheet upload or the official name map), "
+                    "share = amount × (product_sales_kg ÷ that denominator). "
+                    "Otherwise the denominator is the sum of applicable products’ sales kg. "
+                    "Official denominators match the management sheet (e.g. FC I 16511.05, packing/distribution 16511, "
+                    "strawberry pools 2544.8, etc.)."
                 ),
             },
         }
@@ -1496,7 +1582,12 @@ async def update_monthly_sale(sale_id: int, sale_update: MonthlySaleUpdate, db: 
 # Cost endpoints
 @app.post("/api/costs/", response_model=CostResponse)
 async def create_cost(cost: CostCreate, db: Session = Depends(get_db)):
-    db_cost = Cost(**cost.model_dump())
+    payload = cost.model_dump()
+    if payload.get("allocation_denominator_kg") is None:
+        dk = _lookup_allocation_denominator_kg(payload.get("name"))
+        if dk is not None:
+            payload["allocation_denominator_kg"] = dk
+    db_cost = Cost(**payload)
     db.add(db_cost)
     db.commit()
     db.refresh(db_cost)
@@ -3272,7 +3363,8 @@ def parse_purple_patch_auto_mode(df, db, month="2025-04"):
             pl_classification="B",
             original_amount=fixed_cost_1_total,
             allocation_ratio=None,
-            source_file="auto_mode_upload"
+            source_file="auto_mode_upload",
+            allocation_denominator_kg=_lookup_allocation_denominator_kg("FIXED COST CAT - I"),
         )
         db.add(cost)
         costs_created += 1
@@ -3292,7 +3384,8 @@ def parse_purple_patch_auto_mode(df, db, month="2025-04"):
             pl_classification="I",
             original_amount=fixed_cost_2_strawberry,
             allocation_ratio=1.0,
-            source_file="auto_mode_upload"
+            source_file="auto_mode_upload",
+            allocation_denominator_kg=_lookup_allocation_denominator_kg("FIXED COST CAT - II - Strawberry"),
         )
         db.add(cost)
         costs_created += 1
@@ -3310,7 +3403,8 @@ def parse_purple_patch_auto_mode(df, db, month="2025-04"):
             pl_classification="I",
             original_amount=fixed_cost_2_greens,
             allocation_ratio=1.0,
-            source_file="auto_mode_upload"
+            source_file="auto_mode_upload",
+            allocation_denominator_kg=_lookup_allocation_denominator_kg("FIXED COST CAT - II - Greens"),
         )
         db.add(cost)
         costs_created += 1
@@ -3328,7 +3422,8 @@ def parse_purple_patch_auto_mode(df, db, month="2025-04"):
             pl_classification="I",
             original_amount=fixed_cost_2_open_field,
             allocation_ratio=1.0,
-            source_file="auto_mode_upload"
+            source_file="auto_mode_upload",
+            allocation_denominator_kg=_lookup_allocation_denominator_kg("FIXED COST CAT - II - Open Field"),
         )
         db.add(cost)
         costs_created += 1
@@ -3346,7 +3441,8 @@ def parse_purple_patch_auto_mode(df, db, month="2025-04"):
             pl_classification="B",
             original_amount=fixed_cost_2_aggregation,
             allocation_ratio=None,
-            source_file="auto_mode_upload"
+            source_file="auto_mode_upload",
+            allocation_denominator_kg=_lookup_allocation_denominator_kg("FIXED COST CAT - II - Aggregation"),
         )
         db.add(cost)
         costs_created += 1
@@ -3366,8 +3462,9 @@ def parse_purple_patch_auto_mode(df, db, month="2025-04"):
             applies_to = variable_cost_allocation.get(category_name, 'both')
             pl_class = "I" if applies_to == "inhouse" else ("O" if applies_to == "outsourced" else "B")
             
+            vn = f"Variable Cost - {category_name}"
             cost = Cost(
-                name=f"Variable Cost - {category_name}",
+                name=vn,
                 amount=amount,
                 applies_to=applies_to,
                 cost_type="common",
@@ -3378,7 +3475,8 @@ def parse_purple_patch_auto_mode(df, db, month="2025-04"):
                 pl_classification=pl_class,
                 original_amount=amount,
                 allocation_ratio=1.0 if pl_class != "B" else None,
-                source_file="auto_mode_upload"
+                source_file="auto_mode_upload",
+                allocation_denominator_kg=_lookup_allocation_denominator_kg(vn),
             )
             db.add(cost)
             costs_created += 1
@@ -3412,7 +3510,10 @@ def parse_purple_patch_auto_mode(df, db, month="2025-04"):
                 pl_classification=pl_class,
                 original_amount=cost_info['amount'],
                 allocation_ratio=1.0 if pl_class != "B" else None,
-                source_file="auto_mode_upload"
+                source_file="auto_mode_upload",
+                allocation_denominator_kg=None
+                if cost_name == "Purchase Accounts"
+                else _lookup_allocation_denominator_kg(cost_name),
             )
             db.add(cost)
             costs_created += 1
@@ -4322,12 +4423,14 @@ async def upload_cost_sheet(file: UploadFile = File(...), db: Session = Depends(
             costs_created = 0
             costs_updated = 0
             
-            # Helper: save or update a Cost record
+            # Helper: save or update a Cost record (optional kg denominator for exact sheet-based allocation)
             def save_cost(name, amount, applies_to, category, basis_label,
-                          is_fixed="variable", cost_type="common", pl_class="B"):
+                          is_fixed="variable", cost_type="common", pl_class="B",
+                          denominator_kg: Optional[float] = None):
                 nonlocal costs_created, costs_updated
                 if amount <= 0:
                     return
+                dk = denominator_kg if denominator_kg is not None else _lookup_allocation_denominator_kg(name)
                 existing = db.query(Cost).filter(Cost.name == name, Cost.month == month).first()
                 if existing:
                     existing.amount = amount
@@ -4340,19 +4443,21 @@ async def upload_cost_sheet(file: UploadFile = File(...), db: Session = Depends(
                     existing.pl_classification = pl_class
                     existing.pl_period = period
                     existing.source_file = "cost_sheet_upload"
+                    existing.allocation_denominator_kg = dk
                     existing.updated_at = datetime.utcnow()
                     costs_updated += 1
-                    print(f"   ✏️  Updated {name}: ₹{amount:,.2f}")
+                    print(f"   ✏️  Updated {name}: ₹{amount:,.2f}" + (f" (denom kg={dk})" if dk else ""))
                 else:
                     db.add(Cost(
                         name=name, amount=amount, applies_to=applies_to,
                         cost_type=cost_type, basis=basis_label, month=month,
                         is_fixed=is_fixed, category=category,
                         pl_classification=pl_class, original_amount=amount,
-                        source_file="cost_sheet_upload", pl_period=period
+                        source_file="cost_sheet_upload", pl_period=period,
+                        allocation_denominator_kg=dk,
                     ))
                     costs_created += 1
-                    print(f"   💰 Created {name}: ₹{amount:,.2f}")
+                    print(f"   💰 Created {name}: ₹{amount:,.2f}" + (f" (denom kg={dk})" if dk else ""))
             
             # Remove old cost_sheet_upload costs for this month before re-importing
             old_costs = db.query(Cost).filter(
@@ -4404,26 +4509,32 @@ async def upload_cost_sheet(file: UploadFile = File(...), db: Session = Depends(
                     greens_pct /= total_pct
                     open_field_pct /= total_pct
                     agg_pct /= total_pct
-                
-                save_cost("FIXED COST CAT - II - Strawberry", round(fc2 * straw_pct, 2),
-                          "inhouse", "fixed_cost_cat_ii",
-                          "sales_kg",
-                          is_fixed="fixed", cost_type="inhouse-only", pl_class="B")
-                
-                save_cost("FIXED COST CAT - II - Greens", round(fc2 * greens_pct, 2),
-                          "inhouse", "fixed_cost_cat_ii",
-                          "sales_kg",
-                          is_fixed="fixed", cost_type="inhouse-only", pl_class="B")
-                
-                save_cost("FIXED COST CAT - II - Open Field", round(fc2 * open_field_pct, 2),
-                          "inhouse", "fixed_cost_cat_ii",
-                          "sales_kg",
-                          is_fixed="fixed", cost_type="inhouse-only", pl_class="B")
-                
-                save_cost("FIXED COST CAT - II - Aggregation", round(fc2 * agg_pct, 2),
-                          "outsourced", "fixed_cost_cat_ii",
-                          "sales_kg",
-                          is_fixed="fixed", cost_type="common", pl_class="B")
+
+                fc2d = Decimal(str(fc2))
+                save_cost(
+                    "FIXED COST CAT - II - Strawberry",
+                    float(fc2d * Decimal(str(straw_pct))),
+                    "inhouse", "fixed_cost_cat_ii", "sales_kg",
+                    is_fixed="fixed", cost_type="inhouse-only", pl_class="B",
+                )
+                save_cost(
+                    "FIXED COST CAT - II - Greens",
+                    float(fc2d * Decimal(str(greens_pct))),
+                    "inhouse", "fixed_cost_cat_ii", "sales_kg",
+                    is_fixed="fixed", cost_type="inhouse-only", pl_class="B",
+                )
+                save_cost(
+                    "FIXED COST CAT - II - Open Field",
+                    float(fc2d * Decimal(str(open_field_pct))),
+                    "inhouse", "fixed_cost_cat_ii", "sales_kg",
+                    is_fixed="fixed", cost_type="inhouse-only", pl_class="B",
+                )
+                save_cost(
+                    "FIXED COST CAT - II - Aggregation",
+                    float(fc2d * Decimal(str(agg_pct))),
+                    "outsourced", "fixed_cost_cat_ii", "sales_kg",
+                    is_fixed="fixed", cost_type="common", pl_class="B",
+                )
             
             # ============================================================
             # 3) VARIABLE COST  →  Each subcategory saved individually
