@@ -59,70 +59,46 @@ def _to_kg(product_name: str, quantity: float, unit: str) -> float:
         return 0.0
     return quantity
 
-def compute_inhouse_outsourced_ratios(db: Session, alpha: float = 0.5) -> tuple:
+
+def _quantity_as_sales_kg(product, quantity: float) -> float:
+    """Outward quantity in kg for splits — matches sales_kg basis in CostAllocationEngine (EA→kg when defined)."""
+    if product is None:
+        return float(quantity or 0)
+    unit_upper = (getattr(product, "unit", None) or "").upper()
+    if unit_upper in ['EA', 'EACH', 'PC', 'PCS', 'UNIT', 'UNITS']:
+        qk = _to_kg(getattr(product, "name", "") or "", float(quantity or 0), product.unit)
+        if qk > 0:
+            return qk
+    return float(quantity or 0)
+
+
+def compute_inhouse_outsourced_ratios(db: Session, alpha: Optional[float] = None) -> tuple:
     """
-    Compute dynamic segment ratios from current sales data
-    OPTIMIZED: Single-pass iteration with pre-loaded product map
-    Time Complexity: O(n) where n = number of sales records
-    
-    Args:
-        db: Database session
-        alpha: Weight for weight vs value (0.5 = 50% weight, 50% value)
-    
-    Returns:
-        (inhouse_ratio, outsourced_ratio) tuple
+    Inhouse vs outsourced shares of total sales kg (no revenue).
+    Used to split B-class P&L pools. ``alpha`` is ignored (backward compatible).
     """
-    # OPTIMIZED: Load all products once into a map for O(1) lookup
     products = db.query(Product).all()
-    product_map = {p.id: p for p in products}  # O(m) where m = products
-    
-    # OPTIMIZED: Single query with join, iterate once
-    sales = db.query(MonthlySale).all()  # O(n) where n = sales
-    in_w = 0.0; out_w = 0.0
-    in_v = 0.0; out_v = 0.0
-    
-    # Single-pass iteration: O(n)
+    product_map = {p.id: p for p in products}
+    sales = db.query(MonthlySale).all()
+    in_kg = 0.0
+    out_kg = 0.0
     for s in sales:
         product = product_map.get(s.product_id)
         if not product:
             continue
-            
-        qty_kg = _to_kg(product.name, s.quantity, product.unit)
-        rev = s.quantity * s.sale_price
-        
+        qkg = _quantity_as_sales_kg(product, s.quantity or 0)
         if product.source == "inhouse":
-            in_w += qty_kg
-            in_v += rev
+            in_kg += qkg
         else:
-            out_w += qty_kg
-            out_v += rev
-
-    # Compute shares with safety - O(1)
-    total_w = in_w + out_w
-    total_v = in_v + out_v
-    in_w_share = (in_w / total_w) if total_w > 0 else 0.0
-    out_w_share = (out_w / total_w) if total_w > 0 else 0.0
-    in_v_share = (in_v / total_v) if total_v > 0 else 0.0
-    out_v_share = (out_v / total_v) if total_v > 0 else 0.0
-
-    # Hybrid segment ratio: α*weight + (1-α)*value
-    in_ratio = alpha * in_w_share + (1 - alpha) * in_v_share
-    out_ratio = alpha * out_w_share + (1 - alpha) * out_v_share
-    
-    # Normalize in case of numeric drift
-    total = in_ratio + out_ratio
-    if total > 0:
-        in_ratio /= total
-        out_ratio /= total
-    else:
-        # Fallback if no data
+            out_kg += qkg
+    total_kg = in_kg + out_kg
+    if total_kg <= 0:
         in_ratio, out_ratio = 0.1822, 0.8178
-
-    print(f"📊 DYNAMIC SEGMENT RATIOS (hybrid α={alpha:.2f}):")
-    print(f"   📦 Weight: Inhouse {in_w:.2f}kg ({in_w_share:.1%}), Outsourced {out_w:.2f}kg ({out_w_share:.1%})")
-    print(f"   💰 Value: Inhouse ₹{in_v:,.2f} ({in_v_share:.1%}), Outsourced ₹{out_v:,.2f} ({out_v_share:.1%})")
-    print(f"   🎯 Final: Inhouse {in_ratio:.4f} ({in_ratio:.1%}), Outsourced {out_ratio:.4f} ({out_ratio:.1%})")
-    
+    else:
+        in_ratio = in_kg / total_kg
+        out_ratio = out_kg / total_kg
+    print(f"📊 SEGMENT RATIOS (sales kg only):")
+    print(f"   📦 Inhouse {in_kg:,.2f} kg ({in_ratio:.1%}), Outsourced {out_kg:,.2f} kg ({out_ratio:.1%})")
     return in_ratio, out_ratio
 
 # Database Models
@@ -445,15 +421,9 @@ def get_db():
 class CostAllocationEngine:
     def __init__(self, db: Session):
         self.db = db
-        # Settings: Use REAL values from P&L - no artificial damping
-        # High-volume products will get more costs because they actually consume more resources
-        # This shows TRUE profitability based on actual resource consumption
-        # FAIR ALLOCATION: Overhead allocated by weight + revenue (NOT purchase cost)
-        # Purchase cost is already in direct_cost - don't penalize outsourced twice
-        self.B_HYBRID_ALPHA = 0.6  # 60% weight (resource consumption), 40% revenue (business contribution)
-        self.DAMP_WEIGHT_FOR_B = False  # NO damping - use actual weight to reflect real resource consumption
-        self.DAMP_VALUE_FOR_B = False  # NO damping - use actual revenue
-        self.OVERHEAD_CAP_FACTOR = None  # No cap - let real costs flow through
+        # Shared overhead: proportional to declared basis (sales_kg, production_kg, handled_kg, etc.).
+        # Segment split for B pools uses sales kg only (see compute_inhouse_outsourced_ratios).
+        self.OVERHEAD_CAP_FACTOR = None
     
     def allocate_costs_for_month(self, month: str) -> Dict[str, Any]:
         """Enhanced allocation function - works with all data regardless of month"""
@@ -504,10 +474,7 @@ class CostAllocationEngine:
             raise HTTPException(status_code=500, detail=f"Allocation failed: {str(e)}")
     
     def _allocate_single_cost(self, cost: Cost, product_map: Dict, sales_map: Dict, month: str, allocated_so_far: Dict[int, float], cap_by_product: Dict[int, float]):
-        """Allocate a single cost to applicable products
-        - INHOUSE: Normalized allocation (percentages) - balances weight and profit contribution
-        - OUTSOURCED: Absolute gross profit allocation - protects low-margin products
-        """
+        """Allocate one cost across applicable products in proportion to each product's basis (kg drivers, not revenue)."""
         
         # SKIP PURCHASE ACCOUNTS - they are direct costs, not allocated
         # According to COST_ALLOCATION.md: PURCHASE ACCOUNTS use direct_cost basis and are NOT allocated
@@ -522,9 +489,7 @@ class CostAllocationEngine:
         if not applicable_products:
             return
         
-        # Step 2: Compute total basis and allocate
-        # For hybrid basis: uses pure gross profit (no weight) - same for all products
-        # For other bases: standard allocation
+        # Step 2: Total basis then proportional shares (no revenue in basis)
         total_basis = self._compute_total_basis(cost, applicable_products, sales_map)
         
         if total_basis == 0:
@@ -903,24 +868,7 @@ class CostAllocationEngine:
             return get_quantity_kg(sale.quantity)
         
         elif cost.basis == "hybrid":
-            # NEW LOGIC: Different allocation for inhouse-specific costs (I items)
-            # Get product source
-            product_source = product.source if hasattr(product, 'source') else None
-            is_inhouse = product_source == "inhouse"
-            
-            # Check if this is an inhouse-specific cost (I classification like Cultivation, Wastage)
-            is_inhouse_cost = cost.pl_classification == "I" if hasattr(cost, 'pl_classification') and cost.pl_classification else False
-            
-            # For inhouse products with inhouse-specific costs (I items):
-            # Allocate by WEIGHT ONLY - these are direct production costs proportional to quantity produced
-            # Examples: Cultivation Expenses I, Wastage-in Farm (Quality Check) I, Rejection Own Farm Harvest I
-            # These costs scale directly with production volume, not profitability
-            # NOTE: For graded products (A/B/C) from same harvest, this ensures fair per-kg allocation
-            if is_inhouse and is_inhouse_cost:
-                qty_kg = get_quantity_kg(sale.quantity)
-                return qty_kg if qty_kg > 0 else 0.0
-            
-            # B / O overhead: allocate purely by sales kg (no revenue / gross-profit mix)
+            # Legacy DB rows: same driver as sales_kg (outward quantity as kg)
             return get_quantity_kg(sale.quantity)
         
         return 0.0
@@ -3252,7 +3200,7 @@ def parse_purple_patch_auto_mode(df, db, month="2025-04"):
             amount=fixed_cost_1_total,
             applies_to="both",
             cost_type="common",
-            basis="hybrid",
+            basis="sales_kg",
             month=month,
             is_fixed="fixed",
             category="fixed_cost_1",
@@ -3272,7 +3220,7 @@ def parse_purple_patch_auto_mode(df, db, month="2025-04"):
             amount=fixed_cost_2_strawberry,
             applies_to="inhouse",  # Strawberry is inhouse
             cost_type="common",
-            basis="hybrid",
+            basis="sales_kg",
             month=month,
             is_fixed="fixed",
             category="fixed_cost_2_strawberry",
@@ -3290,7 +3238,7 @@ def parse_purple_patch_auto_mode(df, db, month="2025-04"):
             amount=fixed_cost_2_greens,
             applies_to="inhouse",
             cost_type="common",
-            basis="hybrid",
+            basis="sales_kg",
             month=month,
             is_fixed="fixed",
             category="fixed_cost_2_greens",
@@ -3308,7 +3256,7 @@ def parse_purple_patch_auto_mode(df, db, month="2025-04"):
             amount=fixed_cost_2_aggregation,
             applies_to="both",
             cost_type="common",
-            basis="hybrid",
+            basis="sales_kg",
             month=month,
             is_fixed="fixed",
             category="fixed_cost_2_aggregation",
@@ -3340,7 +3288,7 @@ def parse_purple_patch_auto_mode(df, db, month="2025-04"):
                 amount=amount,
                 applies_to=applies_to,
                 cost_type="common",
-                basis="hybrid",
+                basis="sales_kg",
                 month=month,
                 is_fixed="variable",
                 category=f"variable_cost_{category_name.lower().replace(' ', '_')}",
@@ -3373,7 +3321,7 @@ def parse_purple_patch_auto_mode(df, db, month="2025-04"):
                 amount=cost_info['amount'],
                 applies_to=applies_to,
                 cost_type="common",
-                basis="hybrid",
+                basis="sales_kg",
                 month=month,
                 is_fixed="variable" if cost_name != "Purchase Accounts" else "variable",
                 category=cost_name.lower().replace(' ', '_').replace('&', '_'),
@@ -4025,9 +3973,8 @@ def parse_purple_patch_pl(file_path, db):
         
         print(f"📊 Found {len(data_rows)} data rows")
         
-        # Calculate dynamic ratio based on ACTUAL SALES DATA (weight + value hybrid)
-        # alpha = 0.5 means 50% weight, 50% value
-        inhouse_ratio, outsourced_ratio = compute_inhouse_outsourced_ratios(db, alpha=0.5)
+        # Split B pools: inhouse vs outsourced share of total sales kg
+        inhouse_ratio, outsourced_ratio = compute_inhouse_outsourced_ratios(db)
         
         # First, delete any existing totals that shouldn't be there
         total_names_to_delete = [
@@ -4107,7 +4054,7 @@ def parse_purple_patch_pl(file_path, db):
                         amount=amount,
                         applies_to="inhouse",
                         cost_type="common",
-                        basis="hybrid",
+                        basis="sales_kg",
                         month="2025-04",  # Use standard format
                         is_fixed="variable",
                         category="pl_import",
@@ -4128,7 +4075,7 @@ def parse_purple_patch_pl(file_path, db):
                         amount=amount,
                         applies_to="outsourced",
                         cost_type="common",
-                        basis="hybrid",
+                        basis="sales_kg",
                         month="2025-04",
                         is_fixed="variable",
                         category="pl_import",
@@ -4142,13 +4089,13 @@ def parse_purple_patch_pl(file_path, db):
                     costs_created += 1
                     print(f"   📦 Created O cost: {particulars} = ₹{amount:,.2f} (100% outsourced)")
                     
-                else:  # B - single pooled cost; allocate later by hybrid across all products
+                else:  # B — pooled; split to segments by sales-kg ratio, then allocate by sales_kg
                     cost_both = Cost(
                         name=particulars,
                         amount=amount,
                         applies_to="both",
                         cost_type="common",
-                        basis="hybrid",  # allocate by hybrid (weight + value), alpha set in allocator
+                        basis="sales_kg",
                         month="2025-04",
                         is_fixed="variable",
                         category="pl_import",
@@ -4160,7 +4107,7 @@ def parse_purple_patch_pl(file_path, db):
                     )
                     db.add(cost_both)
                     costs_created += 1
-                    print(f"   📦 Created B cost (single): {particulars} = ₹{amount:,.2f} (applies_to=both, basis=weight)")
+                    print(f"   📦 Created B cost (single): {particulars} = ₹{amount:,.2f} (applies_to=both, basis=sales_kg)")
         
         db.commit()
         

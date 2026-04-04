@@ -1,3 +1,7 @@
+# Web service + optional Render Postgres. To use Supabase instead: remove the fromDatabase block
+# below and set DATABASE_URL in the Render dashboard to your Supabase connection string
+# (Transaction pooler, port 6543, add ?sslmode=require if required). Also set ERP_COMPANY_NAME etc.
+
 services:
   - type: web
     name: erp-agribusiness
@@ -10,6 +14,12 @@ services:
         fromDatabase:
           name: erp-db
           property: connectionString
+      - key: ERP_COMPANY_NAME
+        sync: false
+      - key: ERP_COMPANY_TAGLINE
+        sync: false
+      - key: ERP_LOGO_URL
+        sync: false
 
 databases:
   - name: erp-db
