@@ -26,13 +26,14 @@ REGEX_PATTERNS = {
     'quantity_unit': re.compile(r'([\d,]+\.?\d*)\s*([A-Za-z]*)'),
 }
 
-# Database setup - Support both SQLite (local) and PostgreSQL (production)
+# Database setup - Support both SQLite (local) and PostgreSQL / Supabase (production).
+# Supabase: Project Settings → Database → copy "URI" and set DATABASE_URL (use pooler on port 6543 for serverless).
+# Example: postgresql://postgres.[ref]:[password]@aws-0-[region].pooler.supabase.com:6543/postgres?sslmode=require
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./fruit_vegetable_costs.db")
 
 # Handle connection args based on database type
 if DATABASE_URL.startswith("postgresql"):
-    # PostgreSQL doesn't need check_same_thread
-    engine = create_engine(DATABASE_URL)
+    engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 else:
     # SQLite needs check_same_thread=False for FastAPI
     engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
@@ -1081,12 +1082,26 @@ async def root():
 async def health_check():
     return {"status": "healthy", "timestamp": datetime.utcnow()}
 
+@app.get("/api/branding")
+async def get_branding():
+    """UI branding from environment (deploy-time). Optional logo_url for Supabase Storage or CDN."""
+    name = os.getenv("ERP_COMPANY_NAME", "Hybrid Agribusiness ERP").strip() or "Hybrid Agribusiness ERP"
+    tagline = (os.getenv("ERP_COMPANY_TAGLINE") or "").strip()
+    logo = (os.getenv("ERP_LOGO_URL") or "/static/images/PP.jpg").strip()
+    return {
+        "company_name": name,
+        "company_tagline": tagline,
+        "logo_url": logo,
+        "database": "postgresql" if DATABASE_URL.startswith("postgresql") else "sqlite",
+    }
+
 @app.get("/api")
 @app.get("/api/info")
 async def api_info():
     """Return API information and version"""
+    _title = os.getenv("ERP_COMPANY_NAME", "Hybrid Agribusiness ERP").strip() or "Hybrid Agribusiness ERP"
     return {
-        "message": "Purple Patch Farms ERP - Hybrid Agribusiness Management System",
+        "message": f"{_title} — Hybrid agribusiness cost allocation",
         "version": "2.0.0",
         "description": "A comprehensive cost allocation system for fruit and vegetable farming operations",
         "features": [
