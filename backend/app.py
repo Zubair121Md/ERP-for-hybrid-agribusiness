@@ -827,18 +827,19 @@ class CostAllocationEngine:
         # Special handling for hampers:
         # Hampers are assembled products, not directly cultivated, so:
         # - EXCLUDED from I costs (Cultivation, Wastage-in Farm) - return 0 (no allocation)
-        # - For other costs: allocate by sold quantity in kg (no revenue basis)
+        # - For all other costs (B, O), allocate by sales kg
         if is_hamper:
             # Check if this is an inhouse-specific cost (I classification)
             is_inhouse_cost = cost.pl_classification == "I" if hasattr(cost, 'pl_classification') and cost.pl_classification else False
             if is_inhouse_cost:
                 # Hampers don't consume cultivation/wastage costs - they're assembled from already-produced items
                 return 0.0
+            # For all other costs, allocate by sales kg (not revenue)
             return get_quantity_kg(sale.quantity)
         
-        # NEW BASIS TYPES — all monetary allocation drivers use kg equivalents only
+        # NEW BASIS TYPES — all value-style bases use sales kg for allocation (user policy)
         if cost.basis == "sales_value":
-            # Legacy name: treat as sales kg (no revenue weighting)
+            # Stored as sales_value in DB for legacy rows; allocate by sales kg only
             return get_quantity_kg(sale.quantity)
         
         elif cost.basis == "sales_kg":
@@ -893,19 +894,33 @@ class CostAllocationEngine:
             return get_quantity_kg(sale.quantity)
         
         elif cost.basis == "value":
-            # Legacy: was revenue; now kg-only (sold quantity in kg)
+            # Legacy "value" basis: allocate by sales kg only (not revenue)
             return get_quantity_kg(sale.quantity)
         
         elif cost.basis == "trips":
-            # Legacy: now kg-only
+            # Allocate by sales kg
             return get_quantity_kg(sale.quantity)
         
         elif cost.basis == "hybrid":
-            # Pure kg (sold quantity); no revenue weighting
-            qty_kg = get_quantity_kg(sale.quantity)
-            if qty_kg > 0:
-                return qty_kg
-            return float(sale.quantity) if sale.quantity else 0.0
+            # NEW LOGIC: Different allocation for inhouse-specific costs (I items)
+            # Get product source
+            product_source = product.source if hasattr(product, 'source') else None
+            is_inhouse = product_source == "inhouse"
+            
+            # Check if this is an inhouse-specific cost (I classification like Cultivation, Wastage)
+            is_inhouse_cost = cost.pl_classification == "I" if hasattr(cost, 'pl_classification') and cost.pl_classification else False
+            
+            # For inhouse products with inhouse-specific costs (I items):
+            # Allocate by WEIGHT ONLY - these are direct production costs proportional to quantity produced
+            # Examples: Cultivation Expenses I, Wastage-in Farm (Quality Check) I, Rejection Own Farm Harvest I
+            # These costs scale directly with production volume, not profitability
+            # NOTE: For graded products (A/B/C) from same harvest, this ensures fair per-kg allocation
+            if is_inhouse and is_inhouse_cost:
+                qty_kg = get_quantity_kg(sale.quantity)
+                return qty_kg if qty_kg > 0 else 0.0
+            
+            # B / O overhead: allocate purely by sales kg (no revenue / gross-profit mix)
+            return get_quantity_kg(sale.quantity)
         
         return 0.0
     
@@ -4305,7 +4320,7 @@ async def upload_cost_sheet(file: UploadFile = File(...), db: Session = Depends(
                 costs_updated = 0  # reset since we're replacing
             
             # ============================================================
-            # 1) FIXED COST CAT - I  →  All products proportional by Sales KG
+            # 1) FIXED COST CAT - I  →  All products proportional by Sales Value
             # ============================================================
             fc1 = expenses.get('fixed_cost_cat_i', {}).get('total', 0.0)
             # CORRECTION: Excel line items sum to 393,350 but should be 390,350
@@ -4317,7 +4332,7 @@ async def upload_cost_sheet(file: UploadFile = File(...), db: Session = Depends(
                 print(f"   📊 FIXED COST CAT - I: ₹{fc1:,.2f}")
             if fc1 > 0:
                 save_cost("FIXED COST CAT - I", fc1, "both", "fixed_cost_cat_i",
-                          "sales_kg",
+                          "sales_kg",  # Basis: Sales KG
                           is_fixed="fixed", pl_class="B")
             else:
                 print(f"   ⚠️  FIXED COST CAT - I is 0 or not found")
