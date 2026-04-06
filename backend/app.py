@@ -332,8 +332,34 @@ class User(Base):
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
+
+class FinancialAdjustment(Base):
+    """Singleton-style row: manual P&L adjustments affecting net revenue on the dashboard."""
+    __tablename__ = "financial_adjustments"
+
+    id = Column(Integer, primary_key=True, index=True)
+    sales_returns = Column(Float, default=0.0)  # reduces revenue (returns / cost of sales return)
+    indirect_income = Column(Float, default=0.0)  # added to revenue
+    stock_adjustment = Column(Float, default=0.0)  # subtracted from revenue (e.g. stock)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 # Create tables
 Base.metadata.create_all(bind=engine)
+
+
+def _get_financial_adjustment(db: Session) -> "FinancialAdjustment":
+    row = db.query(FinancialAdjustment).first()
+    if row is None:
+        row = FinancialAdjustment(
+            sales_returns=0.0,
+            indirect_income=0.0,
+            stock_adjustment=0.0,
+        )
+        db.add(row)
+        db.commit()
+        db.refresh(row)
+    return row
 
 
 def _ensure_allocation_denominator_column():
@@ -363,14 +389,15 @@ ALLOCATION_DENOMINATOR_KG_BY_NAME: Dict[str, float] = {
     "FIXED COST CAT - II - STRAWBERRY": 2544.8,
     "FIXED COST CAT - II - GREENS": 2034.45,
     "FIXED COST CAT - II - OPEN FIELD": 608.6,
-    "FIXED COST CAT - II - AGGREGATION": 11323.195,
+    # Fallback only when no net kg can be computed from sales + wastage in DB
+    "FIXED COST CAT - II - AGGREGATION": 12057.0,
     "VARIABLE COST - OPEN FIELD": 608.6,
     "VARIABLE COST - LETTUCE": 2034.45,
     "VARIABLE COST - RASPBERRY & BLUEBERRY": 1816.94,
     "VARIABLE COST - RASPBERRY&BLUBERRY": 1816.94,
     "VARIABLE COST - PACKING": 16511.0,
     "VARIABLE COST - STRAWBERRY": 2544.8,
-    "VARIABLE COST - AGGREGATION": 11323.195,
+    "VARIABLE COST - AGGREGATION": 12057.0,
     "VARIABLE COST - POLYHOUSE GREENS": 2034.45,
     "VARIABLE COST - OTHER BERRIES": 1816.94,
     "DISTRIBUTION COST": 16511.0,
@@ -395,6 +422,7 @@ def _lookup_allocation_denominator_kg(cost_name: Optional[str]) -> Optional[floa
         if key in u:
             return ALLOCATION_DENOMINATOR_KG_BY_NAME[key]
     return None
+
 
 # Pydantic models
 class ProductCreate(BaseModel):
@@ -526,14 +554,36 @@ class AllocationResponse(BaseModel):
 class DashboardStats(BaseModel):
     total_products: int
     active_products: int
-    total_revenue: float
-    total_costs: float
+    gross_sales_revenue: float = 0.0
+    net_revenue: float = 0.0
+    sales_returns: float = 0.0
+    indirect_income: float = 0.0
+    stock_adjustment: float = 0.0
+    total_revenue: float  # same as net_revenue (for charts / legacy)
+    total_costs: float  # economic: direct + allocated (matches net profit)
+    pnl_expenses_total: float = 0.0  # P&L sheet upload total (reference)
     total_profit: float
-    profit_margin: float
-    inhouse_revenue: float
+    profit_margin: float  # profit ÷ total_costs (CP %)
+    revenue_margin: float = 0.0  # profit ÷ net_revenue (%)
+    inhouse_revenue: float  # net of manual adjustments, split by gross share
     outsourced_revenue: float
     inhouse_profit: float
     outsourced_profit: float
+
+
+class FinancialAdjustmentResponse(BaseModel):
+    sales_returns: float
+    indirect_income: float
+    stock_adjustment: float
+
+    class Config:
+        from_attributes = True
+
+
+class FinancialAdjustmentUpdate(BaseModel):
+    sales_returns: float = 0.0
+    indirect_income: float = 0.0
+    stock_adjustment: float = 0.0
 
 class TopProductRow(BaseModel):
     product_name: str
@@ -681,17 +731,36 @@ class CostAllocationEngine:
         if not applicable_products:
             return
         
-        # Step 2: Denominator kg — DB column, else name lookup (sheet totals), else sum of applicable sales kg
-        den = getattr(cost, "allocation_denominator_kg", None)
-        if den is None or den <= 0:
-            den = _lookup_allocation_denominator_kg(cost.name)
-        if den is not None and den > 0:
-            total_basis_dec = Decimal(str(den))
+        # Step 2: Prefer net sold kg (sales − damage/wastage) summed over applicable products — from uploaded
+        # production tables / sales rows. Falls back to official denominator or gross kg if net is zero.
+        net_weights: Dict[int, float] = {}
+        net_total = 0.0
+        for product_id in applicable_products:
+            if product_id not in sales_map:
+                continue
+            sale = sales_map[product_id]
+            net_weights[product_id] = self._net_product_basis(cost, sale)
+            net_total += net_weights[product_id]
+
+        use_net_weights = net_total > 0
+        if use_net_weights:
+            total_basis_dec = Decimal(str(net_total))
+            cost.allocation_denominator_kg = float(net_total)
+            if cost.name and "AGGREGATION" in (cost.name or "").upper():
+                print(f"   📊 {cost.name}: net allocation kg (sold − damage) = {net_total:,.3f}")
         else:
-            total_basis_f = self._compute_total_basis(cost, applicable_products, sales_map)
-            if total_basis_f <= 0:
-                return
-            total_basis_dec = Decimal(str(total_basis_f))
+            den = getattr(cost, "allocation_denominator_kg", None)
+            if den is None or den <= 0:
+                den = _lookup_allocation_denominator_kg(cost.name)
+            if den is not None and den > 0:
+                total_basis_dec = Decimal(str(den))
+                cost.allocation_denominator_kg = float(den)
+            else:
+                total_basis_f = self._compute_total_basis(cost, applicable_products, sales_map)
+                if total_basis_f <= 0:
+                    return
+                total_basis_dec = Decimal(str(total_basis_f))
+                cost.allocation_denominator_kg = float(total_basis_f)
 
         amount_dec = Decimal(str(cost.amount))
 
@@ -701,7 +770,10 @@ class CostAllocationEngine:
                 continue
                 
             sale = sales_map[product_id]
-            product_basis = self._compute_product_basis(cost, sale)
+            if use_net_weights:
+                product_basis = net_weights.get(product_id, 0.0)
+            else:
+                product_basis = self._compute_product_basis(cost, sale)
             
             if product_basis > 0:
                 pb = Decimal(str(product_basis))
@@ -992,6 +1064,13 @@ class CostAllocationEngine:
 
         # Allocatable costs: share ∝ sales kg (cost.basis is metadata only, except direct_cost rows which are never allocated).
         return _sale_quantity_kg(sale)
+
+    def _net_product_basis(self, cost: Cost, sale: MonthlySale) -> float:
+        """Sold quantity kg (same basis as allocation) minus damage/wastage kg from sales row."""
+        gross = self._compute_product_basis(cost, sale)
+        if gross <= 0:
+            return 0.0
+        return max(0.0, gross - float(sale.wastage or 0.0))
     
     def _generate_monthly_report(self, month: str, product_map: Dict, sales_map: Dict) -> Dict[str, Any]:
         """Generate comprehensive report with enhanced analytics (ignores month)"""
@@ -1148,14 +1227,45 @@ class CostAllocationEngine:
                 "total_sales_kg": total_sales_kg_basis,
                 "description": (
                     "Allocations use Decimal math (no rupee rounding in the split). "
-                    "When a cost has allocation_denominator_kg (from the cost sheet upload or the official name map), "
-                    "share = amount × (product_sales_kg ÷ that denominator). "
-                    "Otherwise the denominator is the sum of applicable products’ sales kg. "
-                    "Official denominators match the management sheet (e.g. FC I 16511.05, packing/distribution 16511, "
-                    "strawberry pools 2544.8, etc.)."
+                    "For each cost pool, when sales rows carry wastage (damage kg), weights use net kg = sold kg − wastage "
+                    "and the denominator is the sum of those net kg over applicable products (strawberry, greens, aggregation/outsourced, etc.). "
+                    "If no net kg is available, the engine falls back to allocation_denominator_kg from the cost sheet or the official name map, "
+                    "then to gross sales kg totals."
                 ),
             },
         }
+
+
+def refresh_allocation_denominator_kg_for_all_costs(db: Session) -> None:
+    """Recompute Cost.allocation_denominator_kg from current sales (net kg per pool) after file uploads."""
+    engine = CostAllocationEngine(db)
+    products = db.query(Product).filter(Product.is_active == True).all()
+    product_map = {p.id: p for p in products}
+    monthly_sales = db.query(MonthlySale).all()
+    sales_map = {s.product_id: s for s in monthly_sales}
+    for cost in db.query(Cost).all():
+        if cost.basis == "direct_cost" or "PURCHASE ACCOUNTS" in (cost.name or "").upper():
+            continue
+        applicable = engine._get_applicable_products(cost, product_map, sales_map)
+        net_total = 0.0
+        for pid in applicable:
+            if pid not in sales_map:
+                continue
+            net_total += engine._net_product_basis(cost, sales_map[pid])
+        gross_total = engine._compute_total_basis(cost, applicable, sales_map)
+        if net_total > 0:
+            cost.allocation_denominator_kg = float(net_total)
+        elif gross_total > 0:
+            den = getattr(cost, "allocation_denominator_kg", None)
+            if den is None or den <= 0:
+                den = _lookup_allocation_denominator_kg(cost.name)
+            cost.allocation_denominator_kg = float(den) if den and den > 0 else float(gross_total)
+    try:
+        db.commit()
+        print("✅ Refreshed allocation_denominator_kg on all allocatable costs from current sales (net kg where available).")
+    except Exception as e:
+        print(f"⚠️  refresh_allocation_denominator_kg_for_all_costs: {e}")
+        db.rollback()
 
 # API Endpoints
 @app.get("/")
@@ -1258,11 +1368,16 @@ async def get_dashboard_stats(db: Session = Depends(get_db)):
     # Revenue and cost stats for ALL data (no month filtering)
     sales = db.query(MonthlySale).all()
     all_costs = db.query(Cost).all()
+    fa = _get_financial_adjustment(db)
+    sales_returns = float(fa.sales_returns or 0.0)
+    indirect_income = float(fa.indirect_income or 0.0)
+    stock_adjustment = float(fa.stock_adjustment or 0.0)
     
     # Check if allocation has been run (if there are any Allocation records)
     allocations_exist = db.query(Allocation).count() > 0
     
-    total_revenue = sum(s.quantity * s.sale_price for s in sales)
+    gross_sales_revenue = sum(s.quantity * s.sale_price for s in sales)
+    net_revenue = gross_sales_revenue + indirect_income - sales_returns - stock_adjustment
     total_direct_costs = sum(s.direct_cost for s in sales)
     
     if allocations_exist:
@@ -1281,25 +1396,29 @@ async def get_dashboard_stats(db: Session = Depends(get_db)):
         else:
             print(f"📊 Dashboard: No costs in system")
     
-    # Compute full economic costs (direct + allocated) for profit/margin,
-    # but show P&L Total Expenses as "Total Costs" on the dashboard card so
-    # it matches the P&L sheet.
+    # Economic full cost (direct + allocated) — same basis as net profit
     total_full_costs = total_direct_costs + total_shared_costs
-    # Sum of all P&L expenses from the uploaded cost sheet (including Purchase Accounts)
     pnl_total = db.query(func.sum(Cost.amount)).filter(
         Cost.source_file == "cost_sheet_upload"
     ).scalar() or 0.0
-    total_costs = pnl_total
-    total_profit = total_revenue - total_full_costs
-    # Dashboard margin on CP basis: Profit ÷ full cost (direct + P&L)
-    profit_margin = (total_profit / total_full_costs * 100) if total_full_costs > 0 else 0
+    total_costs = total_full_costs
+    total_profit = net_revenue - total_full_costs
+    profit_margin = (total_profit / total_full_costs * 100) if total_full_costs > 0 else 0.0
+    revenue_margin = (total_profit / net_revenue * 100) if net_revenue > 0 else 0.0
     
-    # Source-wise breakdown
+    # Source-wise breakdown (gross sales, then split manual net adjustment by gross share)
     inhouse_sales = [s for s in sales if s.product.source == "inhouse"]
     outsourced_sales = [s for s in sales if s.product.source == "outsourced"]
     
-    inhouse_revenue = sum(s.quantity * s.sale_price for s in inhouse_sales)
-    outsourced_revenue = sum(s.quantity * s.sale_price for s in outsourced_sales)
+    inhouse_gross = sum(s.quantity * s.sale_price for s in inhouse_sales)
+    outsourced_gross = sum(s.quantity * s.sale_price for s in outsourced_sales)
+    net_adj = indirect_income - sales_returns - stock_adjustment
+    if gross_sales_revenue > 0:
+        inhouse_revenue = inhouse_gross + net_adj * (inhouse_gross / gross_sales_revenue)
+        outsourced_revenue = outsourced_gross + net_adj * (outsourced_gross / gross_sales_revenue)
+    else:
+        inhouse_revenue = inhouse_gross + net_adj * 0.5
+        outsourced_revenue = outsourced_gross + net_adj * 0.5
     
     inhouse_direct_costs = sum(s.direct_cost for s in inhouse_sales)
     outsourced_direct_costs = sum(s.direct_cost for s in outsourced_sales)
@@ -1331,14 +1450,49 @@ async def get_dashboard_stats(db: Session = Depends(get_db)):
     return DashboardStats(
         total_products=total_products,
         active_products=active_products,
-        total_revenue=total_revenue,
+        gross_sales_revenue=gross_sales_revenue,
+        net_revenue=net_revenue,
+        sales_returns=sales_returns,
+        indirect_income=indirect_income,
+        stock_adjustment=stock_adjustment,
+        total_revenue=net_revenue,
         total_costs=total_costs,
+        pnl_expenses_total=float(pnl_total or 0.0),
         total_profit=total_profit,
         profit_margin=profit_margin,
+        revenue_margin=revenue_margin,
         inhouse_revenue=inhouse_revenue,
         outsourced_revenue=outsourced_revenue,
         inhouse_profit=inhouse_profit,
-        outsourced_profit=outsourced_profit
+        outsourced_profit=outsourced_profit,
+    )
+
+
+@app.get("/api/financial-adjustments", response_model=FinancialAdjustmentResponse)
+async def get_financial_adjustments_api(db: Session = Depends(get_db)):
+    row = _get_financial_adjustment(db)
+    return FinancialAdjustmentResponse(
+        sales_returns=float(row.sales_returns or 0.0),
+        indirect_income=float(row.indirect_income or 0.0),
+        stock_adjustment=float(row.stock_adjustment or 0.0),
+    )
+
+
+@app.put("/api/financial-adjustments", response_model=FinancialAdjustmentResponse)
+async def put_financial_adjustments_api(
+    body: FinancialAdjustmentUpdate,
+    db: Session = Depends(get_db),
+):
+    row = _get_financial_adjustment(db)
+    row.sales_returns = body.sales_returns
+    row.indirect_income = body.indirect_income
+    row.stock_adjustment = body.stock_adjustment
+    db.commit()
+    db.refresh(row)
+    return FinancialAdjustmentResponse(
+        sales_returns=float(row.sales_returns or 0.0),
+        indirect_income=float(row.indirect_income or 0.0),
+        stock_adjustment=float(row.stock_adjustment or 0.0),
     )
 
 
@@ -2445,6 +2599,11 @@ async def upload_excel(file: UploadFile = File(...), db: Session = Depends(get_d
         db.commit()
         print(f"   ✅ Cleared {deleted_count} harvest records after sales processing")
         
+        try:
+            refresh_allocation_denominator_kg_for_all_costs(db)
+        except Exception as _den_e:
+            print(f"⚠️  Denominator refresh after Excel upload: {_den_e}")
+        
         print(f"✅ BULLETPROOF upload completed!")
         print(f"   📋 Excel rows processed: {rows_processed} (from {len(df)} total rows)")
         if rows_split > 0:
@@ -3520,6 +3679,10 @@ def parse_purple_patch_auto_mode(df, db, month="2025-04"):
             print(f"   💰 Created {cost_name}: ₹{cost_info['amount']:,.2f} ({applies_to})")
     
     db.commit()
+    try:
+        refresh_allocation_denominator_kg_for_all_costs(db)
+    except Exception as _den_e:
+        print(f"⚠️  Denominator refresh after auto-mode upload: {_den_e}")
     
     print(f"✅ Auto Mode parsing completed!")
     print(f"   📦 Products created: {products_created}")
@@ -4688,6 +4851,10 @@ async def upload_cost_sheet(file: UploadFile = File(...), db: Session = Depends(
             print(f"   TOTAL: ₹{final_total:,.2f}")
             
             db.commit()
+            try:
+                refresh_allocation_denominator_kg_for_all_costs(db)
+            except Exception as _den_e:
+                print(f"⚠️  Denominator refresh after P&L upload: {_den_e}")
             
             print(f"✅ Cost Sheet upload completed!")
             print(f"   💵 Costs created: {costs_created}")

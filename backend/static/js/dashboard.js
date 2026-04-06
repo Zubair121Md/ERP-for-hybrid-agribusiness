@@ -127,6 +127,7 @@ async function loadDashboardData() {
         const stats = await statsResponse.json();
         
         displayDashboardStats(stats);
+        renderPnlAdjustmentsPanel(stats);
         
         // Load top products
         await loadTopProducts();
@@ -143,6 +144,25 @@ async function loadDashboardData() {
 // Display dashboard statistics
 function displayDashboardStats(stats) {
     const statsGrid = document.getElementById('stats-grid');
+    const gross = stats.gross_sales_revenue != null ? stats.gross_sales_revenue : (stats.total_revenue || 0);
+    const netRev = stats.net_revenue != null ? stats.net_revenue : (stats.total_revenue || 0);
+    const sr = stats.sales_returns || 0;
+    const ii = stats.indirect_income || 0;
+    const stk = stats.stock_adjustment || 0;
+    const hasAdj = sr !== 0 || ii !== 0 || stk !== 0;
+    let revDetail = `Gross sales ₹${formatNumber(gross)}`;
+    if (hasAdj) {
+        const parts = [revDetail];
+        if (sr !== 0) parts.push(`− returns ₹${formatNumber(sr)}`);
+        if (ii !== 0) parts.push(`+ indirect ₹${formatNumber(ii)}`);
+        if (stk !== 0) parts.push(`− stock ₹${formatNumber(stk)}`);
+        revDetail = parts.join(' · ');
+    }
+    const pnlTot = stats.pnl_expenses_total != null ? stats.pnl_expenses_total : 0;
+    const econCost = stats.total_costs || 0;
+    const costFootnote = Math.abs(pnlTot - econCost) > 1
+        ? `P&amp;L sheet total ₹${formatNumber(pnlTot)} (reference)`
+        : 'Direct + allocated costs';
     
     const statsHTML = `
         <div class="stat-card products">
@@ -159,42 +179,96 @@ function displayDashboardStats(stats) {
         
         <div class="stat-card revenue">
             <div class="stat-header">
-                <span class="stat-title">Total Revenue</span>
+                <span class="stat-title">Net revenue</span>
                 <i class="fas fa-chart-line stat-icon"></i>
             </div>
-            <div class="stat-value">₹${formatNumber(stats.total_revenue || 0)}</div>
+            <div class="stat-value">₹${formatNumber(netRev)}</div>
             <div class="stat-change positive">
-                <i class="fas fa-arrow-up"></i>
-                +${(stats.profit_margin || 0).toFixed(1)}% margin
+                <i class="fas fa-percent"></i>
+                ${(stats.revenue_margin || 0).toFixed(1)}% on sales
+            </div>
+            <div class="stat-change" style="font-size: 0.8rem; margin-top: 6px; line-height: 1.35;">
+                ${revDetail}
             </div>
         </div>
         
         <div class="stat-card costs">
             <div class="stat-header">
-                <span class="stat-title">Total Costs</span>
+                <span class="stat-title">Total costs</span>
                 <i class="fas fa-dollar-sign stat-icon"></i>
             </div>
-            <div class="stat-value">₹${formatNumber(stats.total_costs || 0)}</div>
+            <div class="stat-value">₹${formatNumber(econCost)}</div>
             <div class="stat-change">
-                <i class="fas fa-info-circle"></i>
-                All categories
+                <i class="fas fa-layer-group"></i>
+                ${costFootnote}
             </div>
         </div>
         
         <div class="stat-card profit">
             <div class="stat-header">
-                <span class="stat-title">Net Profit</span>
+                <span class="stat-title">Net profit</span>
                 <i class="fas fa-trophy stat-icon"></i>
             </div>
             <div class="stat-value">₹${formatNumber(stats.total_profit || 0)}</div>
             <div class="stat-change ${(stats.total_profit || 0) >= 0 ? 'positive' : 'negative'}">
                 <i class="fas fa-${(stats.total_profit || 0) >= 0 ? 'arrow-up' : 'arrow-down'}"></i>
-                ${(stats.profit_margin || 0).toFixed(1)}% margin
+                ${(stats.profit_margin || 0).toFixed(1)}% on cost (CP)
             </div>
         </div>
     `;
     
     statsGrid.innerHTML = statsHTML;
+}
+
+function renderPnlAdjustmentsPanel(stats) {
+    const el = document.getElementById('pnl-adjustments-body');
+    if (!el) return;
+    const sr = stats.sales_returns ?? 0;
+    const ii = stats.indirect_income ?? 0;
+    const stk = stats.stock_adjustment ?? 0;
+    el.innerHTML = `
+        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 1rem; align-items: end;">
+            <div>
+                <label style="display:block; font-size: 0.85rem; color: var(--light-text); margin-bottom: 6px;">Sales returns / cost of sales return (₹)</label>
+                <input type="number" step="0.01" id="adj-sales-returns" class="btn btn-secondary" style="width:100%; text-align:left; cursor:text;" value="${sr}" />
+            </div>
+            <div>
+                <label style="display:block; font-size: 0.85rem; color: var(--light-text); margin-bottom: 6px;">Indirect income (₹)</label>
+                <input type="number" step="0.01" id="adj-indirect-income" class="btn btn-secondary" style="width:100%; text-align:left; cursor:text;" value="${ii}" />
+            </div>
+            <div>
+                <label style="display:block; font-size: 0.85rem; color: var(--light-text); margin-bottom: 6px;">Stock adjustment (₹, reduces net revenue)</label>
+                <input type="number" step="0.01" id="adj-stock" class="btn btn-secondary" style="width:100%; text-align:left; cursor:text;" value="${stk}" />
+            </div>
+            <div>
+                <button type="button" class="btn btn-primary" onclick="savePnlAdjustments()" style="width:100%;">
+                    <i class="fas fa-save"></i> Save adjustments
+                </button>
+            </div>
+        </div>
+        <p style="font-size: 0.8rem; color: var(--light-text); margin-top: 0.75rem;">
+            Net revenue = gross sales + indirect income − sales returns − stock adjustment.
+        </p>
+    `;
+}
+
+async function savePnlAdjustments() {
+    const sales_returns = parseFloat(document.getElementById('adj-sales-returns')?.value) || 0;
+    const indirect_income = parseFloat(document.getElementById('adj-indirect-income')?.value) || 0;
+    const stock_adjustment = parseFloat(document.getElementById('adj-stock')?.value) || 0;
+    try {
+        const r = await fetch(`${API_BASE}/financial-adjustments`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ sales_returns, indirect_income, stock_adjustment }),
+        });
+        if (!r.ok) throw new Error(await r.text());
+        showAlert('P&L adjustments saved', 'success');
+        await loadDashboardData();
+    } catch (e) {
+        console.error(e);
+        showAlert('Could not save adjustments', 'error');
+    }
 }
 
 // Load top products (by profit, with costs and margin from allocation)
