@@ -387,7 +387,8 @@ _ensure_allocation_denominator_column()
 
 
 def _ensure_allocation_pool_column():
-    insp = inspect(engine)
+    from sqlalchemy import inspect as sa_inspect, text
+    insp = sa_inspect(engine)
     try:
         cols = {c["name"] for c in insp.get_columns("costs")}
     except Exception:
@@ -399,9 +400,8 @@ def _ensure_allocation_pool_column():
         if engine.dialect.name == "postgresql"
         else "ALTER TABLE costs ADD COLUMN allocation_pool TEXT"
     )
-    with engine.connect() as conn:
+    with engine.begin() as conn:
         conn.execute(text(ddl))
-        conn.commit()
 
 
 _ensure_allocation_pool_column()
