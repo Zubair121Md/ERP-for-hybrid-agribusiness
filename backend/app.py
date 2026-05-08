@@ -159,6 +159,25 @@ def _sale_quantity_kg(sale) -> float:
     return qty
 
 
+def _to_month_key(value: Any) -> str:
+    """Normalize month-like values to YYYY-MM when possible."""
+    if value is None:
+        return ""
+    s = str(value).strip()
+    if not s:
+        return ""
+    m = re.search(r"(\d{4})-(\d{2})", s)
+    if m:
+        return f"{m.group(1)}-{m.group(2)}"
+    try:
+        dt = pd.to_datetime(s, errors="coerce")
+        if pd.notna(dt):
+            return dt.strftime("%Y-%m")
+    except Exception:
+        pass
+    return s[:7] if len(s) >= 7 else s
+
+
 def compute_inhouse_outsourced_ratios(db: Session, alpha: float = 0.5) -> tuple:
     """
     Compute dynamic segment ratios from current sales data
@@ -704,16 +723,19 @@ class CostAllocationEngine:
         """Allocate costs using selected month data only."""
         
         try:
+            target_month = _to_month_key(month)
             # Get all active products
             products = self.db.query(Product).filter(Product.is_active == True).all()
             product_map = {p.id: p for p in products}
             
-            # Get sales for selected month only
-            monthly_sales = self.db.query(MonthlySale).filter(MonthlySale.month == month).all()
+            # Get sales for selected month only (normalized key match)
+            monthly_sales_all = self.db.query(MonthlySale).all()
+            monthly_sales = [s for s in monthly_sales_all if _to_month_key(s.month) == target_month]
             sales_map = {s.product_id: s for s in monthly_sales}
             
-            # Get costs for selected month only
-            costs = self.db.query(Cost).filter(Cost.month == month).all()
+            # Get costs for selected month only (normalized key match)
+            costs_all = self.db.query(Cost).all()
+            costs = [c for c in costs_all if _to_month_key(c.month) == target_month]
             
             if not costs:
                 raise HTTPException(
@@ -742,7 +764,7 @@ class CostAllocationEngine:
             self.db.commit()
             
             # Generate comprehensive report
-            return self._generate_monthly_report(month, product_map, sales_map)
+            return self._generate_monthly_report(target_month, product_map, sales_map)
             
         except Exception as e:
             self.db.rollback()

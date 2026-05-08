@@ -736,10 +736,21 @@ async function applyFixedCostIISplits(fixedCosts) {
         const openFieldPct = parseFloat(document.getElementById('fc2-openfield-pct').value || '0');
         const aggregationPct = parseFloat(document.getElementById('fc2-aggregation-pct').value || '0');
 
-        const totalPct = strawberryPct + greensPct + openFieldPct + aggregationPct;
-        if (Math.abs(totalPct - 100) > 0.01) {
-            showAlert('Fixed Cost II percentages must add up to 100%.', 'error');
+        const inputPcts = [strawberryPct, greensPct, openFieldPct, aggregationPct];
+        if (inputPcts.some(v => v < 0 || Number.isNaN(v))) {
+            showAlert('Fixed Cost II percentages must be non-negative numbers.', 'error');
             return;
+        }
+        const totalPct = inputPcts.reduce((a, b) => a + b, 0);
+        if (totalPct <= 0) {
+            showAlert('Enter at least one percentage greater than 0.', 'error');
+            return;
+        }
+
+        // Normalize automatically when total is not exactly 100.
+        const normalized = inputPcts.map(v => (v / totalPct) * 100);
+        if (Math.abs(totalPct - 100) > 0.01) {
+            showAlert(`Percentages normalized from ${totalPct.toFixed(1)}% to 100%.`, 'info');
         }
 
         const totalFc2 = fixedCosts.reduce((sum, c) => sum + (c.amount || 0), 0);
@@ -761,10 +772,10 @@ async function applyFixedCostIISplits(fixedCosts) {
         );
 
         const targets = [
-            { pct: strawberryPct, cost: strawberryCost, label: 'Strawberry' },
-            { pct: greensPct, cost: greensCost, label: 'Greens' },
-            { pct: openFieldPct, cost: openFieldCost, label: 'Open Field' },
-            { pct: aggregationPct, cost: aggregationCost, label: 'Aggregation' },
+            { pct: normalized[0], cost: strawberryCost, label: 'Strawberry' },
+            { pct: normalized[1], cost: greensCost, label: 'Greens' },
+            { pct: normalized[2], cost: openFieldCost, label: 'Open Field' },
+            { pct: normalized[3], cost: aggregationCost, label: 'Aggregation' },
         ];
 
         // Compute new amounts
@@ -785,7 +796,8 @@ async function applyFixedCostIISplits(fixedCosts) {
 
         // Get month from any existing FC2 cost (for creating missing Open Field row). Backend expects YYYY-MM.
         const existingCost = strawberryCost || greensCost || aggregationCost;
-        let fc2Month = existingCost ? (existingCost.month || '2025-04') : '2025-04';
+        const selectedMonth = (document.getElementById('allocation-month')?.value || '').trim();
+        let fc2Month = existingCost ? (existingCost.month || selectedMonth || '2025-04') : (selectedMonth || '2025-04');
         if (typeof fc2Month === 'string' && fc2Month.length > 7) {
             const match = fc2Month.match(/(\d{4})-(\d{2})/);
             fc2Month = match ? `${match[1]}-${match[2]}` : '2025-04';
