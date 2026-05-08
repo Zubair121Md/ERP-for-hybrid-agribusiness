@@ -4,6 +4,18 @@ let currentTab = 'dashboard';
 let charts = {};
 let currentData = {};
 
+function getCheckedRadioValue(name) {
+    const el = document.querySelector(`input[name="${name}"]:checked`);
+    return el ? el.value : '';
+}
+
+function setCheckedRadioValue(name, value) {
+    const radios = document.querySelectorAll(`input[name="${name}"]`);
+    radios.forEach(r => {
+        r.checked = (r.value === value);
+    });
+}
+
 // Quantity display formatter for EA and KG
 function formatQtyDisplay(productName, unit, quantity) {
     const name = (productName || '').toLowerCase();
@@ -597,6 +609,8 @@ function displayCosts(costs) {
     const categoryHeadings = {
         'fixed_cost_cat_i': '1. FIXED COST CAT - I',
         'fixed_cost_cat_ii': 'FIXED COST CAT - II',
+        'variable_cost': '2. VARIABLE COST',
+        'variable_cost_item': '2. VARIABLE COST - LINE ITEMS',
         'variable_cost_open_field': 'A) OPEN FIELD',
         'variable_cost_lettuce': 'B) LETTUCE',
         'variable_cost_strawberry': 'C) STRAWBERRY',
@@ -920,12 +934,14 @@ function handleCostSubmit(e) {
     const costData = {
         name: document.getElementById('cost-name').value,
         amount: parseFloat(document.getElementById('cost-amount').value),
-        applies_to: document.getElementById('cost-applies-to').value,
-        cost_type: document.getElementById('cost-type').value,
-        basis: document.getElementById('cost-basis').value,
+        applies_to: getCheckedRadioValue('cost-applies-to'),
+        cost_type: getCheckedRadioValue('cost-type'),
+        basis: getCheckedRadioValue('cost-basis'),
         month: document.getElementById('cost-month').value,
-        is_fixed: document.getElementById('cost-fixed').value,
-        category: document.getElementById('cost-category').value
+        is_fixed: getCheckedRadioValue('cost-fixed'),
+        category: document.getElementById('cost-category').value,
+        allocation_pool: getCheckedRadioValue('cost-allocation-pool') || 'auto',
+        allocation_denominator_kg: document.getElementById('cost-denominator-kg').value ? parseFloat(document.getElementById('cost-denominator-kg').value) : null
     };
     
     createCost(costData);
@@ -1026,6 +1042,12 @@ function showCostForm() {
     document.getElementById('cost-modal-title').textContent = 'Add Cost';
     document.getElementById('cost-form').removeAttribute('data-edit-id');
     document.getElementById('cost-form').reset();
+    setCheckedRadioValue('cost-applies-to', 'both');
+    setCheckedRadioValue('cost-type', 'common');
+    setCheckedRadioValue('cost-basis', 'sales_kg');
+    setCheckedRadioValue('cost-fixed', 'variable');
+    setCheckedRadioValue('cost-allocation-pool', 'auto');
+    document.getElementById('cost-denominator-kg').value = '';
     document.getElementById('cost-modal').classList.add('active');
 }
 
@@ -1134,12 +1156,14 @@ async function submitCostForm(event) {
     const formData = {
         name: document.getElementById('cost-name').value,
         amount: parseFloat(document.getElementById('cost-amount').value),
-        applies_to: document.getElementById('cost-applies-to').value,
-        cost_type: document.getElementById('cost-type').value,
-        basis: document.getElementById('cost-basis').value,
+        applies_to: getCheckedRadioValue('cost-applies-to'),
+        cost_type: getCheckedRadioValue('cost-type'),
+        basis: getCheckedRadioValue('cost-basis'),
         month: document.getElementById('cost-month').value,
         category: document.getElementById('cost-category').value,
-        is_fixed: document.getElementById('cost-fixed').value
+        is_fixed: getCheckedRadioValue('cost-fixed'),
+        allocation_pool: getCheckedRadioValue('cost-allocation-pool') || 'auto',
+        allocation_denominator_kg: document.getElementById('cost-denominator-kg').value ? parseFloat(document.getElementById('cost-denominator-kg').value) : null
     };
     
     const editId = document.getElementById('cost-form').getAttribute('data-edit-id');
@@ -1897,12 +1921,14 @@ async function editCost(id) {
             // Populate form with existing data
             document.getElementById('cost-name').value = cost.name;
             document.getElementById('cost-amount').value = cost.amount;
-            document.getElementById('cost-applies-to').value = cost.applies_to;
-            document.getElementById('cost-type').value = cost.cost_type;
-            document.getElementById('cost-basis').value = cost.basis;
+            setCheckedRadioValue('cost-applies-to', cost.applies_to);
+            setCheckedRadioValue('cost-type', cost.cost_type);
+            setCheckedRadioValue('cost-basis', cost.basis);
             document.getElementById('cost-month').value = cost.month;
             document.getElementById('cost-category').value = cost.category;
-            document.getElementById('cost-fixed').value = cost.is_fixed;
+            setCheckedRadioValue('cost-fixed', cost.is_fixed);
+            setCheckedRadioValue('cost-allocation-pool', cost.allocation_pool || 'auto');
+            document.getElementById('cost-denominator-kg').value = cost.allocation_denominator_kg ?? '';
             
             // Store the ID for update
             document.getElementById('cost-form').setAttribute('data-edit-id', id);

@@ -284,6 +284,7 @@ class Cost(Base):
     pl_period = Column(String, default=None)          # '1-Apr-24 to 30-Apr-24'
     # When set, allocation uses: amount × (product_kg / allocation_denominator_kg) with Decimal math
     allocation_denominator_kg = Column(Float, nullable=True)
+    allocation_pool = Column(String, nullable=True)   # Optional manual pool override
     
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -383,6 +384,27 @@ def _ensure_allocation_denominator_column():
 
 
 _ensure_allocation_denominator_column()
+
+
+def _ensure_allocation_pool_column():
+    insp = inspect(engine)
+    try:
+        cols = {c["name"] for c in insp.get_columns("costs")}
+    except Exception:
+        return
+    if "allocation_pool" in cols:
+        return
+    ddl = (
+        "ALTER TABLE costs ADD COLUMN allocation_pool VARCHAR(64)"
+        if engine.dialect.name == "postgresql"
+        else "ALTER TABLE costs ADD COLUMN allocation_pool TEXT"
+    )
+    with engine.connect() as conn:
+        conn.execute(text(ddl))
+        conn.commit()
+
+
+_ensure_allocation_pool_column()
 
 
 # Official kg denominators (management / P&L sheet). Keys = cost names uppercased like saved in DB.
@@ -508,6 +530,10 @@ class CostCreate(BaseModel):
         None,
         description="Official kg base for allocation; amount × (line_kg / this). If null, engine uses name map or sums DB kg.",
     )
+    allocation_pool: Optional[str] = Field(
+        None,
+        pattern="^(auto|strawberry|lettuce|open_field|raspberry_blueberry|citrus|packing|aggregation|common_expenses_farm|distribution_cost|marketing_expenses|vehicle_running_cost|others|wastage_shortage|purchase_accounts)$"
+    )
 
 class CostUpdate(BaseModel):
     name: Optional[str] = Field(None, min_length=1, max_length=100)
@@ -518,6 +544,10 @@ class CostUpdate(BaseModel):
     is_fixed: Optional[str] = Field(None, pattern="^(fixed|variable)$")
     category: Optional[str] = Field(None, max_length=50)
     allocation_denominator_kg: Optional[float] = None
+    allocation_pool: Optional[str] = Field(
+        None,
+        pattern="^(auto|strawberry|lettuce|open_field|raspberry_blueberry|citrus|packing|aggregation|common_expenses_farm|distribution_cost|marketing_expenses|vehicle_running_cost|others|wastage_shortage|purchase_accounts)$"
+    )
 
 class CostResponse(BaseModel):
     id: int
@@ -537,6 +567,7 @@ class CostResponse(BaseModel):
     source_file: Optional[str] = None
     pl_period: Optional[str] = None
     allocation_denominator_kg: Optional[float] = None
+    allocation_pool: Optional[str] = None
     
     created_at: datetime
 
@@ -799,6 +830,7 @@ class CostAllocationEngine:
         applicable = {}
         
         cost_name_upper = (cost.name or "").upper()
+        manual_pool = (getattr(cost, "allocation_pool", None) or "").lower().strip()
         
         # FC II: pooled rupee amount for one bucket; split only among that bucket's products by sales kg
         is_fixed_cost_cat_ii = _is_fixed_cost_cat_ii_name(cost.name)
@@ -814,6 +846,30 @@ class CostAllocationEngine:
                 fixed_cost_category = "open_field"
             elif "AGGREGATION" in cost_name_upper:
                 fixed_cost_category = "aggregation"
+
+        # Optional manual pool override from UI
+        if manual_pool and manual_pool != "auto":
+            if manual_pool in {"strawberry", "lettuce", "open_field", "raspberry_blueberry", "citrus", "packing", "aggregation", "common_expenses_farm"}:
+                is_variable_cost = True
+                if manual_pool == "strawberry":
+                    cost_section = "Strawberry"
+                elif manual_pool == "lettuce":
+                    cost_section = "Lettuce"
+                elif manual_pool == "open_field":
+                    cost_section = "Open Field"
+                elif manual_pool == "raspberry_blueberry":
+                    cost_section = "Other Berries"
+                elif manual_pool == "citrus":
+                    cost_section = "Citrus"
+                elif manual_pool == "packing":
+                    cost_section = "Packing"
+                elif manual_pool == "aggregation":
+                    cost_section = "Aggregation"
+                elif manual_pool == "common_expenses_farm":
+                    cost_section = "Open Field"
+            elif manual_pool in {"distribution_cost", "marketing_expenses", "vehicle_running_cost", "others", "wastage_shortage", "purchase_accounts"}:
+                # These are global category pools; keep applies_to filtering only.
+                is_variable_cost = False
         
         # Check if this is a VARIABLE COST that needs section-based filtering
         is_variable_cost = "VARIABLE COST" in cost_name_upper
@@ -834,6 +890,8 @@ class CostAllocationEngine:
                 cost_section = "Strawberry"
             elif "RASPBERRY" in cost_name_upper or "BLUEBERRY" in cost_name_upper or "BLUBERRY" in cost_name_upper:
                 cost_section = "Other Berries"
+            elif "CITRUS" in cost_name_upper:
+                cost_section = "Citrus"
             elif "PACKING" in cost_name_upper:
                 cost_section = "Packing"
             elif "AGGREGATION" in cost_name_upper:
@@ -1029,6 +1087,12 @@ class CostAllocationEngine:
                     # RASPBERRY & BLUEBERRY: match products with "raspberry" or "blueberry" in name
                     elif cost_section == "Other Berries":
                         if "RASPBERRY" in product_name_upper or "BLUEBERRY" in product_name_upper or "BLUBERRY" in product_name_upper:
+                            product_mapped = True
+                    
+                    # CITRUS
+                    elif cost_section == "Citrus":
+                        citrus_keywords = ["CITRUS", "ORANGE", "MOSAMBI", "LEMON", "LIME", "MANDARIN", "KINNOW"]
+                        if any(keyword in product_name_upper for keyword in citrus_keywords):
                             product_mapped = True
                 
                 # If product doesn't match this section, skip it
@@ -5039,7 +5103,8 @@ async def upload_cost_sheet(file: UploadFile = File(...), db: Session = Depends(
             # Helper: save or update a Cost record (optional kg denominator for exact sheet-based allocation)
             def save_cost(name, amount, applies_to, category, basis_label,
                           is_fixed="variable", cost_type="common", pl_class="B",
-                          denominator_kg: Optional[float] = None):
+                          denominator_kg: Optional[float] = None,
+                          allocation_pool: Optional[str] = "auto"):
                 nonlocal costs_created, costs_updated
                 if amount <= 0:
                     return
@@ -5057,6 +5122,7 @@ async def upload_cost_sheet(file: UploadFile = File(...), db: Session = Depends(
                     existing.pl_period = period
                     existing.source_file = "cost_sheet_upload"
                     existing.allocation_denominator_kg = dk
+                    existing.allocation_pool = allocation_pool
                     existing.updated_at = datetime.utcnow()
                     costs_updated += 1
                     print(f"   ✏️  Updated {name}: ₹{amount:,.2f}" + (f" (denom kg={dk})" if dk else ""))
@@ -5068,6 +5134,7 @@ async def upload_cost_sheet(file: UploadFile = File(...), db: Session = Depends(
                         pl_classification=pl_class, original_amount=amount,
                         source_file="cost_sheet_upload", pl_period=period,
                         allocation_denominator_kg=dk,
+                        allocation_pool=allocation_pool,
                     ))
                     costs_created += 1
                     print(f"   💰 Created {name}: ₹{amount:,.2f}" + (f" (denom kg={dk})" if dk else ""))
@@ -5098,7 +5165,7 @@ async def upload_cost_sheet(file: UploadFile = File(...), db: Session = Depends(
             if fc1 > 0:
                 save_cost("FIXED COST CAT - I", fc1, "both", "fixed_cost_cat_i",
                           "sales_kg",
-                          is_fixed="fixed", pl_class="B")
+                          is_fixed="fixed", pl_class="B", allocation_pool="auto")
             else:
                 print(f"   ⚠️  FIXED COST CAT - I is 0 or not found")
             
@@ -5111,7 +5178,7 @@ async def upload_cost_sheet(file: UploadFile = File(...), db: Session = Depends(
                 save_cost(
                     "FIXED COST CAT - II",
                     fc2, "both", "fixed_cost_cat_ii", "sales_kg",
-                    is_fixed="fixed", cost_type="common", pl_class="B",
+                    is_fixed="fixed", cost_type="common", pl_class="B", allocation_pool="auto",
                 )
             
             # ============================================================
@@ -5144,24 +5211,67 @@ async def upload_cost_sheet(file: UploadFile = File(...), db: Session = Depends(
             }
             
             variable_total = 0.0
-            for sub_key, sub_data in var_subs.items():
-                sub_total = sub_data.get('total', 0.0)
-                if sub_total <= 0:
-                    continue
-                variable_total += sub_total
+            expected_var_keys = ['open_field', 'lettuce', 'strawberry', 'raspberry_blueberry', 'citrus', 'packing', 'aggregation', 'common_expenses_farm']
+            for sub_key in expected_var_keys:
+                sub_data = var_subs.get(sub_key, {})
+                sub_total = sub_data.get('total', 0.0) if isinstance(sub_data, dict) else 0.0
+                variable_total += max(0.0, sub_total)
                 display = var_display.get(sub_key, sub_key.upper())
                 applies, ctype, basis_type = var_rules.get(sub_key, ("inhouse", "inhouse-only", "sales_kg"))
-                items_list = sub_data.get('items', [])
-                items_str = ", ".join([f"{it['name']}=₹{it['amount']:,.0f}" for it in items_list[:5]])
-                if len(items_list) > 5:
-                    items_str += f" +{len(items_list)-5} more"
-                
-                save_cost(
-                    f"VARIABLE COST - {display}",
-                    sub_total, applies, "variable_cost",
-                    basis_type,
-                    cost_type=ctype, pl_class="I"
-                )
+                items_list = sub_data.get('items', []) if isinstance(sub_data, dict) else []
+
+                # Keep template-fixed category rows present even when amount is 0.
+                existing_var = db.query(Cost).filter(Cost.name == f"VARIABLE COST - {display}", Cost.month == month).first()
+                if sub_total > 0:
+                    save_cost(
+                        f"VARIABLE COST - {display}",
+                        sub_total, applies, "variable_cost",
+                        basis_type,
+                        cost_type=ctype, pl_class="I", allocation_pool=sub_key
+                    )
+                elif existing_var:
+                    existing_var.amount = 0.0
+                    existing_var.original_amount = 0.0
+                    existing_var.applies_to = applies
+                    existing_var.cost_type = ctype
+                    existing_var.basis = basis_type
+                    existing_var.category = "variable_cost"
+                    existing_var.source_file = "cost_sheet_upload"
+                    existing_var.allocation_pool = sub_key
+                    existing_var.updated_at = datetime.utcnow()
+                    costs_updated += 1
+                else:
+                    db.add(Cost(
+                        name=f"VARIABLE COST - {display}",
+                        amount=0.0,
+                        original_amount=0.0,
+                        applies_to=applies,
+                        cost_type=ctype,
+                        basis=basis_type,
+                        month=month,
+                        is_fixed="variable",
+                        category="variable_cost",
+                        pl_classification="I",
+                        source_file="cost_sheet_upload",
+                        pl_period=period,
+                        allocation_pool=sub_key
+                    ))
+                    costs_created += 1
+
+                # Add item-level variable lines (for visibility of all variable costs)
+                for item in items_list:
+                    item_name = str(item.get("name", "")).strip()
+                    item_amount = float(item.get("amount", 0.0) or 0.0)
+                    if not item_name:
+                        continue
+                    if item_amount <= 0:
+                        continue
+                    save_cost(
+                        f"VARIABLE COST - {display} - {item_name}",
+                        item_amount, applies, "variable_cost_item",
+                        basis_type,
+                        cost_type=ctype, pl_class="I", allocation_pool=sub_key
+                    )
             
             # ============================================================
             # 4) DISTRIBUTION, MARKETING, VEHICLE, OTHERS
@@ -5190,7 +5300,7 @@ async def upload_cost_sheet(file: UploadFile = File(...), db: Session = Depends(
                     save_cost(
                         cat_name, cat_total, "both", cat_key,
                         basis_type,  # Use the correct basis type
-                        pl_class="B"
+                        pl_class="B", allocation_pool=cat_key
                     )
                 else:
                     print(f"   ⚠️  {cat_name} is 0 or not found")
@@ -5209,7 +5319,7 @@ async def upload_cost_sheet(file: UploadFile = File(...), db: Session = Depends(
                 save_cost(
                     "PURCHASE ACCOUNTS", purchase_total, "outsourced", "purchase_accounts",
                     "direct_cost",  # Direct Cost - No Allocation
-                    cost_type="purchase-only", pl_class="O"
+                    cost_type="purchase-only", pl_class="O", allocation_pool="purchase_accounts"
                 )
             
             # ============================================================
@@ -5224,7 +5334,7 @@ async def upload_cost_sheet(file: UploadFile = File(...), db: Session = Depends(
                 save_cost(
                     "WASTAGE & SHORTAGE", wastage_total, "both", "wastage_shortage",
                     "sales_kg",  # Default: Sales KG (all products)
-                    pl_class="B"
+                    pl_class="B", allocation_pool="wastage_shortage"
                 )
             
             # Build response totals

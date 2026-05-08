@@ -1441,39 +1441,57 @@
                 </div>
                 <div class="form-row">
                     <div class="form-group">
-                        <label for="cost-applies-to">Applies To</label>
-                        <select id="cost-applies-to" required>
-                            <option value="">Select Applicability</option>
-                            <option value="inhouse">Inhouse Only</option>
-                            <option value="outsourced">Outsourced Only</option>
-                            <option value="both">Both Inhouse & Outsourced</option>
-                            <option value="all">All Products</option>
-                        </select>
+                        <label>Applies To</label>
+                        <div id="cost-applies-to-group" style="display:flex; gap:10px; flex-wrap:wrap;">
+                            <label><input type="radio" name="cost-applies-to" value="inhouse" required> Inhouse</label>
+                            <label><input type="radio" name="cost-applies-to" value="outsourced"> Outsourced</label>
+                            <label><input type="radio" name="cost-applies-to" value="both"> Both</label>
+                            <label><input type="radio" name="cost-applies-to" value="all"> All</label>
+                        </div>
                     </div>
                     <div class="form-group">
-                        <label for="cost-type">Cost Type</label>
-                        <select id="cost-type" required>
-                            <option value="">Select Type</option>
-                            <option value="purchase-only">Purchase Only</option>
-                            <option value="sales-only">Sales Only</option>
-                            <option value="common">Common</option>
-                            <option value="inhouse-only">Inhouse Only</option>
-                        </select>
+                        <label>Cost Type</label>
+                        <div id="cost-type-group" style="display:flex; gap:10px; flex-wrap:wrap;">
+                            <label><input type="radio" name="cost-type" value="purchase-only" required> Purchase</label>
+                            <label><input type="radio" name="cost-type" value="sales-only"> Sales</label>
+                            <label><input type="radio" name="cost-type" value="common"> Common</label>
+                            <label><input type="radio" name="cost-type" value="inhouse-only"> Inhouse</label>
+                        </div>
                     </div>
                 </div>
                 <div class="form-row">
                     <div class="form-group">
-                        <label for="cost-basis">Allocation Basis</label>
-                        <select id="cost-basis" required>
-                            <option value="">Select Basis</option>
-                            <option value="weight">Weight</option>
-                            <option value="value">Value</option>
-                            <option value="trips">Trips</option>
-                        </select>
+                        <label>Allocation Basis</label>
+                        <div id="cost-basis-group" style="display:flex; gap:10px; flex-wrap:wrap;">
+                            <label><input type="radio" name="cost-basis" value="weight" required> Weight</label>
+                            <label><input type="radio" name="cost-basis" value="value"> Value</label>
+                            <label><input type="radio" name="cost-basis" value="trips"> Trips</label>
+                            <label><input type="radio" name="cost-basis" value="sales_kg"> Sales KG</label>
+                        </div>
                     </div>
                     <div class="form-group">
                         <label for="cost-month">Month</label>
                         <input type="text" id="cost-month" placeholder="2025-04-24 00:00:00" required>
+                    </div>
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>Allocation Pool</label>
+                        <div id="cost-allocation-pool-group" style="display:flex; gap:10px; flex-wrap:wrap;">
+                            <label><input type="radio" name="cost-allocation-pool" value="auto" checked> Auto</label>
+                            <label><input type="radio" name="cost-allocation-pool" value="strawberry"> Strawberry</label>
+                            <label><input type="radio" name="cost-allocation-pool" value="lettuce"> Lettuce</label>
+                            <label><input type="radio" name="cost-allocation-pool" value="open_field"> Open Field</label>
+                            <label><input type="radio" name="cost-allocation-pool" value="raspberry_blueberry"> Raspberry/Blueberry</label>
+                            <label><input type="radio" name="cost-allocation-pool" value="citrus"> Citrus</label>
+                            <label><input type="radio" name="cost-allocation-pool" value="packing"> Packing</label>
+                            <label><input type="radio" name="cost-allocation-pool" value="aggregation"> Aggregation</label>
+                            <label><input type="radio" name="cost-allocation-pool" value="common_expenses_farm"> Common Farm</label>
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label for="cost-denominator-kg">Allocation KG Base (optional)</label>
+                        <input type="number" id="cost-denominator-kg" step="0.01" placeholder="Leave blank for auto">
                     </div>
                 </div>
                 <div class="form-row">
@@ -1488,11 +1506,11 @@
                         </select>
                     </div>
                     <div class="form-group">
-                        <label for="cost-fixed">Type</label>
-                        <select id="cost-fixed">
-                            <option value="variable">Variable</option>
-                            <option value="fixed">Fixed</option>
-                        </select>
+                        <label>Fixed / Variable</label>
+                        <div id="cost-fixed-group" style="display:flex; gap:10px; flex-wrap:wrap;">
+                            <label><input type="radio" name="cost-fixed" value="variable" checked> Variable</label>
+                            <label><input type="radio" name="cost-fixed" value="fixed"> Fixed</label>
+                        </div>
                     </div>
                 </div>
                 <div style="display: flex; gap: 10px; justify-content: flex-end;">
