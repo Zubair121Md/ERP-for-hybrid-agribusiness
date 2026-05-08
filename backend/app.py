@@ -5305,10 +5305,13 @@ async def upload_cost_sheet(file: UploadFile = File(...), db: Session = Depends(
                 Cost.month == month
             ).all()
             if old_costs:
+                old_cost_ids = [c.id for c in old_costs]
+                # Delete dependent allocations first to satisfy FK constraints in Postgres.
+                removed_allocs = db.query(Allocation).filter(Allocation.cost_id.in_(old_cost_ids)).delete(synchronize_session=False)
                 for oc in old_costs:
                     db.delete(oc)
                 db.flush()
-                print(f"   🗑️  Removed {len(old_costs)} old cost records for month {month}")
+                print(f"   🗑️  Removed {len(old_costs)} old cost records for month {month} and {removed_allocs} linked allocations")
                 costs_updated = 0  # reset since we're replacing
             
             # ============================================================
@@ -5732,7 +5735,6 @@ async def upload_harvest_mapping(file: UploadFile = File(...), db: Session = Dep
             # Clean up temp file
             if os.path.exists(tmp_file_path):
                 os.unlink(tmp_file_path)
-        
     except Exception as e:
         import traceback
         print(f"💥 Harvest Mapping upload failed: {str(e)}")
@@ -5742,6 +5744,51 @@ async def upload_harvest_mapping(file: UploadFile = File(...), db: Session = Dep
             "message": f"Upload failed: {str(e)}",
             "mappings_created": 0
         }
+
+@app.delete("/api/delete-mappings")
+async def delete_mappings(db: Session = Depends(get_db)):
+    """Delete all product-section mappings uploaded via mapping file."""
+    deleted = db.query(ProductSectionMapping).delete(synchronize_session=False)
+    db.commit()
+    return {"success": True, "message": f"Deleted {deleted} mappings", "deleted_mappings": deleted}
+
+
+@app.delete("/api/delete-pnl-upload-data")
+async def delete_pnl_upload_data(db: Session = Depends(get_db)):
+    """Delete P&L-uploaded costs and their linked allocations."""
+    pnl_costs = db.query(Cost).filter(Cost.source_file == "cost_sheet_upload").all()
+    if not pnl_costs:
+        return {"success": True, "message": "No uploaded P&L costs found", "deleted_costs": 0, "deleted_allocations": 0}
+
+    cost_ids = [c.id for c in pnl_costs]
+    deleted_allocs = db.query(Allocation).filter(Allocation.cost_id.in_(cost_ids)).delete(synchronize_session=False)
+    deleted_costs = db.query(Cost).filter(Cost.id.in_(cost_ids)).delete(synchronize_session=False)
+    db.commit()
+    return {
+        "success": True,
+        "message": f"Deleted {deleted_costs} uploaded P&L costs and {deleted_allocs} linked allocations",
+        "deleted_costs": deleted_costs,
+        "deleted_allocations": deleted_allocs,
+    }
+
+
+@app.delete("/api/delete-sales-upload-data")
+async def delete_sales_upload_data(db: Session = Depends(get_db)):
+    """Delete all sales rows and linked allocations created from sales uploads."""
+    sale_ids_rows = db.query(MonthlySale.id).all()
+    sale_ids = [r[0] for r in sale_ids_rows]
+    if not sale_ids:
+        return {"success": True, "message": "No sales data found", "deleted_sales": 0, "deleted_allocations": 0}
+
+    deleted_allocs = db.query(Allocation).filter(Allocation.monthly_sale_id.in_(sale_ids)).delete(synchronize_session=False)
+    deleted_sales = db.query(MonthlySale).filter(MonthlySale.id.in_(sale_ids)).delete(synchronize_session=False)
+    db.commit()
+    return {
+        "success": True,
+        "message": f"Deleted {deleted_sales} sales rows and {deleted_allocs} linked allocations",
+        "deleted_sales": deleted_sales,
+        "deleted_allocations": deleted_allocs,
+    }
 
 @app.post("/api/upload-harvest-data")
 async def upload_harvest_data(file: UploadFile = File(...), db: Session = Depends(get_db)):

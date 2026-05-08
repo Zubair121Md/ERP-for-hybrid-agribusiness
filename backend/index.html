@@ -1006,6 +1006,10 @@
                                     <i class="fas fa-upload"></i>
                                     Upload Mapping Excel
                                 </button>
+                                <button class="btn btn-danger" onclick="deleteMappingData()">
+                                    <i class="fas fa-trash"></i>
+                                    Delete Mapping Data
+                                </button>
                                 <input type="file" id="mapping-file-input" accept=".xlsx,.xls" style="display: none;" onchange="handleMappingUpload(event)">
                             </div>
                         </div>
@@ -1082,6 +1086,10 @@
                                 <button class="btn btn-primary" onclick="document.getElementById('excel-file-input').click()">
                                     <i class="fas fa-upload"></i>
                                     Upload Excel File
+                                </button>
+                                <button class="btn btn-danger" onclick="deleteSalesUploadData()">
+                                    <i class="fas fa-trash"></i>
+                                    Delete Sales Data
                                 </button>
                                 <input type="file" id="excel-file-input" accept=".xlsx,.xls" style="display: none;" onchange="handleExcelUpload(event)">
                             </div>
@@ -1232,6 +1240,10 @@
                                 <button class="btn btn-primary" onclick="document.getElementById('pl-file-input').click()">
                                     <i class="fas fa-upload"></i>
                                     Upload P&L Excel
+                                </button>
+                                <button class="btn btn-danger" onclick="deletePnlUploadData()">
+                                    <i class="fas fa-trash"></i>
+                                    Delete P&L Data
                                 </button>
                                 <input type="file" id="pl-file-input" accept=".xlsx,.xls" style="display: none;" onchange="handlePLUpload(event)">
                             </div>
@@ -1835,6 +1847,23 @@
     // Make functions globally available
     window.handlePLUpload = handlePLUpload;
     window.updatePLPreview = updatePLPreview;
+
+    async function deletePnlUploadData() {
+        if (!confirm('Delete all uploaded P&L costs and linked allocations?')) return;
+        try {
+            const res = await fetch('/api/delete-pnl-upload-data', { method: 'DELETE' });
+            const data = await res.json();
+            if (!res.ok || !data.success) throw new Error(data.message || 'Delete failed');
+            alert(data.message || 'P&L upload data deleted');
+            if (typeof loadCosts === 'function') loadCosts();
+            if (typeof updatePLPreview === 'function') updatePLPreview();
+            if (typeof loadDashboardData === 'function') loadDashboardData();
+        } catch (error) {
+            console.error('Delete P&L data error:', error);
+            alert('Failed to delete P&L upload data: ' + error.message);
+        }
+    }
+    window.deletePnlUploadData = deletePnlUploadData;
     
     // Harvest Mapping Upload function
     async function handleMappingUpload(event) {
@@ -1908,6 +1937,38 @@
     }
     
     window.handleMappingUpload = handleMappingUpload;
+
+    async function deleteMappingData() {
+        if (!confirm('Delete all uploaded product-section mappings?')) return;
+        try {
+            const res = await fetch('/api/delete-mappings', { method: 'DELETE' });
+            const data = await res.json();
+            if (!res.ok || !data.success) throw new Error(data.message || 'Delete failed');
+            alert(data.message || 'Mapping data deleted');
+            const resultsDiv = document.getElementById('mapping-upload-results');
+            if (resultsDiv) resultsDiv.style.display = 'none';
+        } catch (error) {
+            console.error('Delete mapping data error:', error);
+            alert('Failed to delete mapping data: ' + error.message);
+        }
+    }
+    window.deleteMappingData = deleteMappingData;
+
+    async function deleteSalesUploadData() {
+        if (!confirm('Delete all uploaded sales rows and linked allocations?')) return;
+        try {
+            const res = await fetch('/api/delete-sales-upload-data', { method: 'DELETE' });
+            const data = await res.json();
+            if (!res.ok || !data.success) throw new Error(data.message || 'Delete failed');
+            alert(data.message || 'Sales upload data deleted');
+            if (typeof loadSales === 'function') loadSales();
+            if (typeof loadDashboardData === 'function') loadDashboardData();
+        } catch (error) {
+            console.error('Delete sales data error:', error);
+            alert('Failed to delete sales upload data: ' + error.message);
+        }
+    }
+    window.deleteSalesUploadData = deleteSalesUploadData;
     
     // Test harvest-mapping tab on page load
     document.addEventListener('DOMContentLoaded', function() {
