@@ -232,57 +232,6 @@ function displayDashboardStats(stats) {
     statsGrid.innerHTML = statsHTML;
 }
 
-function renderPnlAdjustmentsPanel(stats) {
-    const el = document.getElementById('pnl-adjustments-body');
-    if (!el) return;
-    const sr = stats.sales_returns ?? 0;
-    const ii = stats.indirect_income ?? 0;
-    const stk = stats.stock_adjustment ?? 0;
-    el.innerHTML = `
-        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 1rem; align-items: end;">
-            <div>
-                <label style="display:block; font-size: 0.85rem; color: var(--light-text); margin-bottom: 6px;">Sales returns / cost of sales return (₹)</label>
-                <input type="number" step="0.01" id="adj-sales-returns" class="btn btn-secondary" style="width:100%; text-align:left; cursor:text;" value="${sr}" />
-            </div>
-            <div>
-                <label style="display:block; font-size: 0.85rem; color: var(--light-text); margin-bottom: 6px;">Indirect income (₹)</label>
-                <input type="number" step="0.01" id="adj-indirect-income" class="btn btn-secondary" style="width:100%; text-align:left; cursor:text;" value="${ii}" />
-            </div>
-            <div>
-                <label style="display:block; font-size: 0.85rem; color: var(--light-text); margin-bottom: 6px;">Stock adjustment (₹, reduces net revenue)</label>
-                <input type="number" step="0.01" id="adj-stock" class="btn btn-secondary" style="width:100%; text-align:left; cursor:text;" value="${stk}" />
-            </div>
-            <div>
-                <button type="button" class="btn btn-primary" onclick="savePnlAdjustments()" style="width:100%;">
-                    <i class="fas fa-save"></i> Save adjustments
-                </button>
-            </div>
-        </div>
-        <p style="font-size: 0.8rem; color: var(--light-text); margin-top: 0.75rem;">
-            Net revenue = gross sales + indirect income − sales returns − stock adjustment.
-        </p>
-    `;
-}
-
-async function savePnlAdjustments() {
-    const sales_returns = parseFloat(document.getElementById('adj-sales-returns')?.value) || 0;
-    const indirect_income = parseFloat(document.getElementById('adj-indirect-income')?.value) || 0;
-    const stock_adjustment = parseFloat(document.getElementById('adj-stock')?.value) || 0;
-    try {
-        const r = await fetch(`${API_BASE}/financial-adjustments`, {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ sales_returns, indirect_income, stock_adjustment }),
-        });
-        if (!r.ok) throw new Error(await r.text());
-        showAlert('P&L adjustments saved', 'success');
-        await loadDashboardData();
-    } catch (e) {
-        console.error(e);
-        showAlert('Could not save adjustments', 'error');
-    }
-}
-
 // Load top products (by profit, with costs and margin from allocation)
 async function loadTopProducts() {
     try {
