@@ -1447,6 +1447,7 @@ function displayCostBreakdownModal(breakdown) {
                             <tr>
                                 <th>Category</th>
                                 <th>Total Allocated</th>
+                                <th>Allocated ₹/kg</th>
                                 <th>Number of Costs</th>
                             </tr>
                         </thead>
@@ -1455,6 +1456,7 @@ function displayCostBreakdownModal(breakdown) {
                                 <tr>
                                     <td><strong>${category}</strong></td>
                                     <td>₹${formatNumber(data.total)}</td>
+                                    <td>₹${formatNumber(data.per_kg || 0)}</td>
                                     <td>${data.costs.length}</td>
                                 </tr>
                             `).join('')}
@@ -1469,7 +1471,7 @@ function displayCostBreakdownModal(breakdown) {
                                 ${breakdown.costs_by_type.inhouse_only.map(cost => `
                                     <li style="padding: 5px 0; border-bottom: 1px solid #eee;">
                                         <strong>${cost.cost_name}</strong><br>
-                                        <small>₹${formatNumber(cost.amount)} (${cost.basis})</small>
+                                        <small>₹${formatNumber(cost.amount)} | ₹${formatNumber(cost.amount_per_kg || 0)}/kg (${cost.basis})</small>
                                     </li>
                                 `).join('')}
                                 ${breakdown.costs_by_type.inhouse_only.length === 0 ? '<li>None</li>' : ''}
@@ -1481,7 +1483,7 @@ function displayCostBreakdownModal(breakdown) {
                                 ${breakdown.costs_by_type.outsourced_only.map(cost => `
                                     <li style="padding: 5px 0; border-bottom: 1px solid #eee;">
                                         <strong>${cost.cost_name}</strong><br>
-                                        <small>₹${formatNumber(cost.amount)} (${cost.basis})</small>
+                                        <small>₹${formatNumber(cost.amount)} | ₹${formatNumber(cost.amount_per_kg || 0)}/kg (${cost.basis})</small>
                                     </li>
                                 `).join('')}
                                 ${breakdown.costs_by_type.outsourced_only.length === 0 ? '<li>None</li>' : ''}
@@ -1493,7 +1495,7 @@ function displayCostBreakdownModal(breakdown) {
                                 ${breakdown.costs_by_type.common.map(cost => `
                                     <li style="padding: 5px 0; border-bottom: 1px solid #eee;">
                                         <strong>${cost.cost_name}</strong><br>
-                                        <small>₹${formatNumber(cost.amount)} (${cost.basis})</small>
+                                        <small>₹${formatNumber(cost.amount)} | ₹${formatNumber(cost.amount_per_kg || 0)}/kg (${cost.basis})</small>
                                     </li>
                                 `).join('')}
                                 ${breakdown.costs_by_type.common.length === 0 ? '<li>None</li>' : ''}
