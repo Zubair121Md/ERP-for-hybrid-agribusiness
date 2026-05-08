@@ -5049,10 +5049,11 @@ async def upload_cost_sheet(file: UploadFile = File(...), db: Session = Depends(
             try:
                 semantic_layout = read_excel_layout_with_openpyxl(content)
                 semantic_totals = extract_pl_semantic_totals(semantic_layout["df_raw"])
-                # Fill/override missing zeros using semantic section maxima
+                # Override totals using semantic section maxima (parser can mis-bind merged/sparse layouts).
                 for k in ['fixed_cost_cat_i', 'fixed_cost_cat_ii', 'distribution_cost', 'marketing_expenses', 'vehicle_running_cost', 'others', 'wastage_shortage', 'purchase_accounts']:
-                    if expenses.get(k, {}).get('total', 0.0) <= 0 and semantic_totals.get(k, 0.0) > 0:
-                        expenses.setdefault(k, {})['total'] = semantic_totals[k]
+                    sv = semantic_totals.get(k, 0.0)
+                    if sv > 0:
+                        expenses.setdefault(k, {})['total'] = sv
                 if 'variable_cost' not in expenses:
                     expenses['variable_cost'] = {'total': 0.0, 'subcategories': {}}
                 if 'subcategories' not in expenses['variable_cost']:
@@ -5060,7 +5061,7 @@ async def upload_cost_sheet(file: UploadFile = File(...), db: Session = Depends(
                 for sk, sv in semantic_totals.get("variable_subcategories", {}).items():
                     if sk not in expenses['variable_cost']['subcategories']:
                         expenses['variable_cost']['subcategories'][sk] = {'total': 0.0, 'items': []}
-                    if expenses['variable_cost']['subcategories'][sk].get('total', 0.0) <= 0 and sv > 0:
+                    if sv > 0:
                         expenses['variable_cost']['subcategories'][sk]['total'] = sv
             except Exception as _sem_e:
                 print(f"⚠️ Semantic P&L fallback skipped: {_sem_e}")
