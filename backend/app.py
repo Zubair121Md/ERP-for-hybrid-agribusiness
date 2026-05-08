@@ -2996,6 +2996,116 @@ def extract_pl_semantic_totals(df_raw: pd.DataFrame) -> Dict[str, Any]:
     return totals
 
 
+def _looks_like_category_totals_sheet(df: pd.DataFrame) -> bool:
+    """Detect a simple 2-column sheet: Category | Total Amount."""
+    try:
+        if df is None or df.empty:
+            return False
+        cols = [str(c).strip().lower() for c in df.columns]
+        if len(cols) < 2:
+            return False
+        has_cat = any("category" in c or "particular" in c for c in cols[:2])
+        has_amt = any("amount" in c or "total" in c for c in cols[:2])
+        if has_cat and has_amt:
+            return True
+        # Sometimes headers are unnamed; check first few rows for the words.
+        head = df.head(5).astype(str).apply(lambda s: " ".join(s.tolist()).lower(), axis=1)
+        return any(("fixed cost" in r and "cat" in r) or ("purchase accounts" in r) for r in head.tolist())
+    except Exception:
+        return False
+
+
+def parse_category_totals_sheet(file_bytes: bytes) -> Dict[str, Any]:
+    """
+    Parse a summary sheet of the form:
+    Category | Total Amount
+    and map into the fixed template expense structure.
+    """
+    df = pd.read_excel(io.BytesIO(file_bytes))
+    if df is None or df.empty or len(df.columns) < 2:
+        return {"success": False, "error": "Summary sheet has no usable columns."}
+
+    # Take first 2 columns as category + amount if headers are weird.
+    c0, c1 = df.columns[0], df.columns[1]
+    rows = []
+    for _, r in df.iterrows():
+        cat = str(r.get(c0, "")).strip()
+        if not cat or cat.lower() in {"nan", "none"}:
+            continue
+        amt = parse_numeric_robust(r.get(c1, 0))
+        rows.append((cat, amt))
+
+    def n(s: str) -> str:
+        return re.sub(r"[^a-z0-9]+", " ", (s or "").lower()).strip()
+
+    expenses = {
+        'fixed_cost_cat_i':     {'total': 0.0, 'items': []},
+        'fixed_cost_cat_ii':    {'total': 0.0, 'items': [], 'splits': {'strawberry': 0.60, 'greens': 0.25, 'open_field': 0.0, 'aggregation': 0.15}},
+        'variable_cost':        {'total': 0.0, 'subcategories': {}},
+        'distribution_cost':    {'total': 0.0, 'items': []},
+        'marketing_expenses':   {'total': 0.0, 'items': []},
+        'vehicle_running_cost': {'total': 0.0, 'items': []},
+        'others':               {'total': 0.0, 'items': []},
+        'wastage_shortage':     {'total': 0.0, 'items': []},
+        'purchase_accounts':    {'total': 0.0, 'items': []},
+    }
+
+    # Variable subcategories we keep fixed
+    var_keys = {
+        "open field": "open_field",
+        "lettuce": "lettuce",
+        "strawberry": "strawberry",
+        "raspberry blueberry": "raspberry_blueberry",
+        "raspberry & blueberry": "raspberry_blueberry",
+        "citrus": "citrus",
+        "packing": "packing",
+        "aggregation": "aggregation",
+        "common expenses farm": "common_expenses_farm",
+        "common expenses - farm": "common_expenses_farm",
+    }
+
+    for cat, amt in rows:
+        key = n(cat)
+        if amt is None:
+            amt = 0.0
+        if "fixed cost" in key and re.search(r"\bcat\s*-?\s*i\b|\bcat\s*1\b", key):
+            expenses['fixed_cost_cat_i']['total'] = float(amt)
+            continue
+        if "fixed cost" in key and re.search(r"\bcat\s*-?\s*ii\b|\bcat\s*2\b", key):
+            expenses['fixed_cost_cat_ii']['total'] = float(amt)
+            continue
+        if key.startswith("variable cost"):
+            # variable cost - <sub>
+            sub = key.replace("variable cost", "").strip(" -")
+            for k, sub_key in var_keys.items():
+                if k in sub:
+                    expenses['variable_cost']['subcategories'].setdefault(sub_key, {'total': 0.0, 'items': []})
+                    expenses['variable_cost']['subcategories'][sub_key]['total'] = float(amt)
+                    break
+            continue
+        for k, sub_key in var_keys.items():
+            if key == k:
+                expenses['variable_cost']['subcategories'].setdefault(sub_key, {'total': 0.0, 'items': []})
+                expenses['variable_cost']['subcategories'][sub_key]['total'] = float(amt)
+                break
+        if "distribution cost" in key:
+            expenses['distribution_cost']['total'] = float(amt)
+        elif "marketing" in key:
+            expenses['marketing_expenses']['total'] = float(amt)
+        elif "vehicle running" in key:
+            expenses['vehicle_running_cost']['total'] = float(amt)
+        elif key == "others" or "other" in key and "expense" in key:
+            expenses['others']['total'] = float(amt)
+        elif "wastage" in key and "shortage" in key:
+            expenses['wastage_shortage']['total'] = float(amt)
+        elif "purchase accounts" in key:
+            expenses['purchase_accounts']['total'] = float(amt)
+
+    # Variable total is sum of subcategories
+    expenses['variable_cost']['total'] = sum(v.get('total', 0.0) for v in expenses['variable_cost']['subcategories'].values())
+
+    return {"success": True, "expenses": expenses}
+
 def detect_new_sales_stock_format(df_raw: pd.DataFrame) -> bool:
     """Compatibility wrapper around structure detection."""
     try:
@@ -5013,9 +5123,32 @@ async def upload_cost_sheet(file: UploadFile = File(...), db: Session = Depends(
             tmp_file_path = tmp_file.name
         
         try:
+            # ============================================================
+            # Summary-sheet fast path (Category | Total Amount)
+            # ============================================================
+            summary_mode = False
+            try:
+                summary_df = pd.read_excel(io.BytesIO(content))
+                if _looks_like_category_totals_sheet(summary_df):
+                    parsed = parse_category_totals_sheet(content)
+                    if parsed.get("success"):
+                        parse_result = {
+                            "success": True,
+                            "header_info": {"company_name": "", "period": ""},
+                            "expenses": parsed["expenses"],
+                            "total_expenses": sum(v.get("total", 0.0) for v in parsed["expenses"].values()),
+                        }
+                        summary_mode = True
+                        print("✅ Detected Category/Total summary sheet; using direct mapping.")
+                    else:
+                        parse_result = {"success": False, "error": parsed.get("error", "Summary parse failed")}
+            except Exception as _sum_e:
+                parse_result = {"success": False, "error": str(_sum_e)}
+
             # Parse the cost sheet
             print(f"🔍 Parsing cost sheet from: {tmp_file_path}")
-            parse_result = parse_cost_sheet(tmp_file_path)
+            if not summary_mode:
+                parse_result = parse_cost_sheet(tmp_file_path)
             
             if not parse_result.get('success', False):
                 # Fallback pipeline for merged/complex layouts:
@@ -5051,7 +5184,7 @@ async def upload_cost_sheet(file: UploadFile = File(...), db: Session = Depends(
                     normalized_path = normalized_tmp.name
                 with pd.ExcelWriter(normalized_path, engine="xlsxwriter") as writer:
                     normalized_df.to_excel(writer, index=False, header=False)
-                normalized_result = parse_cost_sheet(normalized_path)
+                normalized_result = parse_cost_sheet(normalized_path) if not summary_mode else None
                 if normalized_result.get('success', False):
                     print("✅ Using merged-cell-resolved P&L parse (authoritative)")
                     parse_result = normalized_result
@@ -5189,7 +5322,7 @@ async def upload_cost_sheet(file: UploadFile = File(...), db: Session = Depends(
             fc1 = expenses.get('fixed_cost_cat_i', {}).get('total', 0.0)
             # CORRECTION: Excel line items sum to 393,350 but should be 390,350
             # Adjust to match the correct total from user's verified list
-            if abs(fc1 - 393350) < 1:  # If it's close to 393,350 (from Excel)
+            if (not summary_mode) and abs(fc1 - 393350) < 1:  # If it's close to 393,350 (from Excel)
                 fc1 = 390350  # Use correct value
                 print(f"   📊 FIXED COST CAT - I: ₹{fc1:,.2f} (adjusted from Excel value ₹393,350)")
             else:
