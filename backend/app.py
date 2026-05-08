@@ -2754,6 +2754,168 @@ def detect_sales_structure(df_raw: pd.DataFrame) -> Dict[str, Any]:
     }
 
 
+def semantic_map_sales_columns(df_raw: pd.DataFrame, blocks_row: int, qty_row: int, particulars_row: Optional[int]) -> Dict[str, Optional[int]]:
+    """
+    Semantic Column Mapper for stock-flow sales sheet.
+    Maps block headers to quantity/rate/value columns using merged-cell-resolved rows.
+    """
+    top = df_raw.iloc[blocks_row]
+    sub = df_raw.iloc[qty_row]
+    cols = len(df_raw.columns)
+
+    def norm(v: Any) -> str:
+        return str(v).strip().upper() if pd.notna(v) else ""
+
+    block_positions: Dict[str, List[int]] = {
+        "OPENING STOCK": [],
+        "HARVEST": [],
+        "PURCHASE": [],
+        "TOTAL INWARD": [],
+        "SALES": [],
+        "WASTAGE IN DISPATCH": [],
+        "WASTAGE IN FARM": [],
+        "TOTAL OUTWARD": [],
+        "CLOSING STOCK": [],
+    }
+
+    for c in range(cols):
+        topv = norm(top.iloc[c])
+        for block in block_positions.keys():
+            if block in topv:
+                block_positions[block].append(c)
+
+    def pick(block: str, sub_header: str) -> Optional[int]:
+        for c in block_positions.get(block, []):
+            if sub_header in norm(sub.iloc[c]):
+                return c
+        return None
+
+    c_particulars = None
+    if particulars_row is not None:
+        prow = df_raw.iloc[particulars_row]
+        for c in range(cols):
+            if "PARTICULARS" in norm(prow.iloc[c]):
+                c_particulars = c
+                break
+    if c_particulars is None:
+        c_particulars = 0
+
+    return {
+        "particulars": c_particulars,
+        "open_qty": pick("OPENING STOCK", "QUANTITY"),
+        "harvest_qty": pick("HARVEST", "QUANTITY"),
+        "purchase_qty": pick("PURCHASE", "QUANTITY"),
+        "total_inward_qty": pick("TOTAL INWARD", "QUANTITY"),
+        "purchase_rate": pick("PURCHASE", "EFF. RATE"),
+        "purchase_value": pick("PURCHASE", "VALUE"),
+        "sales_qty": pick("SALES", "QUANTITY"),
+        "sales_rate": pick("SALES", "EFF. RATE"),
+        "sales_value": pick("SALES", "VALUE"),
+        "wd_qty": pick("WASTAGE IN DISPATCH", "QUANTITY"),
+        "wf_qty": pick("WASTAGE IN FARM", "QUANTITY"),
+        "total_outward_qty": pick("TOTAL OUTWARD", "QUANTITY"),
+        "closing_qty": pick("CLOSING STOCK", "QUANTITY"),
+    }
+
+
+def extract_pl_semantic_totals(df_raw: pd.DataFrame) -> Dict[str, Any]:
+    """
+    Section-aware fallback extractor for P&L with sparse/merged rows.
+    It tracks current section and captures material maxima per section/subsection.
+    """
+    def norm(v: Any) -> str:
+        return str(v).strip().upper() if pd.notna(v) else ""
+
+    section = None
+    variable_sub = None
+    totals = {
+        "fixed_cost_cat_i": 0.0,
+        "fixed_cost_cat_ii": 0.0,
+        "distribution_cost": 0.0,
+        "marketing_expenses": 0.0,
+        "vehicle_running_cost": 0.0,
+        "others": 0.0,
+        "wastage_shortage": 0.0,
+        "purchase_accounts": 0.0,
+        "variable_subcategories": {
+            "open_field": 0.0,
+            "lettuce": 0.0,
+            "strawberry": 0.0,
+            "raspberry_blueberry": 0.0,
+            "packing": 0.0,
+            "aggregation": 0.0,
+        }
+    }
+
+    for r in range(len(df_raw)):
+        row = df_raw.iloc[r]
+        txt = " ".join([norm(v) for v in row.tolist() if pd.notna(v) and str(v).strip()])
+        if not txt:
+            continue
+
+        # Section headers
+        if "FIXED COST" in txt and "CAT" in txt and "II" not in txt and "-II" not in txt:
+            section = "fixed_cost_cat_i"
+            variable_sub = None
+        elif "FIXED COST" in txt and ("CAT -II" in txt or "CAT - II" in txt or "CAT -2" in txt or "CAT II" in txt):
+            section = "fixed_cost_cat_ii"
+            variable_sub = None
+        elif "VARIABLE COST" in txt:
+            section = "variable"
+            variable_sub = None
+        elif "DISTRIBUTION COST" in txt:
+            section = "distribution_cost"
+            variable_sub = None
+        elif "MARKETING EXPENSES" in txt:
+            section = "marketing_expenses"
+            variable_sub = None
+        elif "VEHICLE RUNNING COST" in txt:
+            section = "vehicle_running_cost"
+            variable_sub = None
+        elif txt.strip() == "OTHERS" or " 6 OTHERS" in txt:
+            section = "others"
+            variable_sub = None
+        elif "WASTAGE" in txt and "SHORTAGE" in txt:
+            section = "wastage_shortage"
+            variable_sub = None
+        elif "PURCHASE ACCOUNTS" in txt:
+            section = "purchase_accounts"
+            variable_sub = None
+        elif "INCOME" == txt.strip():
+            section = None
+            variable_sub = None
+
+        # Variable sub section headers
+        if section == "variable":
+            if "OPEN FIELD" in txt and ("A)" in txt or ":" in txt):
+                variable_sub = "open_field"
+            elif "LETTUCE" in txt and ("B)" in txt or ":" in txt):
+                variable_sub = "lettuce"
+            elif "STRAWBERRY" in txt and ("C)" in txt or ":" in txt):
+                variable_sub = "strawberry"
+            elif ("RASPBERRY" in txt or "BLUBERRY" in txt or "BLUEBERRY" in txt) and ("D)" in txt or ":" in txt):
+                variable_sub = "raspberry_blueberry"
+            elif "PACKING" in txt and ("E)" in txt or ":" in txt):
+                variable_sub = "packing"
+            elif "AGGREGATION" in txt and ("F)" in txt or ":" in txt):
+                variable_sub = "aggregation"
+
+        nums = [parse_numeric_robust(v) for v in row.tolist() if pd.notna(v)]
+        nums = [n for n in nums if abs(n) > 0]
+        if not nums:
+            continue
+
+        row_max = max(nums)
+        if section in {"fixed_cost_cat_i", "fixed_cost_cat_ii", "distribution_cost", "marketing_expenses", "vehicle_running_cost", "others", "wastage_shortage", "purchase_accounts"}:
+            if row_max > totals[section]:
+                totals[section] = row_max
+        elif section == "variable" and variable_sub:
+            if row_max > totals["variable_subcategories"][variable_sub]:
+                totals["variable_subcategories"][variable_sub] = row_max
+
+    return totals
+
+
 def detect_new_sales_stock_format(df_raw: pd.DataFrame) -> bool:
     """Compatibility wrapper around structure detection."""
     try:
@@ -2781,44 +2943,31 @@ def parse_new_sales_stock_format(df_raw: pd.DataFrame, db: Session, file_name: s
     if qty_row_idx is None:
         return {"success": False, "message": "Invalid file: missing Quantity/Eff. Rate/Value row.", "products_created": 0, "sales_created": 0, "parsed_data": [], "errors": ["Sub-header row missing"]}
 
-    top_headers = df_raw.iloc[header_row_idx].ffill()
-    sub_headers = df_raw.iloc[qty_row_idx]
+    mapped = semantic_map_sales_columns(df_raw, header_row_idx, qty_row_idx, particulars_row_idx)
+    c_particulars = mapped["particulars"] if mapped["particulars"] is not None else 0
+    c_open_qty = mapped["open_qty"]
+    c_harvest_qty = mapped["harvest_qty"]
+    c_purchase_qty = mapped["purchase_qty"]
+    c_total_inward_qty = mapped["total_inward_qty"]
+    c_purchase_rate = mapped["purchase_rate"]
+    c_purchase_value = mapped["purchase_value"]
+    c_sales_qty = mapped["sales_qty"]
+    c_sales_rate = mapped["sales_rate"]
+    c_sales_value = mapped["sales_value"]
+    c_wd_qty = mapped["wd_qty"]
+    c_wf_qty = mapped["wf_qty"]
+    c_total_outward_qty = mapped["total_outward_qty"]
+    c_closing_qty = mapped["closing_qty"]
 
-    def _norm_header(x: Any) -> str:
-        return str(x).strip().upper() if pd.notna(x) else ""
-
-    col_map: Dict[tuple, int] = {}
-    for idx in range(len(df_raw.columns)):
-        col_map[(_norm_header(top_headers.iloc[idx]), _norm_header(sub_headers.iloc[idx]))] = idx
-
-    def get_col(top: str, sub: str = "QUANTITY") -> Optional[int]:
-        return col_map.get((top.upper(), sub.upper()))
-
-    c_particulars = get_col("PARTICULARS", "")
-    if c_particulars is None and particulars_row_idx is not None:
-        # Find the column that contains "Particulars" in its dedicated row
-        p_row = df_raw.iloc[particulars_row_idx]
-        for idx in range(len(df_raw.columns)):
-            cell = str(p_row.iloc[idx]).strip().upper() if pd.notna(p_row.iloc[idx]) else ""
-            if "PARTICULARS" in cell:
-                c_particulars = idx
-                break
-    if c_particulars is None:
-        c_particulars = 0
-
-    c_open_qty = get_col("OPENING STOCK", "QUANTITY")
-    c_harvest_qty = get_col("HARVEST", "QUANTITY")
-    c_purchase_qty = get_col("PURCHASE", "QUANTITY")
-    c_total_inward_qty = get_col("TOTAL INWARD", "QUANTITY")
-    c_purchase_rate = get_col("PURCHASE", "EFF. RATE")
-    c_purchase_value = get_col("PURCHASE", "VALUE")
-    c_sales_qty = get_col("SALES", "QUANTITY")
-    c_sales_rate = get_col("SALES", "EFF. RATE")
-    c_sales_value = get_col("SALES", "VALUE")
-    c_wd_qty = get_col("WASTAGE IN DISPATCH", "QUANTITY")
-    c_wf_qty = get_col("WASTAGE IN FARM", "QUANTITY")
-    c_total_outward_qty = get_col("TOTAL OUTWARD", "QUANTITY")
-    c_closing_qty = get_col("CLOSING STOCK", "QUANTITY")
+    if c_sales_qty is None:
+        return {
+            "success": False,
+            "message": "Sales Quantity column not detected in new sales format.",
+            "products_created": 0,
+            "sales_created": 0,
+            "parsed_data": [],
+            "errors": ["Sales Quantity column missing"]
+        }
 
     month = "2026-03"
     month_re = re.compile(r"(\d{1,2})[-_/ ]([A-Za-z]{3})[-_/ ](\d{2,4})")
@@ -2933,17 +3082,17 @@ def parse_new_sales_stock_format(df_raw: pd.DataFrame, db: Session, file_name: s
                 db.add(MonthlySale(product_id=inhouse_product.id, month=month, quantity=inhouse_sales_qty, sale_price=sales_rate, direct_cost=0.0, inward_quantity=harvest_qty, inward_rate=0.0, inward_value=0.0, inhouse_production=harvest_qty, wastage=total_wastage * inhouse_share))
                 db.add(MonthlySale(product_id=outsourced_product.id, month=month, quantity=outsourced_sales_qty, sale_price=sales_rate, direct_cost=purchase_value, inward_quantity=purchase_qty, inward_rate=purchase_rate, inward_value=purchase_value, inhouse_production=0.0, wastage=total_wastage * outsourced_share))
                 sales_created += 2
-                parsed_data.append(ExcelRowData(month=month, particulars=particulars, type="Both", inward_quantity=total_inward_qty, inward_rate=purchase_rate, inward_value=purchase_value, outward_quantity=total_outward_qty, outward_rate=sales_rate, outward_value=sales_value if sales_value > 0 else (revenue_qty * sales_rate), inhouse_production=harvest_qty, wastage=total_wastage))
+                parsed_data.append(ExcelRowData(month=month, particulars=particulars, type="Both", inward_quantity=total_inward_qty, inward_rate=purchase_rate, inward_value=purchase_value, outward_quantity=revenue_qty, outward_rate=sales_rate, outward_value=sales_value if sales_value > 0 else (revenue_qty * sales_rate), inhouse_production=harvest_qty, wastage=total_wastage))
             elif harvest_qty > 0:
                 product = upsert_product(f"{particulars} (Inhouse)", "inhouse")
                 db.add(MonthlySale(product_id=product.id, month=month, quantity=revenue_qty, sale_price=sales_rate, direct_cost=0.0, inward_quantity=total_inward_qty, inward_rate=0.0, inward_value=0.0, inhouse_production=harvest_qty, wastage=total_wastage))
                 sales_created += 1
-                parsed_data.append(ExcelRowData(month=month, particulars=particulars, type="Inhouse", inward_quantity=total_inward_qty, inward_rate=0.0, inward_value=0.0, outward_quantity=total_outward_qty, outward_rate=sales_rate, outward_value=sales_value if sales_value > 0 else (revenue_qty * sales_rate), inhouse_production=harvest_qty, wastage=total_wastage))
+                parsed_data.append(ExcelRowData(month=month, particulars=particulars, type="Inhouse", inward_quantity=total_inward_qty, inward_rate=0.0, inward_value=0.0, outward_quantity=revenue_qty, outward_rate=sales_rate, outward_value=sales_value if sales_value > 0 else (revenue_qty * sales_rate), inhouse_production=harvest_qty, wastage=total_wastage))
             else:
                 product = upsert_product(f"{particulars} (Outsourced)", "outsourced")
                 db.add(MonthlySale(product_id=product.id, month=month, quantity=revenue_qty, sale_price=sales_rate, direct_cost=purchase_value if purchase_value > 0 else total_inward_qty * purchase_rate, inward_quantity=total_inward_qty if total_inward_qty > 0 else purchase_qty, inward_rate=purchase_rate, inward_value=purchase_value if purchase_value > 0 else total_inward_qty * purchase_rate, inhouse_production=0.0, wastage=total_wastage))
                 sales_created += 1
-                parsed_data.append(ExcelRowData(month=month, particulars=particulars, type="Outsourced", inward_quantity=total_inward_qty if total_inward_qty > 0 else purchase_qty, inward_rate=purchase_rate, inward_value=purchase_value if purchase_value > 0 else total_inward_qty * purchase_rate, outward_quantity=total_outward_qty, outward_rate=sales_rate, outward_value=sales_value if sales_value > 0 else (revenue_qty * sales_rate), inhouse_production=0.0, wastage=total_wastage))
+                parsed_data.append(ExcelRowData(month=month, particulars=particulars, type="Outsourced", inward_quantity=total_inward_qty if total_inward_qty > 0 else purchase_qty, inward_rate=purchase_rate, inward_value=purchase_value if purchase_value > 0 else total_inward_qty * purchase_rate, outward_quantity=revenue_qty, outward_rate=sales_rate, outward_value=sales_value if sales_value > 0 else (revenue_qty * sales_rate), inhouse_production=0.0, wastage=total_wastage))
         except Exception as e:
             errors.append(f"Row {ridx + 1}: {e}")
 
@@ -4813,6 +4962,25 @@ async def upload_cost_sheet(file: UploadFile = File(...), db: Session = Depends(
             # Extract data
             header_info = parse_result.get('header_info', {})
             expenses = parse_result.get('expenses', {})
+            # Semantic fallback/augmentation for sparse merged layouts
+            try:
+                semantic_layout = read_excel_layout_with_openpyxl(content)
+                semantic_totals = extract_pl_semantic_totals(semantic_layout["df_raw"])
+                # Fill/override missing zeros using semantic section maxima
+                for k in ['fixed_cost_cat_i', 'fixed_cost_cat_ii', 'distribution_cost', 'marketing_expenses', 'vehicle_running_cost', 'others', 'wastage_shortage', 'purchase_accounts']:
+                    if expenses.get(k, {}).get('total', 0.0) <= 0 and semantic_totals.get(k, 0.0) > 0:
+                        expenses.setdefault(k, {})['total'] = semantic_totals[k]
+                if 'variable_cost' not in expenses:
+                    expenses['variable_cost'] = {'total': 0.0, 'subcategories': {}}
+                if 'subcategories' not in expenses['variable_cost']:
+                    expenses['variable_cost']['subcategories'] = {}
+                for sk, sv in semantic_totals.get("variable_subcategories", {}).items():
+                    if sk not in expenses['variable_cost']['subcategories']:
+                        expenses['variable_cost']['subcategories'][sk] = {'total': 0.0, 'items': []}
+                    if expenses['variable_cost']['subcategories'][sk].get('total', 0.0) <= 0 and sv > 0:
+                        expenses['variable_cost']['subcategories'][sk]['total'] = sv
+            except Exception as _sem_e:
+                print(f"⚠️ Semantic P&L fallback skipped: {_sem_e}")
             
             # Extract month from period (e.g., "COST ANALYSIS-APRIL TO NOVEMBER-2025" -> "2025-04")
             period = header_info.get('period', '')
