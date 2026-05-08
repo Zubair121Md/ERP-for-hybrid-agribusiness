@@ -736,6 +736,20 @@ class CostAllocationEngine:
             # Get costs for selected month only (normalized key match)
             costs_all = self.db.query(Cost).all()
             costs = [c for c in costs_all if _to_month_key(c.month) == target_month]
+
+            # Fallback: if requested month has no matching data, use latest month that has BOTH sales and costs.
+            if not costs or not monthly_sales:
+                sales_months = sorted({ _to_month_key(s.month) for s in monthly_sales_all if _to_month_key(s.month) })
+                cost_months = sorted({ _to_month_key(c.month) for c in costs_all if _to_month_key(c.month) })
+                common_months = sorted(set(sales_months).intersection(set(cost_months)))
+                if common_months:
+                    fallback_month = common_months[-1]
+                    if fallback_month != target_month:
+                        print(f"⚠️ Allocation month '{target_month}' has missing data. Falling back to latest common month '{fallback_month}'.")
+                        target_month = fallback_month
+                        monthly_sales = [s for s in monthly_sales_all if _to_month_key(s.month) == target_month]
+                        sales_map = {s.product_id: s for s in monthly_sales}
+                        costs = [c for c in costs_all if _to_month_key(c.month) == target_month]
             
             if not costs:
                 raise HTTPException(
