@@ -701,19 +701,19 @@ class CostAllocationEngine:
         # Allocatable overhead splits by sold quantity (kg) per product; purchase/direct lines are not allocated.
 
     def allocate_costs_for_month(self, month: str) -> Dict[str, Any]:
-        """Enhanced allocation function - works with all data regardless of month"""
+        """Allocate costs using selected month data only."""
         
         try:
-            # Get all active products (ignore month)
+            # Get all active products
             products = self.db.query(Product).filter(Product.is_active == True).all()
             product_map = {p.id: p for p in products}
             
-            # Get all monthly sales (ignore month)
-            monthly_sales = self.db.query(MonthlySale).all()
+            # Get sales for selected month only
+            monthly_sales = self.db.query(MonthlySale).filter(MonthlySale.month == month).all()
             sales_map = {s.product_id: s for s in monthly_sales}
             
-            # Get all costs (ignore month)
-            costs = self.db.query(Cost).all()
+            # Get costs for selected month only
+            costs = self.db.query(Cost).filter(Cost.month == month).all()
             
             if not costs:
                 raise HTTPException(
@@ -764,24 +764,17 @@ class CostAllocationEngine:
         if not applicable_products:
             return
         
-        # Step 2: Prefer net sold kg (sales − damage/wastage) summed over applicable products — from uploaded
-        # production tables / sales rows. Falls back to official denominator or gross kg if net is zero.
-        net_weights: Dict[int, float] = {}
-        net_total = 0.0
-        for product_id in applicable_products:
-            if product_id not in sales_map:
-                continue
-            sale = sales_map[product_id]
-            net_weights[product_id] = self._net_product_basis(cost, sale)
-            net_total += net_weights[product_id]
-
-        use_net_weights = net_total > 0
-        if use_net_weights:
-            total_basis_dec = Decimal(str(net_total))
-            cost.allocation_denominator_kg = float(net_total)
-            if cost.name and "AGGREGATION" in (cost.name or "").upper():
-                print(f"   📊 {cost.name}: net allocation kg (sold − damage) = {net_total:,.3f}")
+        # Step 2: For sales_kg basis, use uploaded sales kg directly (already post-wastage in your process).
+        # Do NOT subtract wastage again.
+        use_direct_sales_kg = (cost.basis == "sales_kg")
+        if use_direct_sales_kg:
+            total_basis_f = self._compute_total_basis(cost, applicable_products, sales_map)
+            if total_basis_f <= 0:
+                return
+            total_basis_dec = Decimal(str(total_basis_f))
+            cost.allocation_denominator_kg = float(total_basis_f)
         else:
+            # Non-sales_kg paths retain denominator fallback behavior.
             den = getattr(cost, "allocation_denominator_kg", None)
             if den is None or den <= 0:
                 den = _lookup_allocation_denominator_kg(cost.name)
@@ -803,10 +796,7 @@ class CostAllocationEngine:
                 continue
                 
             sale = sales_map[product_id]
-            if use_net_weights:
-                product_basis = net_weights.get(product_id, 0.0)
-            else:
-                product_basis = self._compute_product_basis(cost, sale)
+            product_basis = self._compute_product_basis(cost, sale)
             
             if product_basis > 0:
                 pb = Decimal(str(product_basis))
