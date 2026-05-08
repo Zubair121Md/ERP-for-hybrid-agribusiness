@@ -92,7 +92,7 @@ function showTab(tabName) {
         'costs': { title: 'Costs', subtitle: 'Manage Operational Costs' },
         'allocation': { title: 'Allocation', subtitle: 'Cost Distribution Analysis' },
         'data-upload': { title: 'Data Upload', subtitle: 'Upload Sales & P&L Data' },
-        'harvest-mapping': { title: 'Harvest & Mapping', subtitle: 'Upload Harvest Data & Product-Section Mappings' },
+        'harvest-mapping': { title: 'Mapping', subtitle: 'Upload Product-Section Mappings' },
         'settings': { title: 'Settings', subtitle: 'System Configuration' }
     };
     
@@ -112,8 +112,8 @@ function showTab(tabName) {
     } else if (tabName === 'costs') {
         loadCosts();
     } else if (tabName === 'harvest-mapping') {
-        // No data loading needed for harvest-mapping tab
-        console.log('✅ Harvest & Mapping tab activated');
+        // No data loading needed for mapping tab
+        console.log('✅ Mapping tab activated');
     }
 }
 

@@ -2060,7 +2060,12 @@ async def upload_excel(file: UploadFile = File(...), db: Session = Depends(get_d
     try:
         # Read Excel file
         contents = await file.read()
+        df_raw = pd.read_excel(io.BytesIO(contents), header=None)
         df = pd.read_excel(io.BytesIO(contents))
+
+        # New single sales format parser (Opening/Harvest/Purchase/.../Closing Stock)
+        if detect_new_sales_stock_format(df_raw):
+            return parse_new_sales_stock_format(df_raw, db, file.filename)
         
         print(f"📋 Excel columns: {list(df.columns)}")
         print(f"📊 Total rows: {len(df)}")
@@ -2160,24 +2165,6 @@ async def upload_excel(file: UploadFile = File(...), db: Session = Depends(get_d
                 "parsed_data": [],
                 "errors": [f"Missing columns: {', '.join(missing_keys)}"]
             }
-        
-        # ============================================
-        # CHECK IF HARVEST DATA EXISTS FIRST
-        # ============================================
-        harvest_count = db.query(HarvestData).count()
-        
-        if harvest_count == 0:
-            return {
-                "success": False,
-                "message": "Please upload harvest data first before uploading sales data. Harvest data is required to properly split 'Both' and 'Outsourced' products into Inhouse and Outsourced portions.",
-                "products_created": 0,
-                "sales_created": 0,
-                "parsed_data": [],
-                "errors": ["No harvest data found. Please upload harvest data first."],
-                "requires_harvest": True
-            }
-        
-        print(f"✅ Found {harvest_count} harvest records - proceeding with sales upload...")
         
         parsed_data = []
         errors = []
@@ -2590,15 +2577,6 @@ async def upload_excel(file: UploadFile = File(...), db: Session = Depends(get_d
         
         db.commit()
         
-        # ============================================
-        # CLEAR OLD HARVEST DATA AFTER SALES PROCESSING (RESET)
-        # Clear harvest data after we've used it for splitting products
-        # ============================================
-        print("🧹 Clearing harvest data after sales processing (reset)...")
-        deleted_count = db.query(HarvestData).delete()
-        db.commit()
-        print(f"   ✅ Cleared {deleted_count} harvest records after sales processing")
-        
         try:
             refresh_allocation_denominator_kg_for_all_costs(db)
         except Exception as _den_e:
@@ -2717,6 +2695,199 @@ def parse_numeric_robust(value):
         return float(value_str)
     except (ValueError, TypeError):
         return 0.0
+
+
+def detect_new_sales_stock_format(df_raw: pd.DataFrame) -> bool:
+    """Detect new sales sheet format with Opening/Harvest/Purchase/Wastage blocks."""
+    try:
+        max_rows = min(40, len(df_raw))
+        for r in range(max_rows):
+            row_vals = [str(v).strip().upper() for v in df_raw.iloc[r].tolist() if pd.notna(v)]
+            if not row_vals:
+                continue
+            row_text = " ".join(row_vals)
+            if "PARTICULARS" in row_text and ("OPENING STOCK" in row_text or "HARVEST" in row_text) and ("TOTAL OUTWARD" in row_text or "CLOSING STOCK" in row_text):
+                print("✅ Detected new sales stock format")
+                return True
+        return False
+    except Exception:
+        return False
+
+
+def parse_new_sales_stock_format(df_raw: pd.DataFrame, db: Session, file_name: str) -> Dict[str, Any]:
+    """Parse single-file sales format with multi-row headers and stock/wastage columns."""
+    print(f"🚀 Parsing new sales stock format from: {file_name}")
+    parsed_data = []
+    errors: List[str] = []
+    products_created = 0
+    sales_created = 0
+    rows_processed = 0
+
+    header_row_idx = None
+    for r in range(min(60, len(df_raw))):
+        row_vals = [str(v).strip().upper() for v in df_raw.iloc[r].tolist() if pd.notna(v)]
+        if not row_vals:
+            continue
+        row_text = " ".join(row_vals)
+        if "PARTICULARS" in row_text and ("OPENING STOCK" in row_text or "HARVEST" in row_text) and ("TOTAL OUTWARD" in row_text or "CLOSING STOCK" in row_text):
+            header_row_idx = r
+            break
+
+    if header_row_idx is None:
+        return {"success": False, "message": "Could not detect header row for new sales format.", "products_created": 0, "sales_created": 0, "parsed_data": [], "errors": ["Header row not found"]}
+
+    sub_header_idx = header_row_idx + 1
+    if sub_header_idx >= len(df_raw):
+        return {"success": False, "message": "Invalid file: missing sub-header row.", "products_created": 0, "sales_created": 0, "parsed_data": [], "errors": ["Sub-header row missing"]}
+
+    top_headers = df_raw.iloc[header_row_idx].ffill()
+    sub_headers = df_raw.iloc[sub_header_idx]
+
+    def _norm_header(x: Any) -> str:
+        return str(x).strip().upper() if pd.notna(x) else ""
+
+    col_map: Dict[tuple, int] = {}
+    for idx in range(len(df_raw.columns)):
+        col_map[(_norm_header(top_headers.iloc[idx]), _norm_header(sub_headers.iloc[idx]))] = idx
+
+    def get_col(top: str, sub: str = "QUANTITY") -> Optional[int]:
+        return col_map.get((top.upper(), sub.upper()))
+
+    c_particulars = get_col("PARTICULARS", "")
+    if c_particulars is None:
+        c_particulars = 0
+
+    c_open_qty = get_col("OPENING STOCK", "QUANTITY")
+    c_harvest_qty = get_col("HARVEST", "QUANTITY")
+    c_purchase_qty = get_col("PURCHASE", "QUANTITY")
+    c_total_inward_qty = get_col("TOTAL INWARD", "QUANTITY")
+    c_purchase_rate = get_col("PURCHASE", "EFF. RATE")
+    c_purchase_value = get_col("PURCHASE", "VALUE")
+    c_sales_qty = get_col("SALES", "QUANTITY")
+    c_sales_rate = get_col("SALES", "EFF. RATE")
+    c_sales_value = get_col("SALES", "VALUE")
+    c_wd_qty = get_col("WASTAGE IN DISPATCH", "QUANTITY")
+    c_wf_qty = get_col("WASTAGE IN FARM", "QUANTITY")
+    c_total_outward_qty = get_col("TOTAL OUTWARD", "QUANTITY")
+    c_closing_qty = get_col("CLOSING STOCK", "QUANTITY")
+
+    month = "2026-03"
+    month_re = re.compile(r"(\d{1,2})[-_/ ]([A-Za-z]{3})[-_/ ](\d{2,4})")
+    for r in range(max(0, header_row_idx - 8), header_row_idx):
+        for cell in df_raw.iloc[r].tolist():
+            text = str(cell).strip()
+            m = month_re.search(text)
+            if m:
+                day = int(m.group(1))
+                mon = m.group(2).title()
+                year = m.group(3)
+                if len(year) == 2:
+                    year = f"20{year}"
+                try:
+                    dt = datetime.strptime(f"{day}-{mon}-{year}", "%d-%b-%Y")
+                    month = dt.strftime("%Y-%m")
+                    break
+                except Exception:
+                    pass
+        if month != "2026-03":
+            break
+
+    def parse_cell(row, idx: Optional[int]) -> float:
+        if idx is None or idx >= len(row):
+            return 0.0
+        return parse_numeric_robust(row.iloc[idx])
+
+    def upsert_product(product_name: str, source: str, unit: str = "kg") -> Product:
+        nonlocal products_created
+        product = db.query(Product).filter(Product.name == product_name).first()
+        if not product:
+            product = Product(name=product_name, source=source, unit=unit)
+            db.add(product)
+            db.commit()
+            db.refresh(product)
+            products_created += 1
+        return product
+
+    for ridx in range(sub_header_idx + 1, len(df_raw)):
+        row = df_raw.iloc[ridx]
+        particulars = str(row.iloc[c_particulars]).strip() if c_particulars < len(row) else ""
+        if not particulars or particulars.lower() in {"nan", "none", ""}:
+            continue
+
+        open_qty = parse_cell(row, c_open_qty)
+        harvest_qty = parse_cell(row, c_harvest_qty)
+        purchase_qty = parse_cell(row, c_purchase_qty)
+        total_inward_qty = parse_cell(row, c_total_inward_qty)
+        sales_qty = parse_cell(row, c_sales_qty)
+        sales_rate = parse_cell(row, c_sales_rate)
+        sales_value = parse_cell(row, c_sales_value)
+        wd_qty = parse_cell(row, c_wd_qty)
+        wf_qty = parse_cell(row, c_wf_qty)
+        total_outward_qty = parse_cell(row, c_total_outward_qty)
+        _closing_qty = parse_cell(row, c_closing_qty)
+        purchase_rate = parse_cell(row, c_purchase_rate)
+        purchase_value = parse_cell(row, c_purchase_value)
+
+        if total_inward_qty <= 0:
+            total_inward_qty = max(0.0, open_qty + harvest_qty + purchase_qty)
+        if total_outward_qty <= 0:
+            total_outward_qty = max(0.0, sales_qty + wd_qty + wf_qty)
+        if sales_value <= 0 and sales_qty > 0 and sales_rate > 0:
+            sales_value = sales_qty * sales_rate
+        if sales_rate <= 0 and sales_qty > 0 and sales_value > 0:
+            sales_rate = sales_value / sales_qty
+        if purchase_value <= 0 and purchase_qty > 0 and purchase_rate > 0:
+            purchase_value = purchase_qty * purchase_rate
+
+        if total_inward_qty <= 0 and total_outward_qty <= 0:
+            continue
+        rows_processed += 1
+        total_wastage = max(0.0, wd_qty + wf_qty)
+        revenue_qty = sales_qty if sales_qty > 0 else total_outward_qty
+
+        try:
+            if harvest_qty > 0 and purchase_qty > 0:
+                base_qty = harvest_qty + purchase_qty
+                inhouse_share = harvest_qty / base_qty if base_qty > 0 else 0.0
+                outsourced_share = purchase_qty / base_qty if base_qty > 0 else 0.0
+                inhouse_sales_qty = revenue_qty * inhouse_share
+                outsourced_sales_qty = revenue_qty * outsourced_share
+
+                inhouse_product = upsert_product(f"{particulars} (Inhouse)", "inhouse")
+                outsourced_product = upsert_product(f"{particulars} (Outsourced)", "outsourced")
+                db.add(MonthlySale(product_id=inhouse_product.id, month=month, quantity=inhouse_sales_qty, sale_price=sales_rate, direct_cost=0.0, inward_quantity=harvest_qty, inward_rate=0.0, inward_value=0.0, inhouse_production=harvest_qty, wastage=total_wastage * inhouse_share))
+                db.add(MonthlySale(product_id=outsourced_product.id, month=month, quantity=outsourced_sales_qty, sale_price=sales_rate, direct_cost=purchase_value, inward_quantity=purchase_qty, inward_rate=purchase_rate, inward_value=purchase_value, inhouse_production=0.0, wastage=total_wastage * outsourced_share))
+                sales_created += 2
+                parsed_data.append(ExcelRowData(month=month, particulars=particulars, type="Both", inward_quantity=total_inward_qty, inward_rate=purchase_rate, inward_value=purchase_value, outward_quantity=total_outward_qty, outward_rate=sales_rate, outward_value=sales_value if sales_value > 0 else (revenue_qty * sales_rate), inhouse_production=harvest_qty, wastage=total_wastage))
+            elif harvest_qty > 0:
+                product = upsert_product(f"{particulars} (Inhouse)", "inhouse")
+                db.add(MonthlySale(product_id=product.id, month=month, quantity=revenue_qty, sale_price=sales_rate, direct_cost=0.0, inward_quantity=total_inward_qty, inward_rate=0.0, inward_value=0.0, inhouse_production=harvest_qty, wastage=total_wastage))
+                sales_created += 1
+                parsed_data.append(ExcelRowData(month=month, particulars=particulars, type="Inhouse", inward_quantity=total_inward_qty, inward_rate=0.0, inward_value=0.0, outward_quantity=total_outward_qty, outward_rate=sales_rate, outward_value=sales_value if sales_value > 0 else (revenue_qty * sales_rate), inhouse_production=harvest_qty, wastage=total_wastage))
+            else:
+                product = upsert_product(f"{particulars} (Outsourced)", "outsourced")
+                db.add(MonthlySale(product_id=product.id, month=month, quantity=revenue_qty, sale_price=sales_rate, direct_cost=purchase_value if purchase_value > 0 else total_inward_qty * purchase_rate, inward_quantity=total_inward_qty if total_inward_qty > 0 else purchase_qty, inward_rate=purchase_rate, inward_value=purchase_value if purchase_value > 0 else total_inward_qty * purchase_rate, inhouse_production=0.0, wastage=total_wastage))
+                sales_created += 1
+                parsed_data.append(ExcelRowData(month=month, particulars=particulars, type="Outsourced", inward_quantity=total_inward_qty if total_inward_qty > 0 else purchase_qty, inward_rate=purchase_rate, inward_value=purchase_value if purchase_value > 0 else total_inward_qty * purchase_rate, outward_quantity=total_outward_qty, outward_rate=sales_rate, outward_value=sales_value if sales_value > 0 else (revenue_qty * sales_rate), inhouse_production=0.0, wastage=total_wastage))
+        except Exception as e:
+            errors.append(f"Row {ridx + 1}: {e}")
+
+    db.commit()
+    try:
+        refresh_allocation_denominator_kg_for_all_costs(db)
+    except Exception as _den_e:
+        print(f"⚠️  Denominator refresh after new format upload: {_den_e}")
+
+    return {
+        "success": True,
+        "message": f"Processed {rows_processed} rows from new sales format.",
+        "excel_rows_processed": rows_processed,
+        "rows_split": 0,
+        "products_created": products_created,
+        "sales_created": sales_created,
+        "parsed_data": [d.model_dump() for d in parsed_data],
+        "errors": errors
+    }
 
 def detect_purple_patch_format(df):
     """
@@ -5027,192 +5198,14 @@ async def upload_harvest_mapping(file: UploadFile = File(...), db: Session = Dep
 @app.post("/api/upload-harvest-data")
 async def upload_harvest_data(file: UploadFile = File(...), db: Session = Depends(get_db)):
     """
-    Upload Harvest Data Excel file.
-    Expected format: Section headers (Open Field, Polyhouse C, etc.) with product rows and quantities.
-    All harvest data is considered inhouse production.
+    Deprecated endpoint. Harvest is now expected inside the single sales upload format.
     """
-    print(f"🚀 Starting Harvest Data upload for file: {file.filename}")
-    
-    if not file.filename.endswith(('.xlsx', '.xls')):
-        return {
-            "success": False,
-            "message": "File must be an Excel file (.xlsx or .xls)",
-            "harvest_records_created": 0
-        }
-    
-    try:
-        import tempfile
-        with tempfile.NamedTemporaryFile(delete=False, suffix='.xlsx') as tmp_file:
-            content = await file.read()
-            tmp_file.write(content)
-            tmp_file_path = tmp_file.name
-        
-        try:
-            # Read Excel
-            df = pd.read_excel(tmp_file_path, header=None)
-            print(f"📊 Loaded Excel: {df.shape[0]} rows x {df.shape[1]} cols")
-            
-            # Clear existing harvest data
-            deleted_count = db.query(HarvestData).delete()
-            db.flush()
-            print(f"🗑️  Deleted {deleted_count} existing harvest records")
-            
-            harvest_records_created = 0
-            current_section = None
-            period = None
-            
-            # Extract period from first few rows
-            for idx in range(min(10, len(df))):
-                row_str = ' '.join([str(cell) for cell in df.iloc[idx] if pd.notna(cell)])
-                if 'to' in row_str.lower() and any(char.isdigit() for char in row_str):
-                    # Extract period (e.g., "1-Apr-24 to 31-Mar-25")
-                    period_match = re.search(r'(\d{1,2}[-/]\w{3}[-/]\d{2,4})\s+to\s+(\d{1,2}[-/]\w{3}[-/]\d{2,4})', row_str, re.IGNORECASE)
-                    if period_match:
-                        period = period_match.group(0).strip()
-                        print(f"📅 Found period: {period}")
-                        break
-            
-            # Parse harvest data by section
-            # Format: Header row: Particulars | Quantity | Rejection | Actual Qty | Rate | Value
-            # Then section headers like "Open Field:", "Poluhouse C:", etc.
-            # Then product rows with data
-            # Then Total rows
-            
-            # First, detect and skip the header row
-            header_row_idx = None
-            for idx in range(min(5, len(df))):
-                row = df.iloc[idx]
-                row_str = ' '.join([str(cell) for cell in row if pd.notna(cell)]).upper()
-                if 'PARTICULARS' in row_str and ('QUANTITY' in row_str or 'ACTUAL QTY' in row_str):
-                    header_row_idx = idx
-                    print(f"📋 Found header row at row {idx+1}")
-                    break
-            
-            # Parse harvest data by section
-            for idx in range(len(df)):
-                # Skip header row
-                if header_row_idx is not None and idx == header_row_idx:
-                    continue
-                
-                row = df.iloc[idx]
-                row_str = ' '.join([str(cell) for cell in row if pd.notna(cell)]).strip()
-                
-                if not row_str:
-                    continue
-                
-                # Detect section headers
-                row_upper = row_str.upper()
-                if 'OPEN FIELD' in row_upper and ':' in row_str:
-                    current_section = "Open Field"
-                    print(f"📋 Found section: {current_section} at row {idx+1}")
-                    continue
-                elif ('POLYHOUSE C' in row_upper or 'POLUHOUSE C' in row_upper) and ':' in row_str:
-                    current_section = "Polyhouse C"
-                    print(f"📋 Found section: {current_section} at row {idx+1}")
-                    continue
-                elif ('POLYHOUSE D' in row_upper or 'POYHOUSE D' in row_upper) and ':' in row_str:
-                    current_section = "Polyhouse D"
-                    print(f"📋 Found section: {current_section} at row {idx+1}")
-                    continue
-                elif ('POLYHOUSE E' in row_upper or 'POLUHOUSE E' in row_upper) and ':' in row_str:
-                    current_section = "Polyhouse E"
-                    print(f"📋 Found section: {current_section} at row {idx+1}")
-                    continue
-                elif 'STRAWBERRY' in row_upper and 'TOTAL' not in row_upper and ':' in row_str:
-                    current_section = "Strawberry"
-                    print(f"📋 Found section: {current_section} at row {idx+1}")
-                    continue
-                elif ('OTHER BERRIES' in row_upper or 'RASPBERRY' in row_upper or 'BLUEBERRY' in row_upper or 'BLACK BERRY' in row_upper) and 'TOTAL' not in row_upper and ':' in row_str:
-                    current_section = "Other Berries"
-                    print(f"📋 Found section: {current_section} at row {idx+1}")
-                    continue
-                elif 'TOTAL' in row_upper or 'GRAND TOTAL' in row_upper:
-                    current_section = None  # Reset section after totals
-                    continue
-                
-                # If we have a section, try to extract product and quantity
-                if current_section:
-                    # Format: Product Name (col 0) | Quantity (col 1) | Rejection (col 2) | Actual Qty (col 3) | Rate (col 4) | Value (col 5)
-                    product_name = None
-                    quantity = 0.0
-                    
-                    # Get product name from first column
-                    if len(row) > 0 and pd.notna(row.iloc[0]):
-                        product_name = str(row.iloc[0]).strip()
-                    
-                    # Skip if product name is empty or is a header/total
-                    if not product_name or product_name.upper() in ['TOTAL', 'GRAND TOTAL', 'PARTICULARS', 'QUANTITY', 'ACTUAL QTY', 'REJECTION', 'RATE', 'VALUE', 'NAN', '']:
-                        continue
-                    
-                    # Try to find "Actual Qty" - column 3 (index 3) is the primary source
-                    # Format: Particulars | Quantity | Rejection | Actual Qty | Rate | Value
-                    # Index:     0           1         2           3           4      5
-                    for col_idx in [3, 1]:  # Try Actual Qty (col 3) first, then Quantity (col 1) as fallback
-                        if col_idx < len(row) and pd.notna(row.iloc[col_idx]):
-                            try:
-                                qty_val = float(row.iloc[col_idx])
-                                # Accept quantities >= 0 (including 0.00 for products with no harvest)
-                                if qty_val >= 0 and qty_val <= 100000:
-                                    quantity = qty_val
-                                    if col_idx == 3:
-                                        break  # Prefer Actual Qty
-                            except (ValueError, TypeError):
-                                continue
-                    
-                    # If we found a product name, save it (even if quantity is 0, as it's valid data)
-                    if product_name:
-                        harvest_record = HarvestData(
-                            product_name=product_name,
-                            section=current_section,
-                            quantity=quantity,
-                            period=period or "Unknown"
-                        )
-                        db.add(harvest_record)
-                        harvest_records_created += 1
-                        if quantity > 0:
-                            print(f"   ✅ {current_section}: {product_name} = {quantity} kg")
-                        else:
-                            print(f"   ℹ️  {current_section}: {product_name} = {quantity} kg (no harvest)")
-            
-            db.commit()
-            
-            print(f"✅ Harvest Data upload completed!")
-            print(f"   💰 Harvest records created: {harvest_records_created}")
-            
-            # Get all harvest records for display (get all records, not filtered by period)
-            # Since we just cleared old data and created new ones, get all current records
-            all_harvest = db.query(HarvestData).all()
-            parsed_harvest = []
-            for harvest in all_harvest:
-                parsed_harvest.append({
-                    "product_name": harvest.product_name,
-                    "section": harvest.section,
-                    "quantity": float(harvest.quantity) if harvest.quantity else 0.0,
-                    "period": harvest.period
-                })
-            
-            print(f"📊 Returning {len(parsed_harvest)} harvest records for display")
-            
-            return {
-                "success": True,
-                "message": f"Successfully uploaded {harvest_records_created} harvest records",
-                "harvest_records_created": harvest_records_created,
-                "period": period or "Unknown",
-                "parsed_harvest": parsed_harvest  # Detailed list of all harvest records
-            }
-        
-        finally:
-            os.unlink(tmp_file_path)
-    
-    except Exception as e:
-        import traceback
-        print(f"💥 Harvest Data upload failed: {str(e)}")
-        print(f"📋 Traceback: {traceback.format_exc()}")
-        return {
-            "success": False,
-            "message": f"Upload failed: {str(e)}",
-            "harvest_records_created": 0
-        }
+    print(f"⏭️  /api/upload-harvest-data is deprecated: {file.filename}")
+    return {
+        "success": False,
+        "message": "Harvest-only upload is deprecated. Please upload the new single sales format in Sales Upload and keep using Mapping upload separately.",
+        "harvest_records_created": 0
+    }
 
 @app.get("/api/excel-preview", response_model=ExcelPreviewData)
 async def get_excel_preview(month: str, db: Session = Depends(get_db)):
