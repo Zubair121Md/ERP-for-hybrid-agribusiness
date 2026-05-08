@@ -1888,6 +1888,7 @@ async def get_product_cost_breakdown(product_id: int, db: Session = Depends(get_
     
     # Get all allocations for this product
     allocations = db.query(Allocation).filter(Allocation.product_id == product_id).all()
+    sales_kg = _sale_quantity_kg(sale)
     
     # Group allocations by cost category and type
     cost_breakdown = {
@@ -1919,7 +1920,8 @@ async def get_product_cost_breakdown(product_id: int, db: Session = Depends(get_
             "applies_to": cost.applies_to,
             "basis": cost.basis,
             "amount": allocation.allocated_amount,
-            "total_cost_amount": cost.amount
+            "total_cost_amount": cost.amount,
+            "amount_per_kg": (allocation.allocated_amount / sales_kg) if sales_kg > 0 else 0.0,
         }
         
         # Add to detailed costs
@@ -1930,6 +1932,7 @@ async def get_product_cost_breakdown(product_id: int, db: Session = Depends(get_
         if category not in cost_breakdown["costs_by_category"]:
             cost_breakdown["costs_by_category"][category] = {
                 "total": 0.0,
+                "per_kg": 0.0,
                 "costs": []
             }
         cost_breakdown["costs_by_category"][category]["total"] += allocation.allocated_amount
@@ -1947,9 +1950,11 @@ async def get_product_cost_breakdown(product_id: int, db: Session = Depends(get_
     cost_breakdown["total_cost"] = sale.direct_cost + cost_breakdown["total_allocated"]
     cost_breakdown["profit"] = cost_breakdown["revenue"] - cost_breakdown["total_cost"]
     cost_breakdown["profit_margin"] = (cost_breakdown["profit"] / cost_breakdown["revenue"] * 100) if cost_breakdown["revenue"] > 0 else 0
-    _qkg = _sale_quantity_kg(sale)
+    _qkg = sales_kg
     cost_breakdown["cost_per_kg"] = cost_breakdown["total_cost"] / _qkg if _qkg > 0 else 0
     cost_breakdown["sales_kg"] = _qkg
+    for category_data in cost_breakdown["costs_by_category"].values():
+        category_data["per_kg"] = (category_data["total"] / _qkg) if _qkg > 0 else 0.0
 
     return cost_breakdown
 

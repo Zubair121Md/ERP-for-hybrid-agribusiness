@@ -1390,6 +1390,9 @@ function displayCostBreakdownModal(breakdown) {
         return;
     }
     
+    const salesKg = breakdown.sales_kg || 0;
+    const allocatedPerKg = salesKg > 0 ? (breakdown.total_allocated || 0) / salesKg : 0;
+
     // Create modal HTML
     const modalHtml = `
         <div id="costBreakdownModal" class="modal" style="display: block;">
@@ -1499,6 +1502,19 @@ function displayCostBreakdownModal(breakdown) {
                     </div>
                     
                     <h3>Detailed Cost Allocation</h3>
+                    <p style="margin: 0 0 12px 0; color: #6b7280; font-size: 13px;">
+                        Sales Qty: <strong>${formatNumber(salesKg)}</strong> kg
+                        | Allocated Cost per kg: <strong>₹${formatNumber(allocatedPerKg)}</strong>
+                    </p>
+                    <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(220px, 1fr)); gap:10px; margin-bottom:14px;">
+                        ${Object.entries(breakdown.costs_by_category).map(([category, data]) => `
+                            <div style="border:1px solid #e5e7eb; border-radius:8px; padding:10px; background:#fafafa;">
+                                <div style="font-size:12px; color:#6b7280;">${category}</div>
+                                <div style="font-size:16px; font-weight:700;">₹${formatNumber(data.total || 0)}</div>
+                                <div style="font-size:12px; color:#374151;">₹${formatNumber(data.per_kg || 0)}/kg</div>
+                            </div>
+                        `).join('')}
+                    </div>
                     <table class="table">
                         <thead>
                             <tr>
@@ -1507,6 +1523,7 @@ function displayCostBreakdownModal(breakdown) {
                                 <th>Applies To</th>
                                 <th>Basis</th>
                                 <th>Allocated Amount</th>
+                                <th>Allocated ₹/kg</th>
                                 <th>Total Cost Amount</th>
                             </tr>
                         </thead>
@@ -1518,6 +1535,7 @@ function displayCostBreakdownModal(breakdown) {
                                     <td><span class="badge ${cost.applies_to === 'inhouse' ? 'badge-success' : cost.applies_to === 'outsourced' ? 'badge-info' : 'badge-secondary'}">${cost.applies_to}</span></td>
                                     <td>${cost.basis}</td>
                                     <td>₹${formatNumber(cost.amount)}</td>
+                                    <td>₹${formatNumber(cost.amount_per_kg || 0)}</td>
                                     <td>₹${formatNumber(cost.total_cost_amount)}</td>
                                 </tr>
                             `).join('')}
@@ -1526,6 +1544,7 @@ function displayCostBreakdownModal(breakdown) {
                             <tr style="font-weight: bold; background-color: #f5f5f5;">
                                 <td colspan="4">Total Allocated Costs</td>
                                 <td>₹${formatNumber(breakdown.total_allocated)}</td>
+                                <td>₹${formatNumber(allocatedPerKg)}</td>
                                 <td></td>
                             </tr>
                             <tr style="font-weight: bold; background-color: #e8f5e9;">
