@@ -2701,12 +2701,18 @@ def detect_new_sales_stock_format(df_raw: pd.DataFrame) -> bool:
     """Detect new sales sheet format with Opening/Harvest/Purchase/Wastage blocks."""
     try:
         max_rows = min(40, len(df_raw))
+        saw_particulars = False
+        saw_stock_blocks = False
         for r in range(max_rows):
             row_vals = [str(v).strip().upper() for v in df_raw.iloc[r].tolist() if pd.notna(v)]
             if not row_vals:
                 continue
             row_text = " ".join(row_vals)
-            if "PARTICULARS" in row_text and ("OPENING STOCK" in row_text or "HARVEST" in row_text) and ("TOTAL OUTWARD" in row_text or "CLOSING STOCK" in row_text):
+            if "PARTICULARS" in row_text:
+                saw_particulars = True
+            if ("OPENING STOCK" in row_text or "HARVEST" in row_text or "PURCHASE" in row_text) and ("TOTAL OUTWARD" in row_text or "CLOSING STOCK" in row_text):
+                saw_stock_blocks = True
+            if saw_particulars and saw_stock_blocks:
                 print("✅ Detected new sales stock format")
                 return True
         return False
@@ -2724,12 +2730,15 @@ def parse_new_sales_stock_format(df_raw: pd.DataFrame, db: Session, file_name: s
     rows_processed = 0
 
     header_row_idx = None
+    particulars_row_idx = None
     for r in range(min(60, len(df_raw))):
         row_vals = [str(v).strip().upper() for v in df_raw.iloc[r].tolist() if pd.notna(v)]
         if not row_vals:
             continue
         row_text = " ".join(row_vals)
-        if "PARTICULARS" in row_text and ("OPENING STOCK" in row_text or "HARVEST" in row_text) and ("TOTAL OUTWARD" in row_text or "CLOSING STOCK" in row_text):
+        if "PARTICULARS" in row_text and particulars_row_idx is None:
+            particulars_row_idx = r
+        if ("OPENING STOCK" in row_text or "HARVEST" in row_text or "PURCHASE" in row_text) and ("TOTAL OUTWARD" in row_text or "CLOSING STOCK" in row_text):
             header_row_idx = r
             break
 
@@ -2754,6 +2763,14 @@ def parse_new_sales_stock_format(df_raw: pd.DataFrame, db: Session, file_name: s
         return col_map.get((top.upper(), sub.upper()))
 
     c_particulars = get_col("PARTICULARS", "")
+    if c_particulars is None and particulars_row_idx is not None:
+        # Find the column that contains "Particulars" in its dedicated row
+        p_row = df_raw.iloc[particulars_row_idx]
+        for idx in range(len(df_raw.columns)):
+            cell = str(p_row.iloc[idx]).strip().upper() if pd.notna(p_row.iloc[idx]) else ""
+            if "PARTICULARS" in cell:
+                c_particulars = idx
+                break
     if c_particulars is None:
         c_particulars = 0
 
