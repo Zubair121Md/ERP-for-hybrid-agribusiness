@@ -767,6 +767,8 @@ class CostAllocationEngine:
             return self._generate_monthly_report(target_month, product_map, sales_map)
             
         except Exception as e:
+            if isinstance(e, HTTPException):
+                raise e
             self.db.rollback()
             raise HTTPException(status_code=500, detail=f"Allocation failed: {str(e)}")
     

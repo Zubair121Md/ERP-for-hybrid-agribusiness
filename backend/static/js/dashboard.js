@@ -3,6 +3,35 @@ const API_BASE = '/api';
 let currentTab = 'dashboard';
 let charts = {};
 let currentData = {};
+let cachedSalesMonths = [];
+let cachedCostMonths = [];
+
+function normalizeMonthKey(value) {
+    if (value === undefined || value === null) return '';
+    const s = String(value).trim();
+    if (!s) return '';
+    const m = s.match(/(\d{4})-(\d{2})/);
+    if (m) return `${m[1]}-${m[2]}`;
+    const dt = new Date(s);
+    if (!Number.isNaN(dt.getTime())) {
+        return `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}`;
+    }
+    return s.length >= 7 ? s.slice(0, 7) : s;
+}
+
+function refreshAllocationMonthOptionsFromCache() {
+    const sel = document.getElementById('allocation-month');
+    if (!sel) return;
+    const current = normalizeMonthKey(sel.value);
+    const salesSet = new Set(cachedSalesMonths.filter(Boolean));
+    const costSet = new Set(cachedCostMonths.filter(Boolean));
+    const common = [...salesSet].filter(m => costSet.has(m));
+    const monthList = (common.length > 0 ? common : [...new Set([...salesSet, ...costSet])]).sort().reverse();
+    if (monthList.length === 0) return;
+
+    sel.innerHTML = monthList.map(m => `<option value="${m}">${m}</option>`).join('');
+    sel.value = monthList.includes(current) ? current : monthList[0];
+}
 
 function getCheckedRadioValue(name) {
     const el = document.querySelector(`input[name="${name}"]:checked`);
@@ -36,6 +65,7 @@ document.addEventListener('DOMContentLoaded', function() {
     initializeDashboard();
     loadDashboardData();
     setupEventListeners();
+    refreshAllocationMonthOptionsFromCache();
 });
 
 // Initialize dashboard components
@@ -468,6 +498,8 @@ async function loadSales() {
         
         const response = await fetch(`${API_BASE}/sales`);
         const sales = await response.json();
+        cachedSalesMonths = [...new Set((sales || []).map(s => normalizeMonthKey(s.month)).filter(Boolean))];
+        refreshAllocationMonthOptionsFromCache();
         
         displaySales(sales);
         
@@ -534,6 +566,8 @@ async function loadCosts() {
         
         const response = await fetch(`${API_BASE}/costs`);
         const costs = await response.json();
+        cachedCostMonths = [...new Set((costs || []).map(c => normalizeMonthKey(c.month)).filter(Boolean))];
+        refreshAllocationMonthOptionsFromCache();
         
         displayCosts(costs);
         
@@ -1197,7 +1231,7 @@ function updateProductDropdowns(products) {
 
 // Allocation functions
 async function runAllocation() {
-    const month = document.getElementById('allocation-month').value;
+    const month = normalizeMonthKey(document.getElementById('allocation-month').value);
     
     if (!month) {
         showAlert('Please select a month', 'error');
