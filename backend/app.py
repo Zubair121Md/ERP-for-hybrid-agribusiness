@@ -750,17 +750,33 @@ class CostAllocationEngine:
                         monthly_sales = [s for s in monthly_sales_all if _to_month_key(s.month) == target_month]
                         sales_map = {s.product_id: s for s in monthly_sales}
                         costs = [c for c in costs_all if _to_month_key(c.month) == target_month]
+
+            # Last-resort fallback: if month alignment still fails but data exists, use all uploaded records.
+            # This avoids false 400s caused by inconsistent month formatting in historical rows.
+            if not costs and costs_all:
+                print(f"⚠️ No costs matched month '{target_month}'. Falling back to all {len(costs_all)} cost rows.")
+                costs = costs_all
+            if not monthly_sales and monthly_sales_all:
+                print(f"⚠️ No sales matched month '{target_month}'. Falling back to all {len(monthly_sales_all)} sales rows.")
+                monthly_sales = monthly_sales_all
+                sales_map = {s.product_id: s for s in monthly_sales}
             
             if not costs:
+                sales_months = sorted({ _to_month_key(s.month) for s in monthly_sales_all if _to_month_key(s.month) })
+                cost_months = sorted({ _to_month_key(c.month) for c in costs_all if _to_month_key(c.month) })
                 raise HTTPException(
                     status_code=400, 
-                    detail="No costs found. Please add costs before running allocation."
+                    detail=f"No costs found for allocation (requested='{target_month}'). "
+                           f"Available sales months={sales_months}, cost months={cost_months}."
                 )
             
             if not monthly_sales:
+                sales_months = sorted({ _to_month_key(s.month) for s in monthly_sales_all if _to_month_key(s.month) })
+                cost_months = sorted({ _to_month_key(c.month) for c in costs_all if _to_month_key(c.month) })
                 raise HTTPException(
                     status_code=400, 
-                    detail="No sales data found. Please add sales data before running allocation."
+                    detail=f"No sales data found for allocation (requested='{target_month}'). "
+                           f"Available sales months={sales_months}, cost months={cost_months}."
                 )
             
             # Clear existing allocations (ignore month)
