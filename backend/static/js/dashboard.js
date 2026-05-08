@@ -554,6 +554,9 @@ function displaySales(sales) {
                     <button class="btn btn-sm btn-secondary" onclick="editSales(${sale.id})">
                         <i class="fas fa-edit"></i>
                     </button>
+                    <button class="btn btn-sm btn-danger" onclick="deleteSales(${sale.id})">
+                        <i class="fas fa-trash"></i>
+                    </button>
                 </td>
             </tr>
         `;
@@ -1855,39 +1858,22 @@ async function deleteProduct(id) {
 
 async function editSales(id) {
     try {
-        // Get data from the table row instead of API call
-        const row = document.querySelector(`tr[data-sale-id="${id}"]`);
-        if (!row) {
-            showAlert('Sales data not found in table', 'error');
+        const response = await fetch(`${API_BASE}/sales/${id}`);
+        if (!response.ok) {
+            showAlert('Error loading sales data', 'error');
             return;
         }
-        
-        // Extract data from table row
-        const cells = row.querySelectorAll('td');
-        const productName = cells[0].textContent.trim();
-        const quantity = parseFloat(cells[1].textContent.replace(' kg', ''));
-        const salePrice = parseFloat(cells[2].textContent.replace('₹', ''));
-        const directCost = parseFloat(cells[3].textContent.replace('₹', ''));
-        
-        // Get product ID from the product name
-        const productSelect = document.getElementById('sales-product');
-        let productId = '';
-        for (let option of productSelect.options) {
-            if (option.textContent.trim() === productName) {
-                productId = option.value;
-                break;
-            }
-        }
+        const sale = await response.json();
         
         // Change title to "Edit Sales Data"
         document.getElementById('sales-modal-title').textContent = 'Edit Sales Data';
         
         // Populate form with existing data
-        document.getElementById('sales-product').value = productId;
-        document.getElementById('sales-month').value = '2025-10'; // Default month (optional)
-        document.getElementById('sales-quantity').value = quantity;
-        document.getElementById('sales-price').value = salePrice;
-        document.getElementById('sales-direct-cost').value = directCost;
+        document.getElementById('sales-product').value = sale.product_id;
+        document.getElementById('sales-month').value = sale.month || '';
+        document.getElementById('sales-quantity').value = sale.quantity || 0;
+        document.getElementById('sales-price').value = sale.sale_price || 0;
+        document.getElementById('sales-direct-cost').value = sale.direct_cost || 0;
         
         // Store the ID for update
         document.getElementById('sales-form').setAttribute('data-edit-id', id);
@@ -1928,6 +1914,25 @@ async function editCost(id) {
         }
     } catch (error) {
         showAlert('Error loading cost data', 'error');
+    }
+}
+
+async function deleteSales(id) {
+    if (confirm('Are you sure you want to delete this sales record?')) {
+        try {
+            const response = await fetch(`${API_BASE}/monthly-sales/${id}`, {
+                method: 'DELETE'
+            });
+            if (response.ok) {
+                showAlert('Sales record deleted successfully!', 'success');
+                loadSales();
+                loadDashboardData();
+            } else {
+                showAlert('Error deleting sales record', 'error');
+            }
+        } catch (error) {
+            showAlert('Error deleting sales record', 'error');
+        }
     }
 }
 

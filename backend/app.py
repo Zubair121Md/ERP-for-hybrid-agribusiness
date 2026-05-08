@@ -1735,6 +1735,16 @@ async def update_monthly_sale(sale_id: int, sale_update: MonthlySaleUpdate, db: 
         unit=product.unit if product and getattr(product, 'unit', None) else 'kg'
     )
 
+
+@app.delete("/api/monthly-sales/{sale_id}")
+async def delete_monthly_sale(sale_id: int, db: Session = Depends(get_db)):
+    sale = db.query(MonthlySale).filter(MonthlySale.id == sale_id).first()
+    if not sale:
+        raise HTTPException(status_code=404, detail="Sales record not found")
+    db.delete(sale)
+    db.commit()
+    return {"message": "Sales record deleted successfully"}
+
 # Cost endpoints
 @app.post("/api/costs/", response_model=CostResponse)
 async def create_cost(cost: CostCreate, db: Session = Depends(get_db)):
@@ -2842,8 +2852,10 @@ def extract_pl_semantic_totals(df_raw: pd.DataFrame) -> Dict[str, Any]:
             "lettuce": 0.0,
             "strawberry": 0.0,
             "raspberry_blueberry": 0.0,
+            "citrus": 0.0,
             "packing": 0.0,
             "aggregation": 0.0,
+            "common_expenses_farm": 0.0,
         }
     }
 
@@ -2895,10 +2907,14 @@ def extract_pl_semantic_totals(df_raw: pd.DataFrame) -> Dict[str, Any]:
                 variable_sub = "strawberry"
             elif ("RASPBERRY" in txt or "BLUBERRY" in txt or "BLUEBERRY" in txt) and ("D)" in txt or ":" in txt):
                 variable_sub = "raspberry_blueberry"
+            elif "CITRUS" in txt and ("D)" in txt or ":" in txt):
+                variable_sub = "citrus"
             elif "PACKING" in txt and ("E)" in txt or ":" in txt):
                 variable_sub = "packing"
             elif "AGGREGATION" in txt and ("F)" in txt or ":" in txt):
                 variable_sub = "aggregation"
+            elif "COMMON EXPENSES" in txt and "FARM" in txt:
+                variable_sub = "common_expenses_farm"
 
         nums = [parse_numeric_robust(v) for v in row.tolist() if pd.notna(v)]
         nums = [n for n in nums if abs(n) > 0]
@@ -3012,6 +3028,9 @@ def parse_new_sales_stock_format(df_raw: pd.DataFrame, db: Session, file_name: s
         row = df_raw.iloc[ridx]
         particulars = str(row.iloc[c_particulars]).strip() if c_particulars < len(row) else ""
         if not particulars or particulars.lower() in {"nan", "none", ""}:
+            continue
+        up_particulars = particulars.upper()
+        if any(k in up_particulars for k in ["GRAND TOTAL", "TOTAL (INHOUSE)", "TOTAL (OUTSOURCED)", "TOTAL HARVEST", "TOTAL PURCHASE", "TOTAL SALES QUANTITY", "ITEMS", "MARGIN"]):
             continue
 
         open_qty = parse_cell(row, c_open_qty)
@@ -5084,49 +5103,14 @@ async def upload_cost_sheet(file: UploadFile = File(...), db: Session = Depends(
                 print(f"   ⚠️  FIXED COST CAT - I is 0 or not found")
             
             # ============================================================
-            # 2) FIXED COST CAT - II  →  Strawberry, Greens, Open Field, Aggregation (4 sections)
+            # 2) FIXED COST CAT - II  →  Single fixed category total (template-locked)
             # ============================================================
             fc2 = expenses.get('fixed_cost_cat_ii', {}).get('total', 0.0)
             print(f"   📊 FIXED COST CAT - II: ₹{fc2:,.2f}")
             if fc2 > 0:
-                # Percentages come from the uploaded cost sheet rows when present; else classic 60/25/15.
-                # (50/25/10/15 is used only by the Purple Patch auto Excel path, not default here.)
-                splits = expenses.get('fixed_cost_cat_ii', {}).get('splits', {})
-                straw_pct = splits.get("strawberry", 0.60)
-                greens_pct = splits.get("greens", 0.25)
-                open_field_pct = splits.get("open_field", 0.0)
-                agg_pct = splits.get("aggregation", 0.15)
-                # Normalize to sum to 1.0 in case of drift
-                total_pct = straw_pct + greens_pct + open_field_pct + agg_pct
-                if total_pct > 0:
-                    straw_pct /= total_pct
-                    greens_pct /= total_pct
-                    open_field_pct /= total_pct
-                    agg_pct /= total_pct
-
-                fc2d = Decimal(str(fc2))
                 save_cost(
-                    "FIXED COST CAT - II - Strawberry",
-                    float(fc2d * Decimal(str(straw_pct))),
-                    "inhouse", "fixed_cost_cat_ii", "sales_kg",
-                    is_fixed="fixed", cost_type="inhouse-only", pl_class="B",
-                )
-                save_cost(
-                    "FIXED COST CAT - II - Greens",
-                    float(fc2d * Decimal(str(greens_pct))),
-                    "inhouse", "fixed_cost_cat_ii", "sales_kg",
-                    is_fixed="fixed", cost_type="inhouse-only", pl_class="B",
-                )
-                save_cost(
-                    "FIXED COST CAT - II - Open Field",
-                    float(fc2d * Decimal(str(open_field_pct))),
-                    "inhouse", "fixed_cost_cat_ii", "sales_kg",
-                    is_fixed="fixed", cost_type="inhouse-only", pl_class="B",
-                )
-                save_cost(
-                    "FIXED COST CAT - II - Aggregation",
-                    float(fc2d * Decimal(str(agg_pct))),
-                    "outsourced", "fixed_cost_cat_ii", "sales_kg",
+                    "FIXED COST CAT - II",
+                    fc2, "both", "fixed_cost_cat_ii", "sales_kg",
                     is_fixed="fixed", cost_type="common", pl_class="B",
                 )
             
@@ -5142,8 +5126,10 @@ async def upload_cost_sheet(file: UploadFile = File(...), db: Session = Depends(
                 'lettuce':             ("inhouse", "inhouse-only", "sales_kg"),
                 'strawberry':          ("inhouse", "inhouse-only", "sales_kg"),
                 'raspberry_blueberry': ("inhouse", "inhouse-only", "sales_kg"),
+                'citrus':              ("inhouse", "inhouse-only", "sales_kg"),
                 'packing':             ("both", "common", "sales_kg"),
                 'aggregation':         ("outsourced", "common", "sales_kg"),
+                'common_expenses_farm':("inhouse", "inhouse-only", "sales_kg"),
             }
             
             var_display = {
@@ -5151,8 +5137,10 @@ async def upload_cost_sheet(file: UploadFile = File(...), db: Session = Depends(
                 'lettuce': 'LETTUCE',
                 'strawberry': 'STRAWBERRY',
                 'raspberry_blueberry': 'RASPBERRY & BLUEBERRY',
+                'citrus': 'CITRUS',
                 'packing': 'PACKING',
                 'aggregation': 'AGGREGATION',
+                'common_expenses_farm': 'COMMON EXPENSES - FARM',
             }
             
             variable_total = 0.0
