@@ -807,6 +807,9 @@ async function applyFixedCostIISplits(fixedCosts) {
         const greensCost = findByName('greens');
         const openFieldCost = findByName('open field');
         const aggregationCost = findByName('aggregation');
+        const pooledFc2Cost = fixedCosts.find(c =>
+            (c.name || '').trim().toUpperCase() === 'FIXED COST CAT - II'
+        );
 
         const targets = [
             { pct: strawberryPct, cost: strawberryCost, label: 'Strawberry' },
@@ -839,36 +842,49 @@ async function applyFixedCostIISplits(fixedCosts) {
             fc2Month = match ? `${match[1]}-${match[2]}` : '2025-04';
         }
 
+        const createConfig = {
+            'Strawberry': { name: 'FIXED COST CAT - II - Strawberry', applies_to: 'inhouse', cost_type: 'inhouse-only' },
+            'Greens': { name: 'FIXED COST CAT - II - Greens', applies_to: 'inhouse', cost_type: 'inhouse-only' },
+            'Open Field': { name: 'FIXED COST CAT - II - Open Field', applies_to: 'inhouse', cost_type: 'inhouse-only' },
+            'Aggregation': { name: 'FIXED COST CAT - II - Aggregation', applies_to: 'outsourced', cost_type: 'common' },
+        };
+
         for (const u of updates) {
             if (!u.cost) {
-                if (u.label === 'Open Field') {
-                    // Always create missing FIXED COST CAT - II - Open Field so all 4 sections exist.
-                    // Backend requires amount > 0; use 0.01 if 0 so row is created, then Apply Split again to set real amount.
-                    const createPayload = {
-                        name: 'FIXED COST CAT - II - Open Field',
-                        amount: u.amount > 0 ? u.amount : 0.01,
-                        applies_to: 'inhouse',
-                        cost_type: 'inhouse-only',
-                        basis: 'production_kg',
-                        month: fc2Month,
-                        is_fixed: 'fixed',
-                        category: 'fixed_cost_cat_ii'
-                    };
-                    const createRes = await fetch(`${API_BASE}/costs/`, {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify(createPayload)
-                    });
-                    if (!createRes.ok) {
-                        const err = await createRes.json().catch(() => ({}));
-                        console.error('Error creating Fixed Cost II Open Field:', err);
-                        showAlert('Error creating Fixed Cost II - Open Field row.', 'error');
-                        return;
-                    }
-                } else if (u.pct > 0) {
-                    console.warn(`No existing Fixed Cost II row found for ${u.label}; skipping.`);
+                const cfg = createConfig[u.label];
+                if (!cfg) {
+                    continue;
                 }
-                continue;
+                // Backend create schema requires amount > 0; create with 0.01 if needed, then update to exact amount.
+                const createPayload = {
+                    name: cfg.name,
+                    amount: u.amount > 0 ? u.amount : 0.01,
+                    applies_to: cfg.applies_to,
+                    cost_type: cfg.cost_type,
+                    basis: 'sales_kg',
+                    month: fc2Month,
+                    is_fixed: 'fixed',
+                    category: 'fixed_cost_cat_ii'
+                };
+                const createRes = await fetch(`${API_BASE}/costs/`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(createPayload)
+                });
+                if (!createRes.ok) {
+                    const err = await createRes.json().catch(() => ({}));
+                    console.error(`Error creating Fixed Cost II ${u.label}:`, err);
+                    showAlert(`Error creating Fixed Cost II - ${u.label} row.`, 'error');
+                    return;
+                }
+                const created = await createRes.json().catch(() => null);
+                if (created && created.id) {
+                    u.cost = created;
+                } else {
+                    console.error(`Create response missing id for ${u.label}`);
+                    showAlert(`Error creating Fixed Cost II - ${u.label} row.`, 'error');
+                    return;
+                }
             }
 
             // Only send fields allowed by CostUpdate schema (amount, etc.)
@@ -889,6 +905,15 @@ async function applyFixedCostIISplits(fixedCosts) {
                 console.error('Error updating Fixed Cost II split:', err);
                 showAlert(`Error updating Fixed Cost II (${u.label})`, 'error');
                 return;
+            }
+        }
+
+        // Cleanup legacy pooled FC2 row after split rows are set.
+        if (pooledFc2Cost) {
+            const deleteRes = await fetch(`${API_BASE}/costs/${pooledFc2Cost.id}`, { method: 'DELETE' });
+            if (!deleteRes.ok) {
+                const err = await deleteRes.json().catch(() => ({}));
+                console.warn('Could not delete legacy FIXED COST CAT - II pooled row:', err);
             }
         }
 

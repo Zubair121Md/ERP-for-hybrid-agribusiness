@@ -537,7 +537,7 @@ class CostCreate(BaseModel):
 
 class CostUpdate(BaseModel):
     name: Optional[str] = Field(None, min_length=1, max_length=100)
-    amount: Optional[float] = Field(None, gt=0)
+    amount: Optional[float] = Field(None, ge=0)
     applies_to: Optional[str] = Field(None, pattern="^(inhouse|outsourced|both|all)$")
     cost_type: Optional[str] = Field(None, pattern="^(purchase-only|sales-only|common|inhouse-only)$")
     basis: Optional[str] = Field(None, pattern="^(weight|value|trips|hybrid|sales_value|sales_kg|production_kg|handled_kg|purchase_kg|direct_cost)$")
@@ -5335,14 +5335,44 @@ async def upload_cost_sheet(file: UploadFile = File(...), db: Session = Depends(
                 print(f"   ⚠️  FIXED COST CAT - I is 0 or not found")
             
             # ============================================================
-            # 2) FIXED COST CAT - II  →  Single fixed category total (template-locked)
+            # 2) FIXED COST CAT - II  →  4 split buckets (template-locked)
             # ============================================================
             fc2 = expenses.get('fixed_cost_cat_ii', {}).get('total', 0.0)
             print(f"   📊 FIXED COST CAT - II: ₹{fc2:,.2f}")
             if fc2 > 0:
+                fc2_splits = (expenses.get('fixed_cost_cat_ii', {}) or {}).get('splits', {}) or {}
+                strawberry_pct = float(fc2_splits.get('strawberry', 0.60) or 0.60)
+                greens_pct = float(fc2_splits.get('greens', 0.25) or 0.25)
+                open_field_pct = float(fc2_splits.get('open_field', 0.00) or 0.00)
+                aggregation_pct = float(fc2_splits.get('aggregation', 0.15) or 0.15)
+                pct_total = strawberry_pct + greens_pct + open_field_pct + aggregation_pct
+                if pct_total <= 0:
+                    strawberry_pct, greens_pct, open_field_pct, aggregation_pct = 0.60, 0.25, 0.00, 0.15
+                    pct_total = 1.0
+
+                strawberry_amt = round(fc2 * (strawberry_pct / pct_total), 2)
+                greens_amt = round(fc2 * (greens_pct / pct_total), 2)
+                open_field_amt = round(fc2 * (open_field_pct / pct_total), 2)
+                aggregation_amt = round(fc2 - strawberry_amt - greens_amt - open_field_amt, 2)
+
                 save_cost(
-                    "FIXED COST CAT - II",
-                    fc2, "both", "fixed_cost_cat_ii", "sales_kg",
+                    "FIXED COST CAT - II - Strawberry",
+                    strawberry_amt, "inhouse", "fixed_cost_cat_ii", "sales_kg",
+                    is_fixed="fixed", cost_type="inhouse-only", pl_class="B", allocation_pool="auto",
+                )
+                save_cost(
+                    "FIXED COST CAT - II - Greens",
+                    greens_amt, "inhouse", "fixed_cost_cat_ii", "sales_kg",
+                    is_fixed="fixed", cost_type="inhouse-only", pl_class="B", allocation_pool="auto",
+                )
+                save_cost(
+                    "FIXED COST CAT - II - Open Field",
+                    open_field_amt, "inhouse", "fixed_cost_cat_ii", "sales_kg",
+                    is_fixed="fixed", cost_type="inhouse-only", pl_class="B", allocation_pool="auto",
+                )
+                save_cost(
+                    "FIXED COST CAT - II - Aggregation",
+                    aggregation_amt, "outsourced", "fixed_cost_cat_ii", "sales_kg",
                     is_fixed="fixed", cost_type="common", pl_class="B", allocation_pool="auto",
                 )
             
