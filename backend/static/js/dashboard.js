@@ -139,7 +139,7 @@ async function loadDashboardData() {
         const stats = await statsResponse.json();
         
         displayDashboardStats(stats);
-        renderPnlAdjustmentsPanel(stats);
+        // P&L adjustment UI disabled for now (use fixed P&L numbers from upload)
         
         // Load top products
         await loadTopProducts();

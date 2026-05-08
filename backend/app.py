@@ -5041,28 +5041,59 @@ async def upload_cost_sheet(file: UploadFile = File(...), db: Session = Depends(
                         "message": error_msg,
                         "costs_created": 0
                     }
+
+            # Always retry with merged-cell-resolved layout to avoid sparse/merged mis-binding
+            # (even if the first parse succeeded).
+            try:
+                normalized_layout = read_excel_layout_with_openpyxl(content)
+                normalized_df = pd.DataFrame(normalized_layout["matrix"])
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as normalized_tmp:
+                    normalized_path = normalized_tmp.name
+                with pd.ExcelWriter(normalized_path, engine="xlsxwriter") as writer:
+                    normalized_df.to_excel(writer, index=False, header=False)
+                normalized_result = parse_cost_sheet(normalized_path)
+                if normalized_result.get('success', False):
+                    print("✅ Using merged-cell-resolved P&L parse (authoritative)")
+                    parse_result = normalized_result
+            except Exception as _norm_e:
+                print(f"⚠️ Merged-cell resolved re-parse skipped: {_norm_e}")
+            finally:
+                try:
+                    if 'normalized_path' in locals() and os.path.exists(normalized_path):
+                        os.unlink(normalized_path)
+                except Exception:
+                    pass
             
             # Extract data
             header_info = parse_result.get('header_info', {})
             expenses = parse_result.get('expenses', {})
-            # Semantic fallback/augmentation for sparse merged layouts
+
+            # Semantic fallback only if the merged-cell resolved parse still seems empty.
             try:
-                semantic_layout = read_excel_layout_with_openpyxl(content)
-                semantic_totals = extract_pl_semantic_totals(semantic_layout["df_raw"])
-                # Override totals using semantic section maxima (parser can mis-bind merged/sparse layouts).
-                for k in ['fixed_cost_cat_i', 'fixed_cost_cat_ii', 'distribution_cost', 'marketing_expenses', 'vehicle_running_cost', 'others', 'wastage_shortage', 'purchase_accounts']:
-                    sv = semantic_totals.get(k, 0.0)
-                    if sv > 0:
-                        expenses.setdefault(k, {})['total'] = sv
-                if 'variable_cost' not in expenses:
-                    expenses['variable_cost'] = {'total': 0.0, 'subcategories': {}}
-                if 'subcategories' not in expenses['variable_cost']:
-                    expenses['variable_cost']['subcategories'] = {}
-                for sk, sv in semantic_totals.get("variable_subcategories", {}).items():
-                    if sk not in expenses['variable_cost']['subcategories']:
-                        expenses['variable_cost']['subcategories'][sk] = {'total': 0.0, 'items': []}
-                    if sv > 0:
-                        expenses['variable_cost']['subcategories'][sk]['total'] = sv
+                var_subs = expenses.get('variable_cost', {}).get('subcategories', {}) or {}
+                expected_var_keys = ['open_field', 'lettuce', 'strawberry', 'raspberry_blueberry', 'citrus', 'packing', 'aggregation', 'common_expenses_farm']
+                critical_zero = True
+                for k in expected_var_keys:
+                    if (var_subs.get(k, {}).get('total', 0.0) or 0.0) > 0:
+                        critical_zero = False
+                        break
+                critical_zero = critical_zero or (expenses.get('purchase_accounts', {}).get('total', 0.0) or 0.0) <= 0
+                if critical_zero:
+                    semantic_layout = read_excel_layout_with_openpyxl(content)
+                    semantic_totals = extract_pl_semantic_totals(semantic_layout["df_raw"])
+                    for k in ['fixed_cost_cat_i', 'fixed_cost_cat_ii', 'distribution_cost', 'marketing_expenses', 'vehicle_running_cost', 'others', 'wastage_shortage', 'purchase_accounts']:
+                        sv = semantic_totals.get(k, 0.0)
+                        if sv > 0:
+                            expenses.setdefault(k, {})['total'] = sv
+                    if 'variable_cost' not in expenses:
+                        expenses['variable_cost'] = {'total': 0.0, 'subcategories': {}}
+                    if 'subcategories' not in expenses['variable_cost']:
+                        expenses['variable_cost']['subcategories'] = {}
+                    for sk, sv in semantic_totals.get("variable_subcategories", {}).items():
+                        if sk not in expenses['variable_cost']['subcategories']:
+                            expenses['variable_cost']['subcategories'][sk] = {'total': 0.0, 'items': []}
+                        if sv > 0:
+                            expenses['variable_cost']['subcategories'][sk]['total'] = sv
             except Exception as _sem_e:
                 print(f"⚠️ Semantic P&L fallback skipped: {_sem_e}")
             
