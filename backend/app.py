@@ -14,8 +14,10 @@ from pathlib import Path
 import io
 import re
 import socket
+import tempfile
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 from decimal import Decimal, getcontext
+from openpyxl import load_workbook
 
 # High precision for allocation shares (no intentional rupee rounding in the engine)
 getcontext().prec = 28
@@ -2058,9 +2060,11 @@ async def upload_excel(file: UploadFile = File(...), db: Session = Depends(get_d
         }
     
     try:
-        # Read Excel file
+        # Read Excel file via merged-cell-safe layout reader
         contents = await file.read()
-        df_raw = pd.read_excel(io.BytesIO(contents), header=None)
+        layout = read_excel_layout_with_openpyxl(contents)
+        df_raw = layout["df_raw"]
+        # Keep normal DataFrame for legacy flat-column parser fallback
         df = pd.read_excel(io.BytesIO(contents))
 
         # New single sales format parser (Opening/Harvest/Purchase/.../Closing Stock)
@@ -2697,25 +2701,63 @@ def parse_numeric_robust(value):
         return 0.0
 
 
+def read_excel_layout_with_openpyxl(file_bytes: bytes) -> Dict[str, Any]:
+    """
+    Excel Upload -> openpyxl Layout Reader -> Merged Cell Resolver.
+    Returns resolved matrix + DataFrame for downstream structure detection.
+    """
+    wb = load_workbook(io.BytesIO(file_bytes), data_only=True)
+    ws = wb.active
+    rows = ws.max_row
+    cols = ws.max_column
+    matrix: List[List[Any]] = [[ws.cell(r, c).value for c in range(1, cols + 1)] for r in range(1, rows + 1)]
+
+    # Resolve merged cells by broadcasting the top-left value to all cells in merged range
+    for merged in ws.merged_cells.ranges:
+        min_col, min_row, max_col, max_row = merged.bounds
+        base_val = ws.cell(min_row, min_col).value
+        for rr in range(min_row, max_row + 1):
+            for cc in range(min_col, max_col + 1):
+                matrix[rr - 1][cc - 1] = base_val
+
+    return {
+        "matrix": matrix,
+        "df_raw": pd.DataFrame(matrix),
+        "sheet_name": ws.title,
+    }
+
+
+def detect_sales_structure(df_raw: pd.DataFrame) -> Dict[str, Any]:
+    """
+    Structure Detection Engine + Header Detection for sales sheet.
+    """
+    particulars_row = None
+    blocks_row = None
+    qty_row = None
+    scan_rows = min(80, len(df_raw))
+    for r in range(scan_rows):
+        row_vals = [str(v).strip().upper() for v in df_raw.iloc[r].tolist() if pd.notna(v) and str(v).strip()]
+        if not row_vals:
+            continue
+        text = " ".join(row_vals)
+        if particulars_row is None and "PARTICULARS" in text:
+            particulars_row = r
+        if blocks_row is None and ("OPENING STOCK" in text or "HARVEST" in text or "PURCHASE" in text) and ("TOTAL OUTWARD" in text or "CLOSING STOCK" in text):
+            blocks_row = r
+        if qty_row is None and "QUANTITY" in text and "EFF. RATE" in text and "VALUE" in text:
+            qty_row = r
+    return {
+        "is_new_sales_format": particulars_row is not None and blocks_row is not None and qty_row is not None,
+        "particulars_row": particulars_row,
+        "blocks_row": blocks_row,
+        "qty_row": qty_row,
+    }
+
+
 def detect_new_sales_stock_format(df_raw: pd.DataFrame) -> bool:
-    """Detect new sales sheet format with Opening/Harvest/Purchase/Wastage blocks."""
+    """Compatibility wrapper around structure detection."""
     try:
-        max_rows = min(40, len(df_raw))
-        saw_particulars = False
-        saw_stock_blocks = False
-        for r in range(max_rows):
-            row_vals = [str(v).strip().upper() for v in df_raw.iloc[r].tolist() if pd.notna(v)]
-            if not row_vals:
-                continue
-            row_text = " ".join(row_vals)
-            if "PARTICULARS" in row_text:
-                saw_particulars = True
-            if ("OPENING STOCK" in row_text or "HARVEST" in row_text or "PURCHASE" in row_text) and ("TOTAL OUTWARD" in row_text or "CLOSING STOCK" in row_text):
-                saw_stock_blocks = True
-            if saw_particulars and saw_stock_blocks:
-                print("✅ Detected new sales stock format")
-                return True
-        return False
+        return bool(detect_sales_structure(df_raw).get("is_new_sales_format"))
     except Exception:
         return False
 
@@ -2729,28 +2771,18 @@ def parse_new_sales_stock_format(df_raw: pd.DataFrame, db: Session, file_name: s
     sales_created = 0
     rows_processed = 0
 
-    header_row_idx = None
-    particulars_row_idx = None
-    for r in range(min(60, len(df_raw))):
-        row_vals = [str(v).strip().upper() for v in df_raw.iloc[r].tolist() if pd.notna(v)]
-        if not row_vals:
-            continue
-        row_text = " ".join(row_vals)
-        if "PARTICULARS" in row_text and particulars_row_idx is None:
-            particulars_row_idx = r
-        if ("OPENING STOCK" in row_text or "HARVEST" in row_text or "PURCHASE" in row_text) and ("TOTAL OUTWARD" in row_text or "CLOSING STOCK" in row_text):
-            header_row_idx = r
-            break
+    structure = detect_sales_structure(df_raw)
+    header_row_idx = structure.get("blocks_row")
+    particulars_row_idx = structure.get("particulars_row")
+    qty_row_idx = structure.get("qty_row")
 
     if header_row_idx is None:
         return {"success": False, "message": "Could not detect header row for new sales format.", "products_created": 0, "sales_created": 0, "parsed_data": [], "errors": ["Header row not found"]}
-
-    sub_header_idx = header_row_idx + 1
-    if sub_header_idx >= len(df_raw):
-        return {"success": False, "message": "Invalid file: missing sub-header row.", "products_created": 0, "sales_created": 0, "parsed_data": [], "errors": ["Sub-header row missing"]}
+    if qty_row_idx is None:
+        return {"success": False, "message": "Invalid file: missing Quantity/Eff. Rate/Value row.", "products_created": 0, "sales_created": 0, "parsed_data": [], "errors": ["Sub-header row missing"]}
 
     top_headers = df_raw.iloc[header_row_idx].ffill()
-    sub_headers = df_raw.iloc[sub_header_idx]
+    sub_headers = df_raw.iloc[qty_row_idx]
 
     def _norm_header(x: Any) -> str:
         return str(x).strip().upper() if pd.notna(x) else ""
@@ -2825,7 +2857,9 @@ def parse_new_sales_stock_format(df_raw: pd.DataFrame, db: Session, file_name: s
             products_created += 1
         return product
 
-    for ridx in range(sub_header_idx + 1, len(df_raw)):
+    validation_rows: List[Dict[str, Any]] = []
+
+    for ridx in range(qty_row_idx + 1, len(df_raw)):
         row = df_raw.iloc[ridx]
         particulars = str(row.iloc[c_particulars]).strip() if c_particulars < len(row) else ""
         if not particulars or particulars.lower() in {"nan", "none", ""}:
@@ -2847,8 +2881,10 @@ def parse_new_sales_stock_format(df_raw: pd.DataFrame, db: Session, file_name: s
 
         if total_inward_qty <= 0:
             total_inward_qty = max(0.0, open_qty + harvest_qty + purchase_qty)
+        # Strict business rule: Total Outward = Sales + Wastage In Dispatch + Wastage In Farm
+        expected_total_outward = max(0.0, sales_qty + wd_qty + wf_qty)
         if total_outward_qty <= 0:
-            total_outward_qty = max(0.0, sales_qty + wd_qty + wf_qty)
+            total_outward_qty = expected_total_outward
         if sales_value <= 0 and sales_qty > 0 and sales_rate > 0:
             sales_value = sales_qty * sales_rate
         if sales_rate <= 0 and sales_qty > 0 and sales_value > 0:
@@ -2860,7 +2896,29 @@ def parse_new_sales_stock_format(df_raw: pd.DataFrame, db: Session, file_name: s
             continue
         rows_processed += 1
         total_wastage = max(0.0, wd_qty + wf_qty)
-        revenue_qty = sales_qty if sales_qty > 0 else total_outward_qty
+        # Sales quantity should come from Sales column, not Total Outward
+        revenue_qty = max(0.0, sales_qty)
+        available_before_sales = max(0.0, total_inward_qty - total_wastage)
+        expected_closing = max(0.0, total_inward_qty - total_wastage - revenue_qty)
+
+        # Optional validation when closing stock is present in sheet
+        if _closing_qty > 0:
+            diff = abs(_closing_qty - expected_closing)
+            validation_rows.append({
+                "row": ridx + 1,
+                "particulars": particulars,
+                "expected_closing": expected_closing,
+                "sheet_closing": _closing_qty,
+                "difference": diff,
+                "valid": diff <= 0.5
+            })
+
+        # Prevent invalid oversell after wastage removal
+        if revenue_qty > available_before_sales + 0.5:
+            errors.append(
+                f"Row {ridx + 1} ({particulars}): Sales {revenue_qty} exceeds available stock before sales {available_before_sales} after wastage."
+            )
+            continue
 
         try:
             if harvest_qty > 0 and purchase_qty > 0:
@@ -2903,7 +2961,8 @@ def parse_new_sales_stock_format(df_raw: pd.DataFrame, db: Session, file_name: s
         "products_created": products_created,
         "sales_created": sales_created,
         "parsed_data": [d.model_dump() for d in parsed_data],
-        "errors": errors
+        "errors": errors,
+        "validation": validation_rows
     }
 
 def detect_purple_patch_format(df):
@@ -4727,13 +4786,29 @@ async def upload_cost_sheet(file: UploadFile = File(...), db: Session = Depends(
             parse_result = parse_cost_sheet(tmp_file_path)
             
             if not parse_result.get('success', False):
-                error_msg = parse_result.get('error', 'Failed to parse cost sheet')
-                print(f"❌ Parse failed: {error_msg}")
-                return {
-                    "success": False,
-                    "message": error_msg,
-                    "costs_created": 0
-                }
+                # Fallback pipeline for merged/complex layouts:
+                # Excel Upload -> openpyxl Layout Reader -> Merged Cell Resolver -> parser retry
+                print("⚠️ Primary P&L parse failed. Retrying with merged-cell-resolved layout...")
+                try:
+                    normalized_layout = read_excel_layout_with_openpyxl(content)
+                    normalized_df = pd.DataFrame(normalized_layout["matrix"])
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as normalized_tmp:
+                        normalized_path = normalized_tmp.name
+                    with pd.ExcelWriter(normalized_path, engine="xlsxwriter") as writer:
+                        normalized_df.to_excel(writer, index=False, header=False)
+                    parse_result = parse_cost_sheet(normalized_path)
+                finally:
+                    if 'normalized_path' in locals() and os.path.exists(normalized_path):
+                        os.unlink(normalized_path)
+
+                if not parse_result.get('success', False):
+                    error_msg = parse_result.get('error', 'Failed to parse cost sheet')
+                    print(f"❌ Parse failed after fallback: {error_msg}")
+                    return {
+                        "success": False,
+                        "message": error_msg,
+                        "costs_created": 0
+                    }
             
             # Extract data
             header_info = parse_result.get('header_info', {})
