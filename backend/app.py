@@ -1319,10 +1319,9 @@ class CostAllocationEngine:
         inhouse_margin = ((inhouse_profit / inhouse_full_costs) * 100) if inhouse_full_costs > 0 else 0
         outsourced_margin = ((outsourced_profit / outsourced_full_costs) * 100) if outsourced_full_costs > 0 else 0
         
-        # IMPORTANT: "total_costs" at the report level should line up with the
-        # P&L Total Expenses from the uploaded sheet (pool rows only — excludes
-        # variable_cost_item detail lines which duplicate parent VARIABLE COST pools).
-        total_costs = float(_pnl_upload_sheet_total(self.db))
+        # Keep report-level total costs on the same economic basis as dashboard:
+        # direct costs + allocated shared costs.
+        total_costs = total_full_costs
         
         return {
             "month": month,
