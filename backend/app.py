@@ -178,6 +178,18 @@ def _to_month_key(value: Any) -> str:
     return s[:7] if len(s) >= 7 else s
 
 
+def _pnl_upload_sheet_total(db: Session) -> float:
+    """
+    P&L sheet total for dashboard/reference: uploaded costs only, excluding
+    variable_cost_item rows (those duplicate parent VARIABLE COST pool amounts).
+    """
+    total = db.query(func.sum(Cost.amount)).filter(
+        Cost.source_file == "cost_sheet_upload",
+        Cost.category != "variable_cost_item",
+    ).scalar()
+    return float(total or 0.0)
+
+
 def compute_inhouse_outsourced_ratios(db: Session, alpha: float = 0.5) -> tuple:
     """
     Compute dynamic segment ratios from current sales data
@@ -811,6 +823,10 @@ class CostAllocationEngine:
         if cost.basis == "direct_cost" or "PURCHASE ACCOUNTS" in (cost.name or "").upper():
             print(f"   ⏭️  Skipping allocation for {cost.name} (direct cost - no allocation)")
             return
+
+        # VARIABLE COST line items are for display only; parent pool rows are allocated once.
+        if (cost.category or "").strip() == "variable_cost_item":
+            return
         
         # Step 1: Determine which products are affected
         applicable_products = self._get_applicable_products(cost, product_map, sales_map)
@@ -1304,12 +1320,9 @@ class CostAllocationEngine:
         outsourced_margin = ((outsourced_profit / outsourced_full_costs) * 100) if outsourced_full_costs > 0 else 0
         
         # IMPORTANT: "total_costs" at the report level should line up with the
-        # P&L Total Expenses from the uploaded sheet. That is the sum of all
-        # cost_sheet_upload Cost rows (including Purchase Accounts).
-        pnl_total = self.db.query(func.sum(Cost.amount)).filter(
-            Cost.source_file == "cost_sheet_upload"
-        ).scalar() or 0.0
-        total_costs = pnl_total
+        # P&L Total Expenses from the uploaded sheet (pool rows only — excludes
+        # variable_cost_item detail lines which duplicate parent VARIABLE COST pools).
+        total_costs = float(_pnl_upload_sheet_total(self.db))
         
         return {
             "month": month,
@@ -1355,6 +1368,8 @@ def refresh_allocation_denominator_kg_for_all_costs(db: Session) -> None:
     sales_map = {s.product_id: s for s in monthly_sales}
     for cost in db.query(Cost).all():
         if cost.basis == "direct_cost" or "PURCHASE ACCOUNTS" in (cost.name or "").upper():
+            continue
+        if (cost.category or "").strip() == "variable_cost_item":
             continue
         applicable = engine._get_applicable_products(cost, product_map, sales_map)
         net_total = 0.0
@@ -1508,9 +1523,7 @@ async def get_dashboard_stats(db: Session = Depends(get_db)):
     
     # Economic full cost (direct + allocated) — same basis as net profit
     total_full_costs = total_direct_costs + total_shared_costs
-    pnl_total = db.query(func.sum(Cost.amount)).filter(
-        Cost.source_file == "cost_sheet_upload"
-    ).scalar() or 0.0
+    pnl_total = _pnl_upload_sheet_total(db)
     total_costs = total_full_costs
     total_profit = net_revenue - total_full_costs
     profit_margin = (total_profit / total_full_costs * 100) if total_full_costs > 0 else 0.0

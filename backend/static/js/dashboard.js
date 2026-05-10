@@ -787,7 +787,17 @@ async function applyFixedCostIISplits(fixedCosts) {
             showAlert(`Percentages normalized from ${totalPct.toFixed(1)}% to 100%.`, 'info');
         }
 
-        const totalFc2 = fixedCosts.reduce((sum, c) => sum + (c.amount || 0), 0);
+        // Sum FC-II total from bucket rows only; avoid double-counting legacy pooled "FIXED COST CAT - II".
+        const pooledFc2Cost = fixedCosts.find(c =>
+            (c.name || '').trim().toUpperCase() === 'FIXED COST CAT - II'
+        );
+        const fc2BucketRows = fixedCosts.filter(c => {
+            const u = (c.name || '').trim().toUpperCase();
+            return u.startsWith('FIXED COST CAT - II') && u !== 'FIXED COST CAT - II';
+        });
+        const totalFc2 = fc2BucketRows.length > 0
+            ? fc2BucketRows.reduce((sum, c) => sum + (c.amount || 0), 0)
+            : (pooledFc2Cost ? (pooledFc2Cost.amount || 0) : fixedCosts.reduce((sum, c) => sum + (c.amount || 0), 0));
         if (totalFc2 <= 0) {
             showAlert('Total Fixed Cost II amount is zero. Nothing to split.', 'error');
             return;
@@ -801,9 +811,6 @@ async function applyFixedCostIISplits(fixedCosts) {
         const greensCost = findByName('greens');
         const openFieldCost = findByName('open field');
         const aggregationCost = findByName('aggregation');
-        const pooledFc2Cost = fixedCosts.find(c =>
-            (c.name || '').trim().toUpperCase() === 'FIXED COST CAT - II'
-        );
 
         const targets = [
             { pct: normalized[0], cost: strawberryCost, label: 'Strawberry' },
@@ -812,21 +819,21 @@ async function applyFixedCostIISplits(fixedCosts) {
             { pct: normalized[3], cost: aggregationCost, label: 'Aggregation' },
         ];
 
-        // Compute new amounts
-        let remaining = totalFc2;
-        const updates = targets.map((t, idx) => {
-            const isLast = idx === targets.length - 1;
-            let amount = 0;
-            if (t.pct > 0) {
-                if (isLast) {
-                    amount = remaining;
-                } else {
-                    amount = Math.round((totalFc2 * (t.pct / 100)) * 100) / 100;
-                    remaining -= amount;
-                }
+        // Split amounts: round per positive bucket, put remainder on last positive bucket so sum === totalFc2
+        const positiveIdx = targets.map((t, i) => (t.pct > 0 ? i : -1)).filter(i => i >= 0);
+        const amounts = [0, 0, 0, 0];
+        let allocatedSum = 0;
+        for (let j = 0; j < positiveIdx.length; j++) {
+            const i = positiveIdx[j];
+            if (j === positiveIdx.length - 1) {
+                amounts[i] = Math.round((totalFc2 - allocatedSum) * 100) / 100;
+            } else {
+                const part = Math.round((totalFc2 * (targets[i].pct / 100)) * 100) / 100;
+                amounts[i] = part;
+                allocatedSum += part;
             }
-            return { ...t, amount };
-        });
+        }
+        const updates = targets.map((t, idx) => ({ ...t, amount: amounts[idx] }));
 
         // Get month from any existing FC2 cost (for creating missing Open Field row). Backend expects YYYY-MM.
         const existingCost = strawberryCost || greensCost || aggregationCost;

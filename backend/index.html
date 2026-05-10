@@ -1826,7 +1826,10 @@
             const costs = await response.json();
             
             // Filter P&L costs (from cost sheet upload)
-            const plCosts = costs.filter(cost => cost.source_file === 'cost_sheet_upload' || cost.source_file === 'pl_upload');
+            const plCosts = costs.filter(cost =>
+                (cost.source_file === 'cost_sheet_upload' || cost.source_file === 'pl_upload')
+                && cost.category !== 'variable_cost_item'
+            );
             
             // Calculate totals
             const totalCosts = plCosts.reduce((sum, cost) => sum + cost.amount, 0);
