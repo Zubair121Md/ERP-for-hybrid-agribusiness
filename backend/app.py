@@ -1240,13 +1240,12 @@ class CostAllocationEngine:
             if not product:
                 continue  # Skip orphaned sales (product deleted or inactive)
             allocated_costs = product_allocations.get(product_id, [])
-            direct_cost = getattr(sale, 'direct_cost', None)
-            if direct_cost is None:
-                direct_cost = 0.0
+            # User requirement: totals/profit should use allocated P&L costs only.
+            direct_cost = 0.0
             
             total_allocated = sum(a.allocated_amount for a in allocated_costs)
-            # Full economic cost for the product (used for per-product profit & CP margin)
-            total_cost = direct_cost + total_allocated
+            # Cost basis = allocated P&L costs only
+            total_cost = total_allocated
             revenue = (sale.quantity or 0) * (sale.sale_price or 0)
             profit = revenue - total_cost
             qty_kg = _sale_quantity_kg(sale)
@@ -1293,7 +1292,7 @@ class CostAllocationEngine:
             products_data.append(product_data)
             total_revenue += revenue
 
-            # Aggregated P&L-only costs (for alignment with P&L Total Expenses)
+            # Aggregated costs: allocated P&L only
             total_costs += total_allocated
             total_full_costs += total_cost
             total_profit += profit
@@ -1319,8 +1318,7 @@ class CostAllocationEngine:
         inhouse_margin = ((inhouse_profit / inhouse_full_costs) * 100) if inhouse_full_costs > 0 else 0
         outsourced_margin = ((outsourced_profit / outsourced_full_costs) * 100) if outsourced_full_costs > 0 else 0
         
-        # Keep report-level total costs on the same economic basis as dashboard:
-        # direct costs + allocated shared costs.
+        # Report-level total costs = allocated P&L costs only.
         total_costs = total_full_costs
         
         return {
@@ -1502,7 +1500,8 @@ async def get_dashboard_stats(db: Session = Depends(get_db)):
     
     gross_sales_revenue = sum(s.quantity * s.sale_price for s in sales)
     net_revenue = gross_sales_revenue + indirect_income - sales_returns - stock_adjustment
-    total_direct_costs = sum(s.direct_cost for s in sales)
+    # User requirement: dashboard should reflect allocated P&L costs only.
+    total_direct_costs = 0.0
     
     if allocations_exist:
         # If allocation has been run, only count allocated costs
@@ -1520,7 +1519,7 @@ async def get_dashboard_stats(db: Session = Depends(get_db)):
         else:
             print(f"📊 Dashboard: No costs in system")
     
-    # Economic full cost (direct + allocated) — same basis as net profit
+    # Cost basis = allocated P&L costs only
     total_full_costs = total_direct_costs + total_shared_costs
     pnl_total = _pnl_upload_sheet_total(db)
     total_costs = total_full_costs
@@ -1542,8 +1541,8 @@ async def get_dashboard_stats(db: Session = Depends(get_db)):
         inhouse_revenue = inhouse_gross + net_adj * 0.5
         outsourced_revenue = outsourced_gross + net_adj * 0.5
     
-    inhouse_direct_costs = sum(s.direct_cost for s in inhouse_sales)
-    outsourced_direct_costs = sum(s.direct_cost for s in outsourced_sales)
+    inhouse_direct_costs = 0.0
+    outsourced_direct_costs = 0.0
     
     if allocations_exist:
         # Use actual allocated amounts by source (only valid allocations)
@@ -1955,7 +1954,7 @@ async def get_product_cost_breakdown(product_id: int, db: Session = Depends(get_
         "quantity": sale.quantity,
         "sale_price": sale.sale_price,
         "revenue": sale.quantity * sale.sale_price,
-        "direct_cost": sale.direct_cost,
+        "direct_cost": 0.0,
         "total_allocated": sum(a.allocated_amount for a in allocations),
         "costs_by_category": {},
         "costs_by_type": {
@@ -2003,7 +2002,7 @@ async def get_product_cost_breakdown(product_id: int, db: Session = Depends(get_
             cost_breakdown["costs_by_type"]["common"].append(cost_info)
     
     # Calculate totals
-    cost_breakdown["total_cost"] = sale.direct_cost + cost_breakdown["total_allocated"]
+    cost_breakdown["total_cost"] = cost_breakdown["total_allocated"]
     cost_breakdown["profit"] = cost_breakdown["revenue"] - cost_breakdown["total_cost"]
     cost_breakdown["profit_margin"] = (cost_breakdown["profit"] / cost_breakdown["revenue"] * 100) if cost_breakdown["revenue"] > 0 else 0
     _qkg = sales_kg
