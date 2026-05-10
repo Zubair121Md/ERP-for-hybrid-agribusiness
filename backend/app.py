@@ -1873,6 +1873,7 @@ async def delete_monthly_sale(sale_id: int, db: Session = Depends(get_db)):
     sale = db.query(MonthlySale).filter(MonthlySale.id == sale_id).first()
     if not sale:
         raise HTTPException(status_code=404, detail="Sales record not found")
+    db.query(Allocation).filter(Allocation.monthly_sale_id == sale_id).delete(synchronize_session=False)
     db.delete(sale)
     db.commit()
     return {"message": "Sales record deleted successfully"}
@@ -1885,6 +1886,18 @@ async def create_cost(cost: CostCreate, db: Session = Depends(get_db)):
         dk = _lookup_allocation_denominator_kg(payload.get("name"))
         if dk is not None:
             payload["allocation_denominator_kg"] = dk
+    name_u = (payload.get("name") or "").strip().upper()
+    month_v = payload.get("month")
+    # FC-II split rows must be unique by (name, month); upsert avoids duplicate rows.
+    if name_u.startswith("FIXED COST CAT - II -") and month_v:
+        existing = db.query(Cost).filter(Cost.name == payload["name"], Cost.month == month_v).first()
+        if existing:
+            for k, v in payload.items():
+                setattr(existing, k, v)
+            existing.updated_at = datetime.utcnow()
+            db.commit()
+            db.refresh(existing)
+            return existing
     db_cost = Cost(**payload)
     db.add(db_cost)
     db.commit()
@@ -1927,7 +1940,7 @@ async def delete_cost(cost_id: int, db: Session = Depends(get_db)):
     cost = db.query(Cost).filter(Cost.id == cost_id).first()
     if not cost:
         raise HTTPException(status_code=404, detail="Cost not found")
-    
+    db.query(Allocation).filter(Allocation.cost_id == cost_id).delete(synchronize_session=False)
     db.delete(cost)
     db.commit()
     return {"message": "Cost deleted successfully"}

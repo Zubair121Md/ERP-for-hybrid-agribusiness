@@ -803,42 +803,16 @@ async function applyFixedCostIISplits(fixedCosts) {
             return;
         }
 
-        // Build a clean, month-scoped FC-II set and deduplicate bucket rows first.
-        const selectedMonth = normalizeMonthKey((document.getElementById('allocation-month')?.value || '').trim());
-        const responseAllCosts = await fetch(`${API_BASE}/costs`);
-        if (!responseAllCosts.ok) {
-            showAlert('Could not load costs for FC-II split.', 'error');
-            return;
-        }
-        const allCosts = await responseAllCosts.json();
-        const targetMonth = selectedMonth || normalizeMonthKey(fixedCosts[0]?.month || '');
-        let liveFc2Costs = (allCosts || []).filter(c =>
-            normalizeMonthKey(c.month) === targetMonth &&
-            ((c.category || '') === 'fixed_cost_cat_ii' || (c.name || '').toUpperCase().startsWith('FIXED COST CAT - II'))
-        );
-
-        const bucketKeywords = ['strawberry', 'greens', 'open field', 'aggregation'];
-        for (const kw of bucketKeywords) {
-            const matches = liveFc2Costs.filter(c => (c.name || '').toLowerCase().includes(kw));
-            if (matches.length > 1) {
-                // Keep the first row and delete duplicates.
-                const [keep, ...dups] = matches;
-                for (const d of dups) {
-                    await fetch(`${API_BASE}/costs/${d.id}`, { method: 'DELETE' });
-                }
-                liveFc2Costs = liveFc2Costs.filter(c => c.id === keep.id || !(c.name || '').toLowerCase().includes(kw));
-                liveFc2Costs.push(keep);
-            }
-        }
-
         // Helper to find or create cost slots
         const findByName = (keyword) =>
-            liveFc2Costs.find(c => (c.name || '').toLowerCase().includes(keyword));
+            fixedCosts.find(c => c.name.toLowerCase().includes(keyword));
 
         const strawberryCost = findByName('strawberry');
         const greensCost = findByName('greens');
         const openFieldCost = findByName('open field');
         const aggregationCost = findByName('aggregation');
+        const findAllByName = (keyword) =>
+            fixedCosts.filter(c => (c.name || '').toLowerCase().includes(keyword));
 
         const targets = [
             { pct: normalized[0], cost: strawberryCost, label: 'Strawberry' },
@@ -865,7 +839,8 @@ async function applyFixedCostIISplits(fixedCosts) {
 
         // Get month from any existing FC2 cost (for creating missing Open Field row). Backend expects YYYY-MM.
         const existingCost = strawberryCost || greensCost || aggregationCost;
-        let fc2Month = existingCost ? (existingCost.month || targetMonth || '2025-04') : (targetMonth || '2025-04');
+        const selectedMonth = (document.getElementById('allocation-month')?.value || '').trim();
+        let fc2Month = existingCost ? (existingCost.month || selectedMonth || '2025-04') : (selectedMonth || '2025-04');
         if (typeof fc2Month === 'string' && fc2Month.length > 7) {
             const match = fc2Month.match(/(\d{4})-(\d{2})/);
             fc2Month = match ? `${match[1]}-${match[2]}` : '2025-04';
@@ -935,6 +910,22 @@ async function applyFixedCostIISplits(fixedCosts) {
                 console.error('Error updating Fixed Cost II split:', err);
                 showAlert(`Error updating Fixed Cost II (${u.label})`, 'error');
                 return;
+            }
+        }
+
+        // Remove duplicate FC-II bucket rows if any exist (keep the updated one).
+        const dupGroups = [
+            { label: 'Strawberry', rows: findAllByName('strawberry') },
+            { label: 'Greens', rows: findAllByName('greens') },
+            { label: 'Open Field', rows: findAllByName('open field') },
+            { label: 'Aggregation', rows: findAllByName('aggregation') },
+        ];
+        for (const g of dupGroups) {
+            if (!g.rows || g.rows.length <= 1) continue;
+            const keep = updates.find(u => u.label === g.label && u.cost)?.cost;
+            const deleteRows = g.rows.filter(r => !keep || r.id !== keep.id);
+            for (const r of deleteRows) {
+                await fetch(`${API_BASE}/costs/${r.id}`, { method: 'DELETE' });
             }
         }
 
