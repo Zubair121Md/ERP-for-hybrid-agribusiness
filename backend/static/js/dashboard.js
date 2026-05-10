@@ -866,7 +866,8 @@ async function applyFixedCostIISplits(fixedCosts) {
                     basis: 'sales_kg',
                     month: fc2Month,
                     is_fixed: 'fixed',
-                    category: 'fixed_cost_cat_ii'
+                    category: 'fixed_cost_cat_ii',
+                    source_file: 'cost_sheet_upload'
                 };
                 const createRes = await fetch(`${API_BASE}/costs/`, {
                     method: 'POST',

@@ -2,7 +2,7 @@ from fastapi import FastAPI, HTTPException, Depends, status, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, StreamingResponse
-from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, ForeignKey, Text, Boolean, func
+from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, ForeignKey, Text, Boolean, func, or_
 from sqlalchemy.orm import declarative_base, sessionmaker, Session, relationship
 from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any, Union
@@ -180,12 +180,18 @@ def _to_month_key(value: Any) -> str:
 
 def _pnl_upload_sheet_total(db: Session) -> float:
     """
-    P&L sheet total for dashboard/reference: uploaded costs only, excluding
-    variable_cost_item rows (those duplicate parent VARIABLE COST pool amounts).
+    P&L sheet total for dashboard/reference: uploaded pool costs only.
+
+    Includes normal cost-sheet rows and FC-II split rows (which may have been
+    created via split UI as manual rows in older data), while excluding
+    variable_cost_item detail lines to avoid pool double-counting.
     """
     total = db.query(func.sum(Cost.amount)).filter(
-        Cost.source_file == "cost_sheet_upload",
         Cost.category != "variable_cost_item",
+        or_(
+            Cost.source_file == "cost_sheet_upload",
+            Cost.name.like("FIXED COST CAT - II -%"),
+        ),
     ).scalar()
     return float(total or 0.0)
 
