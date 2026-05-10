@@ -803,9 +803,37 @@ async function applyFixedCostIISplits(fixedCosts) {
             return;
         }
 
+        // Build a clean, month-scoped FC-II set and deduplicate bucket rows first.
+        const selectedMonth = normalizeMonthKey((document.getElementById('allocation-month')?.value || '').trim());
+        const responseAllCosts = await fetch(`${API_BASE}/costs`);
+        if (!responseAllCosts.ok) {
+            showAlert('Could not load costs for FC-II split.', 'error');
+            return;
+        }
+        const allCosts = await responseAllCosts.json();
+        const targetMonth = selectedMonth || normalizeMonthKey(fixedCosts[0]?.month || '');
+        let liveFc2Costs = (allCosts || []).filter(c =>
+            normalizeMonthKey(c.month) === targetMonth &&
+            ((c.category || '') === 'fixed_cost_cat_ii' || (c.name || '').toUpperCase().startsWith('FIXED COST CAT - II'))
+        );
+
+        const bucketKeywords = ['strawberry', 'greens', 'open field', 'aggregation'];
+        for (const kw of bucketKeywords) {
+            const matches = liveFc2Costs.filter(c => (c.name || '').toLowerCase().includes(kw));
+            if (matches.length > 1) {
+                // Keep the first row and delete duplicates.
+                const [keep, ...dups] = matches;
+                for (const d of dups) {
+                    await fetch(`${API_BASE}/costs/${d.id}`, { method: 'DELETE' });
+                }
+                liveFc2Costs = liveFc2Costs.filter(c => c.id === keep.id || !(c.name || '').toLowerCase().includes(kw));
+                liveFc2Costs.push(keep);
+            }
+        }
+
         // Helper to find or create cost slots
         const findByName = (keyword) =>
-            fixedCosts.find(c => c.name.toLowerCase().includes(keyword));
+            liveFc2Costs.find(c => (c.name || '').toLowerCase().includes(keyword));
 
         const strawberryCost = findByName('strawberry');
         const greensCost = findByName('greens');
@@ -837,8 +865,7 @@ async function applyFixedCostIISplits(fixedCosts) {
 
         // Get month from any existing FC2 cost (for creating missing Open Field row). Backend expects YYYY-MM.
         const existingCost = strawberryCost || greensCost || aggregationCost;
-        const selectedMonth = (document.getElementById('allocation-month')?.value || '').trim();
-        let fc2Month = existingCost ? (existingCost.month || selectedMonth || '2025-04') : (selectedMonth || '2025-04');
+        let fc2Month = existingCost ? (existingCost.month || targetMonth || '2025-04') : (targetMonth || '2025-04');
         if (typeof fc2Month === 'string' && fc2Month.length > 7) {
             const match = fc2Month.match(/(\d{4})-(\d{2})/);
             fc2Month = match ? `${match[1]}-${match[2]}` : '2025-04';
