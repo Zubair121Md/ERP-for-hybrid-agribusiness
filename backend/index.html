@@ -947,6 +947,7 @@
                                 </button>
                             </div>
                         </div>
+                        <div id="sales-weight-summary" style="display:none; margin-bottom: 20px; padding: 0 25px 10px;"></div>
                         <div id="sales-table">
                             <!-- Table will be loaded here -->
                         </div>
@@ -976,10 +977,15 @@
                     <div class="table-card">
                         <div class="table-header">
                             <h3 class="table-title">Cost Allocation</h3>
-                            <div class="table-actions">
+                            <div class="table-actions" style="flex-wrap: wrap; gap: 10px; align-items: center;">
                                 <select id="allocation-month" class="btn btn-secondary">
                                     <option value="2025-04-24 00:00:00">April 2025</option>
                                 </select>
+                                <div id="purchase-cost-mode-group" style="display: flex; flex-direction: column; gap: 4px; font-size: 0.85rem; max-width: 420px;">
+                                    <label style="font-weight: 600; color: #374151;">Purchase accounts (outsourced)</label>
+                                    <label style="cursor: pointer;"><input type="radio" name="purchase-cost-mode" value="direct" checked> Standard — direct purchase on each outsourced line (pool not allocated)</label>
+                                    <label style="cursor: pointer;"><input type="radio" name="purchase-cost-mode" value="sales_kg"> By sales kg — allocate PURCHASE ACCOUNTS pool to outsourced by sold kg (no line direct cost)</label>
+                                </div>
                                 <button class="btn btn-primary" onclick="runAllocation()">
                                     <i class="fas fa-calculator"></i>
                                     Run Allocation

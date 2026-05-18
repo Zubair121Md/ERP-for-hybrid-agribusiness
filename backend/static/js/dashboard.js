@@ -496,17 +496,65 @@ async function loadSales() {
     try {
         showLoading('sales-table');
         
-        const response = await fetch(`${API_BASE}/sales`);
-        const sales = await response.json();
+        const [salesRes, summaryRes] = await Promise.all([
+            fetch(`${API_BASE}/sales`),
+            fetch(`${API_BASE}/sales-weight-summary`)
+        ]);
+        const sales = await salesRes.json();
         cachedSalesMonths = [...new Set((sales || []).map(s => normalizeMonthKey(s.month)).filter(Boolean))];
         refreshAllocationMonthOptionsFromCache();
         
+        if (summaryRes.ok) {
+            const summary = await summaryRes.json();
+            displaySalesWeightSummary(summary);
+        } else {
+            displaySalesWeightSummary(null);
+        }
         displaySales(sales);
         
     } catch (error) {
         console.error('Error loading sales:', error);
         showAlert('Error loading sales data', 'error');
     }
+}
+
+function displaySalesWeightSummary(summary) {
+    const container = document.getElementById('sales-weight-summary');
+    if (!container) return;
+    if (!summary || !summary.total_kg) {
+        container.style.display = 'none';
+        container.innerHTML = '';
+        return;
+    }
+    const monthNote = summary.month ? ` (${summary.month})` : ' (all months)';
+    let rows = (summary.distribution || []).map(d => `
+        <tr>
+            <td><strong>${d.label}</strong></td>
+            <td style="text-align:right;">${formatNumber(d.kg)} kg</td>
+            <td style="text-align:right;">${d.percent}%</td>
+        </tr>
+    `).join('');
+    container.style.display = 'block';
+    container.innerHTML = `
+        <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:16px 20px;">
+            <h4 style="margin:0 0 12px;color:#1e293b;">Sales weight summary${monthNote}</h4>
+            <p style="margin:0 0 14px;color:#475569;font-size:0.95rem;">
+                <strong>Total sold weight:</strong> ${formatNumber(summary.total_kg)} kg
+                <span style="color:#64748b;"> (${summary.line_count || 0} product lines with quantity)</span>
+            </p>
+            <p style="margin:0 0 8px;font-size:0.85rem;color:#64748b;">Distribution (FC-II buckets — strawberry, lettuce/greens, open field, aggregation/outsourced):</p>
+            <table class="table" style="margin:0;background:#fff;">
+                <thead>
+                    <tr>
+                        <th>Bucket</th>
+                        <th style="text-align:right;">Weight (kg)</th>
+                        <th style="text-align:right;">Share</th>
+                    </tr>
+                </thead>
+                <tbody>${rows}</tbody>
+            </table>
+        </div>
+    `;
 }
 
 // Display sales data
@@ -1258,6 +1306,7 @@ function updateProductDropdowns(products) {
 // Allocation functions
 async function runAllocation() {
     const month = normalizeMonthKey(document.getElementById('allocation-month').value);
+    const purchaseCostMode = getCheckedRadioValue('purchase-cost-mode') || 'direct';
     
     if (!month) {
         showAlert('Please select a month', 'error');
@@ -1267,7 +1316,8 @@ async function runAllocation() {
     try {
         showLoading('allocation-results');
         
-        const response = await fetch(`${API_BASE}/allocate/${month}`, {
+        const params = new URLSearchParams({ purchase_cost_mode: purchaseCostMode });
+        const response = await fetch(`${API_BASE}/allocate/${encodeURIComponent(month)}?${params}`, {
             method: 'POST'
         });
         
@@ -1286,8 +1336,11 @@ async function runAllocation() {
 
 function displayAllocationResults(result) {
     const container = document.getElementById('allocation-results');
+    const modeBanner = result.purchase_cost_mode_label
+        ? `<div style="margin-bottom:16px;padding:12px 16px;background:#eff6ff;border-left:4px solid #3b82f6;border-radius:6px;color:#1e3a8a;font-size:0.9rem;"><strong>Purchase mode:</strong> ${result.purchase_cost_mode_label}</div>`
+        : '';
     
-    let html = `
+    let html = `${modeBanner}
         <div class="stats-grid" style="margin-bottom: 20px;">
             <div class="stat-card revenue">
                 <div class="stat-header">

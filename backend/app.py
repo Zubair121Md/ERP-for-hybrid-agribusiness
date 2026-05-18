@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Depends, status, UploadFile, File
+from fastapi import FastAPI, HTTPException, Depends, status, UploadFile, File, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, StreamingResponse
@@ -157,6 +157,82 @@ def _sale_quantity_kg(sale) -> float:
         if qty_kg > 0:
             return qty_kg
     return qty
+
+
+def _normalize_product_name_upper(name: Optional[str]) -> str:
+    upper = (name or "").upper().strip()
+    return re.sub(r"\s*\((INHOUSE|OUTSOURCED)\)\s*$", "", upper)
+
+
+GREENS_WEIGHT_KEYWORDS = [
+    "GREEN", "LETTUCE", "MICRO", "SALAD", "SPINACH", "ARUGULA",
+    "KALE", "BASIL", "PARSLEY", "CELERY", "CHIVES", "DILL",
+    "OREGANO", "SAGE", "THYME", "TARRAGON", "LEEKS", "ASPARAGUS",
+    "BOK", "MIXED",
+]
+
+OPEN_FIELD_WEIGHT_KEYWORDS = [
+    "CABBAGE", "ONION", "ZUCCHINI", "BEETROOT", "CARROT", "BROCCOLI",
+    "RADISH", "TURNIP", "RHUBARB", "FENNEL", "POTATO", "BEANS", "HARICOT",
+]
+
+
+def classify_product_weight_bucket(product) -> str:
+    """
+    FC-II-aligned sales-kg bucket for weight distribution (mutually exclusive).
+    Returns: strawberry | lettuce_greens | open_field | aggregation | other
+    """
+    if not product:
+        return "other"
+    if getattr(product, "source", None) == "outsourced":
+        return "aggregation"
+    name = _normalize_product_name_upper(getattr(product, "name", None))
+    if "STRAWBERRY" in name:
+        return "strawberry"
+    if any(kw in name for kw in GREENS_WEIGHT_KEYWORDS):
+        return "lettuce_greens"
+    if any(kw in name for kw in OPEN_FIELD_WEIGHT_KEYWORDS):
+        return "open_field"
+    return "other"
+
+
+def compute_sales_weight_summary(sales: List) -> Dict[str, Any]:
+    """Sum sales kg by bucket and overall total."""
+    bucket_keys = ("strawberry", "lettuce_greens", "open_field", "aggregation", "other")
+    buckets: Dict[str, float] = {k: 0.0 for k in bucket_keys}
+    total_kg = 0.0
+    line_count = 0
+    for sale in sales:
+        kg = _sale_quantity_kg(sale)
+        if kg <= 0:
+            continue
+        line_count += 1
+        product = getattr(sale, "product", None)
+        bucket = classify_product_weight_bucket(product)
+        buckets[bucket] += kg
+        total_kg += kg
+    distribution = []
+    labels = {
+        "strawberry": "Strawberry",
+        "lettuce_greens": "Lettuce / Greens",
+        "open_field": "Open Field",
+        "aggregation": "Aggregation (Outsourced)",
+        "other": "Other (Inhouse)",
+    }
+    for key in bucket_keys:
+        kg = buckets[key]
+        pct = (kg / total_kg * 100.0) if total_kg > 0 else 0.0
+        distribution.append({
+            "bucket": key,
+            "label": labels[key],
+            "kg": round(kg, 2),
+            "percent": round(pct, 2),
+        })
+    return {
+        "total_kg": round(total_kg, 2),
+        "line_count": line_count,
+        "distribution": distribution,
+    }
 
 
 def _to_month_key(value: Any) -> str:
@@ -733,9 +809,12 @@ def get_db():
 
 # Enhanced Cost Allocation Engine
 class CostAllocationEngine:
-    def __init__(self, db: Session):
+    def __init__(self, db: Session, purchase_cost_mode: str = "direct"):
         self.db = db
-        # Allocatable overhead splits by sold quantity (kg) per product; purchase/direct lines are not allocated.
+        # purchase_cost_mode: "direct" = PURCHASE ACCOUNTS on sale.direct_cost (no pool split)
+        #                     "sales_kg" = allocate PURCHASE ACCOUNTS pool to outsourced by sales kg (no outsourced direct_cost in totals)
+        self.purchase_cost_mode = purchase_cost_mode if purchase_cost_mode in ("direct", "sales_kg") else "direct"
+        # Allocatable overhead splits by sold quantity (kg) per product; purchase/direct lines are not allocated in direct mode.
 
     def allocate_costs_for_month(self, month: str) -> Dict[str, Any]:
         """Allocate costs using selected month data only."""
@@ -823,10 +902,13 @@ class CostAllocationEngine:
     def _allocate_single_cost(self, cost: Cost, product_map: Dict, sales_map: Dict, month: str, allocated_so_far: Dict[int, float], cap_by_product: Dict[int, float]):
         """Allocate one pooled cost to applicable products in proportion to each line's sales kg."""
         
-        # SKIP PURCHASE ACCOUNTS - they are direct costs, not allocated
-        # According to COST_ALLOCATION.md: PURCHASE ACCOUNTS use direct_cost basis and are NOT allocated
-        # Each outsourced product uses its direct purchase value (inward_value) as a direct cost
-        if cost.basis == "direct_cost" or "PURCHASE ACCOUNTS" in (cost.name or "").upper():
+        cost_name_upper = (cost.name or "").upper()
+        is_purchase_accounts = "PURCHASE ACCOUNTS" in cost_name_upper
+        if is_purchase_accounts:
+            if self.purchase_cost_mode != "sales_kg":
+                print(f"   ⏭️  Skipping allocation for {cost.name} (direct purchase on sales rows)")
+                return
+        elif cost.basis == "direct_cost":
             print(f"   ⏭️  Skipping allocation for {cost.name} (direct cost - no allocation)")
             return
 
@@ -896,6 +978,12 @@ class CostAllocationEngine:
         applicable = {}
         
         cost_name_upper = (cost.name or "").upper()
+        if "PURCHASE ACCOUNTS" in cost_name_upper and self.purchase_cost_mode == "sales_kg":
+            for product_id, product in product_map.items():
+                if product_id in sales_map and product.source == "outsourced":
+                    applicable[product_id] = product
+            return applicable
+
         manual_pool = (getattr(cost, "allocation_pool", None) or "").lower().strip()
         
         # FC II: pooled rupee amount for one bucket; split only among that bucket's products by sales kg
@@ -1249,6 +1337,9 @@ class CostAllocationEngine:
             direct_cost = getattr(sale, 'direct_cost', None)
             if direct_cost is None:
                 direct_cost = 0.0
+            # sales_kg mode: purchase pool is allocated; do not also count per-line inward direct_cost on outsourced
+            if self.purchase_cost_mode == "sales_kg" and product.source == "outsourced":
+                direct_cost = 0.0
             
             total_allocated = sum(a.allocated_amount for a in allocated_costs)
             # Full economic cost for the product (used for per-product profit & CP margin)
@@ -1330,8 +1421,15 @@ class CostAllocationEngine:
         # variable_cost_item detail lines which duplicate parent VARIABLE COST pools).
         total_costs = float(_pnl_upload_sheet_total(self.db))
         
+        purchase_mode_label = (
+            "Purchase pool allocated by outsourced sales kg (no per-line purchase direct cost)"
+            if self.purchase_cost_mode == "sales_kg"
+            else "Purchase accounts as direct cost on outsourced sales (pool not allocated)"
+        )
         return {
             "month": month,
+            "purchase_cost_mode": self.purchase_cost_mode,
+            "purchase_cost_mode_label": purchase_mode_label,
             "products": products_data,
             "total_revenue": total_revenue,
             "total_costs": total_costs,
@@ -1785,6 +1883,22 @@ async def get_all_sales(db: Session = Depends(get_db)):
     
     return sales_with_names
 
+
+@app.get("/api/sales-weight-summary")
+async def get_sales_weight_summary(
+    month: Optional[str] = Query(None, description="YYYY-MM; omit for all months"),
+    db: Session = Depends(get_db),
+):
+    """Total sales kg and FC-II-aligned weight distribution for the sales tab."""
+    sales = db.query(MonthlySale).join(Product).all()
+    if month:
+        target = _to_month_key(month)
+        sales = [s for s in sales if _to_month_key(s.month) == target]
+    summary = compute_sales_weight_summary(sales)
+    summary["month"] = _to_month_key(month) if month else None
+    return summary
+
+
 @app.get("/api/monthly-sales/{param}", response_model=Union[MonthlySaleResponse, List[MonthlySaleResponse]])
 async def get_monthly_sales_or_by_id(param: str, db: Session = Depends(get_db)):
     """
@@ -1949,8 +2063,21 @@ async def delete_cost(cost_id: int, db: Session = Depends(get_db)):
 
 # Allocation and Reports
 @app.post("/api/allocate/{month}")
-async def allocate_costs(month: str, db: Session = Depends(get_db)):
-    engine = CostAllocationEngine(db)
+async def allocate_costs(
+    month: str,
+    purchase_cost_mode: str = Query(
+        "direct",
+        description="direct = PURCHASE ACCOUNTS on sale direct_cost; sales_kg = allocate pool to outsourced by sales kg",
+    ),
+    db: Session = Depends(get_db),
+):
+    mode = (purchase_cost_mode or "direct").strip().lower()
+    if mode not in ("direct", "sales_kg"):
+        raise HTTPException(
+            status_code=400,
+            detail="purchase_cost_mode must be 'direct' or 'sales_kg'",
+        )
+    engine = CostAllocationEngine(db, purchase_cost_mode=mode)
     result = engine.allocate_costs_for_month(month)
     return result
 
