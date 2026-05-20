@@ -542,7 +542,9 @@ function displaySalesWeightSummary(summary) {
                 <strong>Total sold weight:</strong> ${formatNumber(summary.total_kg)} kg
                 <span style="color:#64748b;"> (${summary.line_count || 0} product lines with quantity)</span>
             </p>
-            <p style="margin:0 0 8px;font-size:0.85rem;color:#64748b;">Distribution (FC-II buckets — strawberry, lettuce/greens, open field, aggregation/outsourced):</p>
+            <p style="margin:0 0 8px;font-size:0.85rem;color:#64748b;">
+                ${summary.weight_basis_note || 'Sales quantity (kg); wastage is not subtracted.'}
+            </p>
             <table class="table" style="margin:0;background:#fff;">
                 <thead>
                     <tr>
@@ -553,6 +555,35 @@ function displaySalesWeightSummary(summary) {
                 </thead>
                 <tbody>${rows}</tbody>
             </table>
+            ${(summary.product_lines && summary.product_lines.length) ? `
+            <details style="margin-top:14px;">
+                <summary style="cursor:pointer;font-weight:600;color:#374151;">Product breakdown (by bucket)</summary>
+                <table class="table" style="margin-top:10px;background:#fff;">
+                    <thead>
+                        <tr>
+                            <th>Product</th>
+                            <th>Bucket</th>
+                            <th style="text-align:right;">Inhouse kg</th>
+                            <th style="text-align:right;">Outsourced kg</th>
+                            <th style="text-align:right;">Row total</th>
+                            <th style="text-align:right;">Counted in bucket</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        ${summary.product_lines.map(p => `
+                            <tr>
+                                <td>${p.product}</td>
+                                <td>${formatCategoryLabel(p.bucket)}</td>
+                                <td style="text-align:right;">${formatNumber(p.inhouse_kg)}</td>
+                                <td style="text-align:right;">${formatNumber(p.outsourced_kg)}</td>
+                                <td style="text-align:right;">${formatNumber(p.row_total_kg)}</td>
+                                <td style="text-align:right;"><strong>${formatNumber(p.counted_in_bucket_kg)}</strong></td>
+                            </tr>
+                        `).join('')}
+                    </tbody>
+                </table>
+            </details>
+            ` : ''}
         </div>
     `;
 }

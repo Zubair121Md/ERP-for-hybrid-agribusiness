@@ -170,6 +170,7 @@ def _canonical_product_key(name: Optional[str]) -> str:
 
 ALLOWLIST_PATH = Path(__file__).resolve().parent / "product_allowlists.json"
 
+# Legacy keyword list kept only for section-mapping hints in allocation (not weight buckets).
 OPEN_FIELD_WEIGHT_KEYWORDS = [
     "CABBAGE", "ONION", "ZUCCHINI", "BEETROOT", "CARROT", "BROCCOLI",
     "RADISH", "TURNIP", "RHUBARB", "FENNEL", "POTATO", "BEANS", "HARICOT",
@@ -177,19 +178,20 @@ OPEN_FIELD_WEIGHT_KEYWORDS = [
 
 # In-memory allowlist keys (reloaded from JSON on save and at import)
 _lettuce_greens_keys: set = set()
-_open_field_extra_keys: set = set()
+_open_field_keys: set = set()
 
 
 def _default_allowlist_data() -> Dict[str, Any]:
     return {
         "lettuce_greens_products": [],
-        "open_field_extra_products": ["Iceberg Lettuce"],
+        "open_field_products": ["Iceberg Lettuce", "Spring Onion"],
+        "open_field_extra_products": ["Iceberg Lettuce", "Spring Onion"],
     }
 
 
 def load_product_allowlists() -> Dict[str, Any]:
     """Load allowlists from disk; rebuild canonical key sets."""
-    global _lettuce_greens_keys, _open_field_extra_keys
+    global _lettuce_greens_keys, _open_field_keys
     data = _default_allowlist_data()
     try:
         if ALLOWLIST_PATH.is_file():
@@ -204,19 +206,20 @@ def load_product_allowlists() -> Dict[str, Any]:
         for n in (data.get("lettuce_greens_products") or [])
         if _canonical_product_key(n)
     }
-    _open_field_extra_keys = {
-        _canonical_product_key(n)
-        for n in (data.get("open_field_extra_products") or [])
-        if _canonical_product_key(n)
+    of_names = list(data.get("open_field_products") or []) + list(data.get("open_field_extra_products") or [])
+    _open_field_keys = {
+        _canonical_product_key(n) for n in of_names if _canonical_product_key(n)
     }
     return data
 
 
 def save_product_allowlists(data: Dict[str, Any]) -> Dict[str, Any]:
     """Persist allowlists and refresh in-memory keys."""
+    of_list = list(data.get("open_field_products") or data.get("open_field_extra_products") or ["Iceberg Lettuce", "Spring Onion"])
     clean = {
         "lettuce_greens_products": list(data.get("lettuce_greens_products") or []),
-        "open_field_extra_products": list(data.get("open_field_extra_products") or ["Iceberg Lettuce"]),
+        "open_field_products": of_list,
+        "open_field_extra_products": of_list,
         "notes": data.get("notes") or _default_allowlist_data().get("notes", ""),
     }
     ALLOWLIST_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -228,48 +231,59 @@ def save_product_allowlists(data: Dict[str, Any]) -> Dict[str, Any]:
 load_product_allowlists()
 
 
+def _base_product_display_name(name: Optional[str]) -> str:
+    return re.sub(r"\s*\((INHOUSE|OUTSOURCED)\)\s*$", "", (name or "").strip(), flags=re.I)
+
+
+def _weight_summary_kg(sale) -> float:
+    """Sales-column kg for weight summary; never subtract wastage."""
+    return _sale_quantity_kg(sale)
+
+
 def is_lettuce_greens_product_name(name: Optional[str]) -> bool:
     """True only if product name is on the saved lettuce/greens allowlist."""
-    key = _canonical_product_key(name)
+    key = _canonical_product_key(_base_product_display_name(name))
     return bool(key) and key in _lettuce_greens_keys
 
 
 def is_open_field_product_name(name: Optional[str]) -> bool:
-    """Open field: explicit extras (e.g. Iceberg Lettuce) or keyword fallback."""
-    key = _canonical_product_key(name)
-    if key and key in _open_field_extra_keys:
-        return True
-    upper = _normalize_product_name_upper(name)
-    if "ICEBERG" in upper and "LETTUCE" in upper:
-        return True
-    return any(kw in upper for kw in OPEN_FIELD_WEIGHT_KEYWORDS)
+    """Open field: saved allowlist only (e.g. Iceberg Lettuce, Spring Onion)."""
+    base = _base_product_display_name(name)
+    key = _canonical_product_key(base)
+    return bool(key) and key in _open_field_keys
 
 
 def is_lettuce_greens_product(product) -> bool:
     if not product or getattr(product, "source", None) != "inhouse":
         return False
-    return is_lettuce_greens_product_name(getattr(product, "name", None))
+    return is_lettuce_greens_product_name(_base_product_display_name(getattr(product, "name", None)))
+
+
+def _classify_base_product_bucket(base_name: str) -> str:
+    """Classify by base product name (ignores inhouse/outsourced suffix)."""
+    upper = _normalize_product_name_upper(base_name)
+    if "STRAWBERRY" in upper:
+        return "strawberry"
+    if "RASPBERRY" in upper or "BLUEBERRY" in upper or "BLUBERRY" in upper:
+        return "other"
+    if is_lettuce_greens_product_name(base_name):
+        return "lettuce_greens"
+    if is_open_field_product_name(base_name):
+        return "open_field"
+    return "other"
 
 
 def classify_product_weight_bucket(product) -> str:
     """
-    FC-II-aligned sales-kg bucket for weight distribution (mutually exclusive).
+    Per-line bucket for allocation (inhouse-only pools).
     Returns: strawberry | lettuce_greens | open_field | aggregation | other
     """
     if not product:
         return "other"
+    base = _base_product_display_name(getattr(product, "name", None))
     if getattr(product, "source", None) == "outsourced":
         return "aggregation"
-    name = _normalize_product_name_upper(getattr(product, "name", None))
-    if "STRAWBERRY" in name:
-        return "strawberry"
-    if "RASPBERRY" in name or "BLUEBERRY" in name or "BLUBERRY" in name:
-        return "other"
-    if is_open_field_product_name(getattr(product, "name", None)):
-        return "open_field"
-    if is_lettuce_greens_product_name(getattr(product, "name", None)):
-        return "lettuce_greens"
-    return "other"
+    return _classify_base_product_bucket(base)
 
 
 def _get_purchase_accounts_pool_for_month(db: Session, month_key: str) -> float:
@@ -309,20 +323,70 @@ def _compute_purchase_direct_shares(
 
 
 def compute_sales_weight_summary(sales: List) -> Dict[str, Any]:
-    """Sum sales kg by bucket and overall total."""
+    """
+    Sum sales kg by FC-II bucket using base product names.
+    Open-field allowlist rows include inhouse + outsourced split lines (full sales qty per excel row).
+    Wastage is never subtracted — uses Sales quantity column only.
+    """
     bucket_keys = ("strawberry", "lettuce_greens", "open_field", "aggregation", "other")
     buckets: Dict[str, float] = {k: 0.0 for k in bucket_keys}
+    grouped: Dict[str, Dict[str, Any]] = {}
     total_kg = 0.0
     line_count = 0
+
     for sale in sales:
-        kg = _sale_quantity_kg(sale)
+        kg = _weight_summary_kg(sale)
         if kg <= 0:
             continue
         line_count += 1
-        product = getattr(sale, "product", None)
-        bucket = classify_product_weight_bucket(product)
-        buckets[bucket] += kg
         total_kg += kg
+        product = getattr(sale, "product", None)
+        if not product:
+            buckets["other"] += kg
+            continue
+        base = _base_product_display_name(product.name)
+        ckey = _canonical_product_key(base) or base.upper()
+        if ckey not in grouped:
+            grouped[ckey] = {"name": base, "inhouse_kg": 0.0, "outsourced_kg": 0.0}
+        if product.source == "outsourced":
+            grouped[ckey]["outsourced_kg"] += kg
+        else:
+            grouped[ckey]["inhouse_kg"] += kg
+
+    product_lines: List[Dict[str, Any]] = []
+    for g in grouped.values():
+        base = g["name"]
+        in_kg = g["inhouse_kg"]
+        out_kg = g["outsourced_kg"]
+        bucket = _classify_base_product_bucket(base)
+
+        if bucket == "open_field":
+            counted = in_kg + out_kg
+            buckets["open_field"] += counted
+        elif bucket in ("lettuce_greens", "strawberry"):
+            buckets[bucket] += in_kg
+            buckets["aggregation"] += out_kg
+            counted = in_kg
+        elif out_kg > 0 and in_kg <= 0:
+            bucket = "aggregation"
+            counted = out_kg
+            buckets["aggregation"] += out_kg
+        else:
+            buckets["other"] += in_kg
+            buckets["aggregation"] += out_kg
+            counted = in_kg
+
+        product_lines.append({
+            "product": base,
+            "bucket": bucket,
+            "inhouse_kg": round(in_kg, 3),
+            "outsourced_kg": round(out_kg, 3),
+            "row_total_kg": round(in_kg + out_kg, 3),
+            "counted_in_bucket_kg": round(counted if bucket != "open_field" else in_kg + out_kg, 3),
+        })
+
+    product_lines.sort(key=lambda x: (-x["counted_in_bucket_kg"], x["product"]))
+
     distribution = []
     labels = {
         "strawberry": "Strawberry",
@@ -331,9 +395,10 @@ def compute_sales_weight_summary(sales: List) -> Dict[str, Any]:
         "aggregation": "Aggregation (Outsourced)",
         "other": "Other (Inhouse)",
     }
+    bucket_total = sum(buckets.values())
     for key in bucket_keys:
         kg = buckets[key]
-        pct = (kg / total_kg * 100.0) if total_kg > 0 else 0.0
+        pct = (kg / bucket_total * 100.0) if bucket_total > 0 else 0.0
         distribution.append({
             "bucket": key,
             "label": labels[key],
@@ -344,6 +409,11 @@ def compute_sales_weight_summary(sales: List) -> Dict[str, Any]:
         "total_kg": round(total_kg, 2),
         "line_count": line_count,
         "distribution": distribution,
+        "product_lines": product_lines,
+        "weight_basis_note": (
+            "Sales quantity (kg) from upload; wastage is not subtracted. "
+            "Open field totals combine inhouse and outsourced portions for allowlisted products."
+        ),
     }
 
 

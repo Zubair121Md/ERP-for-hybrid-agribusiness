@@ -29,14 +29,18 @@
     "Romaine Lettuce",
     "Sage",
     "Salad Spinach",
-    "Spring Onion",
     "Swiss Chard",
     "Tarragon",
     "Watercress lettuce",
     "Zucchini Flower"
   ],
-  "open_field_extra_products": [
-    "Iceberg Lettuce"
+  "open_field_products": [
+    "Iceberg Lettuce",
+    "Spring Onion"
   ],
-  "notes": "Lettuce/greens bucket and VARIABLE COST - LETTUCE / FC-II Greens use lettuce_greens_products only. Iceberg Lettuce is open field only. Berry and strawberry lines are excluded from lettuce matching even if similar names appear elsewhere."
+  "open_field_extra_products": [
+    "Iceberg Lettuce",
+    "Spring Onion"
+  ],
+  "notes": "Lettuce/greens: lettuce_greens_products only. Open field: open_field_products only (no keyword matching). Spring Onion is open field, not lettuce. Weight summary uses full sales kg per product row (inhouse+outsourced); never subtracts wastage."
 }
