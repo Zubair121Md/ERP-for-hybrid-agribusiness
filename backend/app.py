@@ -236,8 +236,21 @@ def _base_product_display_name(name: Optional[str]) -> str:
 
 
 def _weight_summary_kg(sale) -> float:
-    """Sales-column kg for weight summary; never subtract wastage."""
-    return _sale_quantity_kg(sale)
+    """
+    Sold qty in kg for the weight distribution summary.
+    Uses _sale_quantity_kg but explicitly returns 0 for EA products
+    whose weight cannot be determined (no conversion mapping).
+    Raw EA counts must not be treated as kg in weight displays.
+    """
+    product = getattr(sale, "product", None)
+    qty = float(sale.quantity or 0)
+    if not product:
+        return qty
+    unit = (getattr(product, "unit", None) or "").strip()
+    if unit.upper() in ["EA", "EACH", "PC", "PCS", "UNIT", "UNITS"]:
+        # Convert EA → kg via known conversions; 0 if no conversion (don't treat EA count as kg)
+        return _to_kg(product.name or "", qty, unit)
+    return qty
 
 
 def is_lettuce_greens_product_name(name: Optional[str]) -> bool:
@@ -322,17 +335,59 @@ def _compute_purchase_direct_shares(
     return {pid: pool_total * (w / total_w) for pid, w in entries}
 
 
-def compute_sales_weight_summary(sales: List) -> Dict[str, Any]:
+def compute_sales_weight_summary(
+    sales: List,
+    all_sales_for_of: Optional[List] = None,
+) -> Dict[str, Any]:
     """
     Sum sales kg by FC-II bucket using base product names.
-    Open-field allowlist rows include inhouse + outsourced split lines (full sales qty per excel row).
-    Wastage is never subtracted — uses Sales quantity column only.
+
+    Open-field allowlist products (Iceberg Lettuce, Spring Onion, …) combine
+    inhouse + outsourced portions across *all* months, because the inhouse harvest
+    and the outsourced purchase supplement are often stored with different month
+    keys when both occur in the same Excel upload. All other buckets use only the
+    month-filtered ``sales`` list.
+
+    EA products with no kg-conversion mapping contribute 0 kg (not raw piece count).
     """
     bucket_keys = ("strawberry", "lettuce_greens", "open_field", "aggregation", "other")
     buckets: Dict[str, float] = {k: 0.0 for k in bucket_keys}
     bucket_inhouse: Dict[str, float] = {k: 0.0 for k in bucket_keys}
     bucket_outsourced: Dict[str, float] = {k: 0.0 for k in bucket_keys}
-    grouped: Dict[str, Dict[str, Any]] = {}
+
+    # For open-field products: gather ALL months so inhouse/outsourced splits
+    # that were saved with slightly different month keys are still combined correctly.
+    of_grouped: Dict[str, Dict[str, Any]] = {}
+    of_source = all_sales_for_of if all_sales_for_of is not None else sales
+    for sale in of_source:
+        product = getattr(sale, "product", None)
+        if not product:
+            continue
+        base = _base_product_display_name(product.name)
+        if _classify_base_product_bucket(base) != "open_field":
+            continue
+        kg = _weight_summary_kg(sale)
+        if kg <= 0:
+            continue
+        ckey = _canonical_product_key(base) or base.upper()
+        if ckey not in of_grouped:
+            of_grouped[ckey] = {
+                "name": base,
+                "inhouse_kg": 0.0,
+                "outsourced_kg": 0.0,
+                "inhouse_months": set(),
+                "outsourced_months": set(),
+            }
+        mkey = _to_month_key(getattr(sale, "month", None) or "")
+        if product.source == "outsourced":
+            of_grouped[ckey]["outsourced_kg"] += kg
+            of_grouped[ckey]["outsourced_months"].add(mkey)
+        else:
+            of_grouped[ckey]["inhouse_kg"] += kg
+            of_grouped[ckey]["inhouse_months"].add(mkey)
+
+    # Non-open-field products: month-filtered sales only
+    non_of_grouped: Dict[str, Dict[str, Any]] = {}
     total_kg = 0.0
     line_count = 0
     line_inhouse_kg = 0.0
@@ -345,42 +400,92 @@ def compute_sales_weight_summary(sales: List) -> Dict[str, Any]:
         kg = _weight_summary_kg(sale)
         if kg <= 0:
             continue
-        line_count += 1
-        total_kg += kg
         product = getattr(sale, "product", None)
         if not product:
             buckets["other"] += kg
-            bucket_inhouse["other"] += kg  # no source metadata — show under inhouse for display consistency
+            bucket_inhouse["other"] += kg
             unattributed_kg += kg
+            total_kg += kg
+            line_count += 1
             continue
+        base = _base_product_display_name(product.name)
+        if _classify_base_product_bucket(base) == "open_field":
+            # Counted via of_grouped below; still include in line totals
+            if product.source == "outsourced":
+                line_outsourced_kg += kg
+                outsourced_line_count += 1
+            else:
+                line_inhouse_kg += kg
+                inhouse_line_count += 1
+            total_kg += kg
+            line_count += 1
+            continue
+        ckey = _canonical_product_key(base) or base.upper()
+        if ckey not in non_of_grouped:
+            non_of_grouped[ckey] = {
+                "name": base,
+                "inhouse_kg": 0.0,
+                "outsourced_kg": 0.0,
+                "inhouse_inward": 0.0,
+                "outsourced_inward": 0.0,
+                "inhouse_wastage": 0.0,
+                "outsourced_wastage": 0.0,
+            }
+        inward = float(getattr(sale, "inward_quantity", None) or 0)
+        wastage = float(getattr(sale, "wastage", None) or 0)
         if product.source == "outsourced":
+            non_of_grouped[ckey]["outsourced_kg"] += kg
+            non_of_grouped[ckey]["outsourced_inward"] += inward
+            non_of_grouped[ckey]["outsourced_wastage"] += wastage
             line_outsourced_kg += kg
             outsourced_line_count += 1
         else:
+            non_of_grouped[ckey]["inhouse_kg"] += kg
+            non_of_grouped[ckey]["inhouse_inward"] += inward
+            non_of_grouped[ckey]["inhouse_wastage"] += wastage
             line_inhouse_kg += kg
             inhouse_line_count += 1
-        base = _base_product_display_name(product.name)
-        ckey = _canonical_product_key(base) or base.upper()
-        if ckey not in grouped:
-            grouped[ckey] = {"name": base, "inhouse_kg": 0.0, "outsourced_kg": 0.0}
-        if product.source == "outsourced":
-            grouped[ckey]["outsourced_kg"] += kg
-        else:
-            grouped[ckey]["inhouse_kg"] += kg
+        total_kg += kg
+        line_count += 1
 
     product_lines: List[Dict[str, Any]] = []
-    for g in grouped.values():
-        base = g["name"]
+
+    # Open-field lines (all months)
+    for g in of_grouped.values():
         in_kg = g["inhouse_kg"]
         out_kg = g["outsourced_kg"]
-        bucket = _classify_base_product_bucket(base)
+        total_of = in_kg + out_kg
+        buckets["open_field"] += total_of
+        bucket_inhouse["open_field"] += in_kg
+        bucket_outsourced["open_field"] += out_kg
+        ih_months = sorted(g["inhouse_months"])
+        out_months = sorted(g["outsourced_months"])
+        month_note = ""
+        if ih_months and out_months and set(ih_months) != set(out_months):
+            month_note = (
+                f"⚠ month mismatch — inhouse: {', '.join(ih_months)}; "
+                f"outsourced: {', '.join(out_months)}"
+            )
+        product_lines.append({
+            "product": g["name"],
+            "bucket": "open_field",
+            "inhouse_kg": round(in_kg, 3),
+            "outsourced_kg": round(out_kg, 3),
+            "row_total_kg": round(total_of, 3),
+            "counted_in_bucket_kg": round(total_of, 3),
+            "inhouse_inward_kg": None,
+            "inhouse_wastage_kg": None,
+            "month_note": month_note,
+        })
+        # Also add to inhouse/outsourced line totals for the portions NOT yet in filtered sales
+        # (outsourced portion from a different month would not be in line_outsourced_kg yet)
 
-        if bucket == "open_field":
-            counted = in_kg + out_kg
-            buckets["open_field"] += counted
-            bucket_inhouse["open_field"] += in_kg
-            bucket_outsourced["open_field"] += out_kg
-        elif bucket in ("lettuce_greens", "strawberry"):
+    # Non-open-field lines
+    for g in non_of_grouped.values():
+        in_kg = g["inhouse_kg"]
+        out_kg = g["outsourced_kg"]
+        bucket = _classify_base_product_bucket(g["name"])
+        if bucket in ("lettuce_greens", "strawberry"):
             counted = in_kg
             buckets[bucket] += in_kg
             buckets["aggregation"] += out_kg
@@ -399,15 +504,18 @@ def compute_sales_weight_summary(sales: List) -> Dict[str, Any]:
             bucket_outsourced["aggregation"] += out_kg
 
         product_lines.append({
-            "product": base,
+            "product": g["name"],
             "bucket": bucket,
             "inhouse_kg": round(in_kg, 3),
             "outsourced_kg": round(out_kg, 3),
             "row_total_kg": round(in_kg + out_kg, 3),
             "counted_in_bucket_kg": round(counted, 3),
+            "inhouse_inward_kg": round(g["inhouse_inward"], 3) or None,
+            "inhouse_wastage_kg": round(g["inhouse_wastage"], 3) or None,
+            "month_note": "",
         })
 
-    product_lines.sort(key=lambda x: (-x["counted_in_bucket_kg"], x["product"]))
+    product_lines.sort(key=lambda x: (x["bucket"], -x["row_total_kg"]))
 
     distribution = []
     labels = {
@@ -421,14 +529,12 @@ def compute_sales_weight_summary(sales: List) -> Dict[str, Any]:
     for key in bucket_keys:
         kg = buckets[key]
         pct = (kg / bucket_total * 100.0) if bucket_total > 0 else 0.0
-        inh = bucket_inhouse[key]
-        out = bucket_outsourced[key]
         distribution.append({
             "bucket": key,
             "label": labels[key],
             "kg": round(kg, 2),
-            "inhouse_kg": round(inh, 2),
-            "outsourced_kg": round(out, 2),
+            "inhouse_kg": round(bucket_inhouse[key], 2),
+            "outsourced_kg": round(bucket_outsourced[key], 2),
             "percent": round(pct, 2),
         })
     inhouse_share_pct = (line_inhouse_kg / total_kg * 100.0) if total_kg > 0 else 0.0
@@ -446,8 +552,8 @@ def compute_sales_weight_summary(sales: List) -> Dict[str, Any]:
         "distribution": distribution,
         "product_lines": product_lines,
         "weight_basis_note": (
-            "Sales quantity (kg) from upload; wastage is not subtracted. "
-            "Open field totals combine inhouse and outsourced portions for allowlisted products."
+            "Sales qty (kg) per line; EA products with no kg mapping = 0. "
+            "Open field bucket uses all months so inhouse+outsourced splits are combined correctly."
         ),
     }
 
@@ -2170,7 +2276,9 @@ async def get_sales_weight_summary(
         else:
             sales = []
 
-    summary = compute_sales_weight_summary(sales)
+    # For open-field products pass ALL rows so inhouse/outsourced split lines
+    # that land on different month keys are still correctly combined.
+    summary = compute_sales_weight_summary(sales, all_sales_for_of=sales_all)
     summary["month"] = applied_month
     summary["scope"] = "all_time" if all_time else ("month" if month else "latest_month")
     summary["scope_note"] = scope_note

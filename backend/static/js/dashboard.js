@@ -592,35 +592,48 @@ function displaySalesWeightSummary(summary) {
         </tr>
     `).join('')}</tbody>
             </table>
-            ${(summary.product_lines && summary.product_lines.length) ? `
-            <details style="margin-top:14px;">
-                <summary style="cursor:pointer;font-weight:600;color:#374151;">Product breakdown (by bucket)</summary>
-                <table class="table" style="margin-top:10px;background:#fff;">
-                    <thead>
-                        <tr>
-                            <th>Product</th>
-                            <th>Bucket</th>
-                            <th style="text-align:right;">Inhouse kg</th>
-                            <th style="text-align:right;">Outsourced kg</th>
-                            <th style="text-align:right;">Row total</th>
-                            <th style="text-align:right;">Counted in bucket</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        ${summary.product_lines.map(p => `
+            ${(summary.product_lines && summary.product_lines.length) ? (() => {
+                const hasInward = summary.product_lines.some(p => p.inhouse_inward_kg != null);
+                const warnings = summary.product_lines.filter(p => p.month_note);
+                const warnHtml = warnings.length
+                    ? `<div style="margin-bottom:10px;padding:10px 14px;background:#fef9c3;border-left:4px solid #ca8a04;border-radius:6px;font-size:0.82rem;color:#713f12;">
+                            <strong>⚠ Month mismatch detected</strong> — inhouse and outsourced portions of the same product were uploaded with different month keys. The open-field bucket combines both automatically.<br>
+                            ${warnings.map(p => `<span style="margin-right:16px;">• ${p.product}: ${p.month_note}</span>`).join('')}
+                        </div>`
+                    : '';
+                return `${warnHtml}
+                <details style="margin-top:10px;" open>
+                    <summary style="cursor:pointer;font-weight:600;color:#374151;">Product breakdown (${summary.product_lines.length} products)</summary>
+                    <div style="overflow-x:auto;">
+                    <table class="table" style="margin-top:10px;background:#fff;font-size:0.85rem;">
+                        <thead>
                             <tr>
-                                <td>${p.product}</td>
-                                <td>${formatCategoryLabel(p.bucket)}</td>
-                                <td style="text-align:right;">${formatNumber(p.inhouse_kg)}</td>
-                                <td style="text-align:right;">${formatNumber(p.outsourced_kg)}</td>
-                                <td style="text-align:right;">${formatNumber(p.row_total_kg)}</td>
-                                <td style="text-align:right;"><strong>${formatNumber(p.counted_in_bucket_kg)}</strong></td>
+                                <th>Product</th>
+                                <th>Bucket</th>
+                                <th style="text-align:right;">Inhouse sold kg</th>
+                                <th style="text-align:right;">Outsourced sold kg</th>
+                                ${hasInward ? '<th style="text-align:right;">Inward kg</th><th style="text-align:right;">Wastage kg</th>' : ''}
+                                <th style="text-align:right;">Row total kg</th>
+                                <th style="text-align:right;">In bucket</th>
                             </tr>
-                        `).join('')}
-                    </tbody>
-                </table>
-            </details>
-            ` : ''}
+                        </thead>
+                        <tbody>
+                            ${summary.product_lines.map(p => `
+                                <tr style="${p.month_note ? 'background:#fefce8;' : ''}">
+                                    <td>${p.product}${p.month_note ? ' <span title="'+p.month_note+'" style="color:#ca8a04;cursor:help;">⚠</span>' : ''}</td>
+                                    <td><span style="font-size:0.78rem;background:#e2e8f0;padding:2px 6px;border-radius:4px;">${formatCategoryLabel(p.bucket)}</span></td>
+                                    <td style="text-align:right;">${formatNumber(p.inhouse_kg)}</td>
+                                    <td style="text-align:right;">${formatNumber(p.outsourced_kg)}</td>
+                                    ${hasInward ? `<td style="text-align:right;">${p.inhouse_inward_kg != null ? formatNumber(p.inhouse_inward_kg) : '—'}</td><td style="text-align:right;">${p.inhouse_wastage_kg != null ? formatNumber(p.inhouse_wastage_kg) : '—'}</td>` : ''}
+                                    <td style="text-align:right;">${formatNumber(p.row_total_kg)}</td>
+                                    <td style="text-align:right;"><strong>${formatNumber(p.counted_in_bucket_kg)}</strong></td>
+                                </tr>
+                            `).join('')}
+                        </tbody>
+                    </table>
+                    </div>
+                </details>`;
+            })() : ''}
         </div>
     `;
 }
