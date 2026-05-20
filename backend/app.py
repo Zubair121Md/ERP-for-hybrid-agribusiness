@@ -3942,16 +3942,39 @@ def parse_new_sales_stock_format(df_raw: pd.DataFrame, db: Session, file_name: s
 
         try:
             if harvest_qty > 0 and purchase_qty > 0:
+                # "Both" type: product has inhouse harvest AND outsourced purchase.
+                # Store the ACTUAL quantities (harvest for inhouse, purchase for outsourced).
+                # Adjust sale_price to avg-per-inward-kg so that qty × price = correct revenue.
+                # This avoids ugly proportional decimals (e.g., 114.090921755282 → 127.7).
                 base_qty = harvest_qty + purchase_qty
                 inhouse_share = harvest_qty / base_qty if base_qty > 0 else 0.0
                 outsourced_share = purchase_qty / base_qty if base_qty > 0 else 0.0
-                inhouse_sales_qty = revenue_qty * inhouse_share
-                outsourced_sales_qty = revenue_qty * outsourced_share
+                total_sales_val = sales_value if sales_value > 0 else (revenue_qty * sales_rate)
+                # avg price per kg of inward stock (same for both lines so revenues are proportional)
+                avg_inward_price = round(total_sales_val / base_qty, 6) if base_qty > 0 else sales_rate
+                inhouse_direct_cost_val = round(total_sales_val * inhouse_share, 2) if inhouse_share > 0 else 0.0
+                outsourced_direct_cost_val = purchase_value  # actual purchase cost unchanged
+                inhouse_wastage_split = round(total_wastage * inhouse_share, 4)
+                outsourced_wastage_split = round(total_wastage * outsourced_share, 4)
 
                 inhouse_product = upsert_product(f"{particulars} (Inhouse)", "inhouse")
                 outsourced_product = upsert_product(f"{particulars} (Outsourced)", "outsourced")
-                db.add(MonthlySale(product_id=inhouse_product.id, month=month, quantity=inhouse_sales_qty, sale_price=sales_rate, direct_cost=0.0, inward_quantity=harvest_qty, inward_rate=0.0, inward_value=0.0, inhouse_production=harvest_qty, wastage=total_wastage * inhouse_share))
-                db.add(MonthlySale(product_id=outsourced_product.id, month=month, quantity=outsourced_sales_qty, sale_price=sales_rate, direct_cost=purchase_value, inward_quantity=purchase_qty, inward_rate=purchase_rate, inward_value=purchase_value, inhouse_production=0.0, wastage=total_wastage * outsourced_share))
+                db.add(MonthlySale(
+                    product_id=inhouse_product.id, month=month,
+                    quantity=round(harvest_qty, 4),
+                    sale_price=avg_inward_price,
+                    direct_cost=0.0,
+                    inward_quantity=harvest_qty, inward_rate=0.0, inward_value=0.0,
+                    inhouse_production=harvest_qty, wastage=inhouse_wastage_split,
+                ))
+                db.add(MonthlySale(
+                    product_id=outsourced_product.id, month=month,
+                    quantity=round(purchase_qty, 4),
+                    sale_price=avg_inward_price,
+                    direct_cost=outsourced_direct_cost_val,
+                    inward_quantity=purchase_qty, inward_rate=purchase_rate, inward_value=purchase_value,
+                    inhouse_production=0.0, wastage=outsourced_wastage_split,
+                ))
                 sales_created += 2
                 parsed_data.append(ExcelRowData(month=month, particulars=particulars, type="Both", inward_quantity=total_inward_qty, inward_rate=purchase_rate, inward_value=purchase_value, outward_quantity=revenue_qty, outward_rate=sales_rate, outward_value=sales_value if sales_value > 0 else (revenue_qty * sales_rate), inhouse_production=harvest_qty, wastage=total_wastage))
             elif harvest_qty > 0:

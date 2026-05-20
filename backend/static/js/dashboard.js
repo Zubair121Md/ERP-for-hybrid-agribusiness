@@ -50,13 +50,14 @@ function formatQtyDisplay(productName, unit, quantity) {
     const name = (productName || '').toLowerCase();
     const u = (unit || 'kg').toUpperCase();
     const isEA = ['EA','EACH','PC','PCS','UNIT','UNITS'].includes(u);
-    if (!isEA) return `${quantity} ${unit || 'kg'}`;
-    if (name.includes('hamper')) return `${quantity} EA`;
+    const roundedQty = parseFloat(Number(quantity).toFixed(3));
+    if (!isEA) return `${roundedQty} ${unit || 'kg'}`;
+    if (name.includes('hamper')) return `${roundedQty} EA`;
     if (name.includes('button mushroom') || name.includes('baby corn')) {
-        const kg = (quantity * 200) / 1000; // 200 g per EA
-        return `${quantity} EA (200 g ea, ${kg.toFixed(2)} kg)`;
+        const kg = (roundedQty * 200) / 1000; // 200 g per EA
+        return `${roundedQty} EA (200 g ea, ${kg.toFixed(2)} kg)`;
     }
-    return `${quantity} EA`;
+    return `${roundedQty} EA`;
 }
 
 // Initialize dashboard
@@ -674,8 +675,8 @@ function displaySales(sales) {
                 <td><strong>${sale.product_name}</strong></td>
                 <td>${src ? `<span class="badge ${badgeClass}">${srcLabel}</span>` : '—'}</td>
                 <td>${qtyText}</td>
-                <td>₹${sale.sale_price}</td>
-                <td>₹${sale.direct_cost}</td>
+                <td>₹${formatNumber(sale.sale_price)}</td>
+                <td>₹${formatNumber(sale.direct_cost)}</td>
                 <td>₹${formatNumber(revenue)}</td>
                 <td>
                     <button class="btn btn-sm btn-secondary" onclick="editSales(${sale.id})">
