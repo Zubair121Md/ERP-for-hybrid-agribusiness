@@ -1642,11 +1642,10 @@ class CostAllocationEngine:
         
         cost_breakdown = {}
         month_key = _to_month_key(month)
-        purchase_shares: Dict[int, float] = {}
-        purchase_pool_total = 0.0
-        if self.purchase_cost_mode == "direct":
-            purchase_pool_total = _get_purchase_accounts_pool_for_month(self.db, month_key)
-            purchase_shares = _compute_purchase_direct_shares(sales_map, product_map, purchase_pool_total)
+        # Standard ("direct") mode: each outsourced product's direct_cost is the purchase_value
+        # stored on the sales row (= what was paid, from the upload).  No pool redistribution.
+        # "sales_kg" mode: PURCHASE ACCOUNTS pool is allocated by sold kg; direct_cost zeroed.
+        purchase_pool_total = 0.0  # informational only (shown in UI banner)
 
         # Sum of sales kg across products in sales_map (one row per product_id: last sale wins if duplicates)
         total_sales_kg_basis = sum(
@@ -1658,14 +1657,10 @@ class CostAllocationEngine:
             if not product:
                 continue  # Skip orphaned sales (product deleted or inactive)
             allocated_costs = product_allocations.get(product_id, [])
-            direct_cost = getattr(sale, 'direct_cost', None)
-            if direct_cost is None:
-                direct_cost = 0.0
+            direct_cost = float(getattr(sale, 'direct_cost', None) or 0.0)
             purchase_cost = 0.0
-            if product.source == "outsourced" and self.purchase_cost_mode == "direct":
-                purchase_cost = float(purchase_shares.get(product_id, 0.0))
-                direct_cost = purchase_cost
-            elif self.purchase_cost_mode == "sales_kg" and product.source == "outsourced":
+            if self.purchase_cost_mode == "sales_kg" and product.source == "outsourced":
+                # Pool allocated via allocation engine; don't double-count direct_cost here
                 direct_cost = 0.0
             
             total_allocated = sum(a.allocated_amount for a in allocated_costs)
@@ -1687,9 +1682,9 @@ class CostAllocationEngine:
                 if category not in cost_breakdown:
                     cost_breakdown[category] = 0.0
                 cost_breakdown[category] += allocation.allocated_amount
-            if purchase_cost > 0:
-                cost_breakdown["purchase_accounts"] = cost_breakdown.get("purchase_accounts", 0.0) + purchase_cost
-            
+            # In "direct" mode purchase_cost=0 so no separate line; direct_cost shows the purchase amount.
+            # In "sales_kg" mode the pool appears as regular allocated costs from the engine.
+
             allocation_rows = [
                 {
                     "cost_name": getattr(a.cost, "name", None) or "Unknown",
@@ -1697,12 +1692,6 @@ class CostAllocationEngine:
                     "amount": a.allocated_amount
                 } for a in allocated_costs
             ]
-            if purchase_cost > 0:
-                allocation_rows.append({
-                    "cost_name": "PURCHASE ACCOUNTS",
-                    "category": "purchase_accounts",
-                    "amount": purchase_cost,
-                })
             
             product_data = {
                 "product_id": product_id,
@@ -1760,9 +1749,9 @@ class CostAllocationEngine:
         total_costs = float(_pnl_upload_sheet_total(self.db))
         
         purchase_mode_label = (
-            "Purchase pool allocated by outsourced sales kg (no per-line purchase direct cost)"
+            "By sales kg — PURCHASE ACCOUNTS pool distributed to outsourced by sold qty (direct_cost = 0)"
             if self.purchase_cost_mode == "sales_kg"
-            else "Purchase accounts as direct cost on outsourced sales (pool not allocated)"
+            else "Standard — each outsourced line shows its own purchase cost from upload (sale.direct_cost)"
         )
         return {
             "month": month,
@@ -2524,19 +2513,11 @@ async def get_product_cost_breakdown(
     allocations = db.query(Allocation).filter(Allocation.product_id == product_id).all()
     sales_kg = _sale_quantity_kg(sale)
 
-    month_key = _to_month_key(month) if month else _to_month_key(sale.month)
-    products = db.query(Product).filter(Product.is_active == True).all()
-    product_map = {p.id: p for p in products}
-    monthly_sales = [s for s in db.query(MonthlySale).all() if _to_month_key(s.month) == month_key]
-    sales_map = {s.product_id: s for s in monthly_sales}
+    # Standard mode: direct_cost = sale.direct_cost (purchase_value from upload, no pool computation).
+    # sales_kg mode: direct_cost = 0 (pool allocated by sales kg via allocation engine).
     purchase_cost = 0.0
     direct_cost = float(sale.direct_cost or 0)
-    if product.source == "outsourced" and mode == "direct":
-        pool = _get_purchase_accounts_pool_for_month(db, month_key)
-        shares = _compute_purchase_direct_shares(sales_map, product_map, pool)
-        purchase_cost = float(shares.get(product_id, 0.0))
-        direct_cost = purchase_cost
-    elif product.source == "outsourced" and mode == "sales_kg":
+    if product.source == "outsourced" and mode == "sales_kg":
         direct_cost = 0.0
     
     # Group allocations by cost category and type
@@ -2597,27 +2578,9 @@ async def get_product_cost_breakdown(
         else:
             cost_breakdown["costs_by_type"]["common"].append(cost_info)
 
-    if purchase_cost > 0:
-        purchase_info = {
-            "cost_id": None,
-            "cost_name": "PURCHASE ACCOUNTS",
-            "category": "purchase_accounts",
-            "applies_to": "outsourced",
-            "basis": "direct_cost",
-            "amount": purchase_cost,
-            "total_cost_amount": _get_purchase_accounts_pool_for_month(db, month_key),
-            "amount_per_kg": (purchase_cost / sales_kg) if sales_kg > 0 else 0.0,
-        }
-        cost_breakdown["detailed_costs"].append(purchase_info)
-        if "purchase_accounts" not in cost_breakdown["costs_by_category"]:
-            cost_breakdown["costs_by_category"]["purchase_accounts"] = {
-                "total": 0.0,
-                "per_kg": 0.0,
-                "costs": [],
-            }
-        cost_breakdown["costs_by_category"]["purchase_accounts"]["total"] += purchase_cost
-        cost_breakdown["costs_by_category"]["purchase_accounts"]["costs"].append(purchase_info)
-        cost_breakdown["costs_by_type"]["outsourced_only"].append(purchase_info)
+    # In Standard mode: direct_cost already contains sale.direct_cost (the purchase_value).
+    # No extra PURCHASE ACCOUNTS line needed — it would double count.
+    # In sales_kg mode: PURCHASE ACCOUNTS appears in allocations; direct_cost = 0.
     
     # Calculate totals
     cost_breakdown["total_cost"] = direct_cost + cost_breakdown["total_allocated"]
