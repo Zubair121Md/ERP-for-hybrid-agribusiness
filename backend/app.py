@@ -342,11 +342,11 @@ def compute_sales_weight_summary(
     """
     Sum sales kg by FC-II bucket using base product names.
 
-    Open-field allowlist products (Iceberg Lettuce, Spring Onion, …) combine
-    inhouse + outsourced portions across *all* months, because the inhouse harvest
-    and the outsourced purchase supplement are often stored with different month
-    keys when both occur in the same Excel upload. All other buckets use only the
-    month-filtered ``sales`` list.
+    Open-field allowlist products (Iceberg Lettuce, Spring Onion, …) use the
+    month-filtered rows first. If one side is missing (only inhouse or only
+    outsourced), we backfill only the missing side from the *nearest* month for
+    that same product. This handles split-month upload artifacts without pulling
+    the full historical volume into one month.
 
     EA products with no kg-conversion mapping contribute 0 kg (not raw piece count).
     """
@@ -355,11 +355,11 @@ def compute_sales_weight_summary(
     bucket_inhouse: Dict[str, float] = {k: 0.0 for k in bucket_keys}
     bucket_outsourced: Dict[str, float] = {k: 0.0 for k in bucket_keys}
 
-    # For open-field products: gather ALL months so inhouse/outsourced splits
-    # that were saved with slightly different month keys are still combined correctly.
+    # Open-field products: start from month-filtered rows, then optionally patch only
+    # missing counterpart source (inhouse/outsourced) from the nearest month.
     of_grouped: Dict[str, Dict[str, Any]] = {}
-    of_source = all_sales_for_of if all_sales_for_of is not None else sales
-    for sale in of_source:
+    of_history: Dict[str, Dict[str, List[tuple]]] = {}
+    for sale in sales:
         product = getattr(sale, "product", None)
         if not product:
             continue
@@ -375,6 +375,8 @@ def compute_sales_weight_summary(
                 "name": base,
                 "inhouse_kg": 0.0,
                 "outsourced_kg": 0.0,
+                "supp_inhouse_kg": 0.0,
+                "supp_outsourced_kg": 0.0,
                 "inhouse_months": set(),
                 "outsourced_months": set(),
             }
@@ -385,6 +387,64 @@ def compute_sales_weight_summary(
         else:
             of_grouped[ckey]["inhouse_kg"] += kg
             of_grouped[ckey]["inhouse_months"].add(mkey)
+
+    # Build open-field history across all rows for targeted backfill only.
+    all_rows = all_sales_for_of if all_sales_for_of is not None else sales
+    for sale in all_rows:
+        product = getattr(sale, "product", None)
+        if not product:
+            continue
+        base = _base_product_display_name(product.name)
+        if _classify_base_product_bucket(base) != "open_field":
+            continue
+        kg = _weight_summary_kg(sale)
+        if kg <= 0:
+            continue
+        mkey = _to_month_key(getattr(sale, "month", None) or "")
+        if not mkey:
+            continue
+        ckey = _canonical_product_key(base) or base.upper()
+        if ckey not in of_history:
+            of_history[ckey] = {"inhouse": [], "outsourced": []}
+        source = "outsourced" if product.source == "outsourced" else "inhouse"
+        of_history[ckey][source].append((mkey, kg))
+
+    def _month_to_ord(m: str) -> int:
+        try:
+            yy, mm = m.split("-")
+            return int(yy) * 12 + int(mm)
+        except Exception:
+            return 0
+
+    # Backfill only missing side from nearest month (e.g. inhouse=2026-03, outsourced=2026-02).
+    for ckey, g in of_grouped.items():
+        has_in = g["inhouse_kg"] > 0
+        has_out = g["outsourced_kg"] > 0
+        if has_in and has_out:
+            continue
+        target_months = g["inhouse_months"] or g["outsourced_months"]
+        if not target_months:
+            continue
+        target_ord = max(_month_to_ord(m) for m in target_months if m)
+        miss = "outsourced" if has_in else "inhouse"
+        candidates = of_history.get(ckey, {}).get(miss, [])
+        if not candidates:
+            continue
+        # closest month first; if tie, prefer later month
+        best_m, best_kg = sorted(
+            candidates,
+            key=lambda t: (abs(_month_to_ord(t[0]) - target_ord), -_month_to_ord(t[0]))
+        )[0]
+        if best_kg <= 0:
+            continue
+        if miss == "outsourced":
+            g["outsourced_kg"] += best_kg
+            g["supp_outsourced_kg"] += best_kg
+            g["outsourced_months"].add(best_m)
+        else:
+            g["inhouse_kg"] += best_kg
+            g["supp_inhouse_kg"] += best_kg
+            g["inhouse_months"].add(best_m)
 
     # Non-open-field products: month-filtered sales only
     non_of_grouped: Dict[str, Dict[str, Any]] = {}
@@ -477,8 +537,17 @@ def compute_sales_weight_summary(
             "inhouse_wastage_kg": None,
             "month_note": month_note,
         })
-        # Also add to inhouse/outsourced line totals for the portions NOT yet in filtered sales
-        # (outsourced portion from a different month would not be in line_outsourced_kg yet)
+
+    # Add only the supplemented counterpart quantities to the top-level source totals.
+    # (filtered-month quantities were already counted during the main loop)
+    supp_inhouse = sum(g.get("supp_inhouse_kg", 0.0) for g in of_grouped.values())
+    supp_outsourced = sum(g.get("supp_outsourced_kg", 0.0) for g in of_grouped.values())
+    if supp_inhouse > 0:
+        line_inhouse_kg += supp_inhouse
+        total_kg += supp_inhouse
+    if supp_outsourced > 0:
+        line_outsourced_kg += supp_outsourced
+        total_kg += supp_outsourced
 
     # Non-open-field lines
     for g in non_of_grouped.values():
