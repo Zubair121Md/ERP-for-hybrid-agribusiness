@@ -342,11 +342,12 @@ def compute_sales_weight_summary(
     """
     Sum sales kg by FC-II bucket using base product names.
 
-    Open-field allowlist products (Iceberg Lettuce, Spring Onion, …) use the
-    month-filtered rows first. If one side is missing (only inhouse or only
-    outsourced), we backfill only the missing side from the *nearest* month for
-    that same product. This handles split-month upload artifacts without pulling
-    the full historical volume into one month.
+    OPEN FIELD weight uses HARVEST quantity (inward_quantity) for inhouse lines,
+    not proportional sales.  Reason: products like Iceberg Lettuce and Spring
+    Onion are both harvested and purchased; the "Open Field" contribution is
+    the harvest amount (65 kg and 127.7 kg respectively), not the proportionally
+    split sales qty (61.9 and 114.1).  Outsourced purchases of open-field products
+    go into the Aggregation bucket (they are purchased, not grown).
 
     EA products with no kg-conversion mapping contribute 0 kg (not raw piece count).
     """
@@ -355,98 +356,40 @@ def compute_sales_weight_summary(
     bucket_inhouse: Dict[str, float] = {k: 0.0 for k in bucket_keys}
     bucket_outsourced: Dict[str, float] = {k: 0.0 for k in bucket_keys}
 
-    # Open-field products: start from month-filtered rows, then optionally patch only
-    # missing counterpart source (inhouse/outsourced) from the nearest month.
+    # ─── Open field: inhouse harvest quantity only ─────────────────────────────
+    # Use inward_quantity (= harvest kg) for inhouse lines so that a "Both" type
+    # product (e.g. Iceberg Lettuce: harvest=65, purchase=2604) shows the actual
+    # farm yield, not the proportionally split sales quantity.
     of_grouped: Dict[str, Dict[str, Any]] = {}
-    of_history: Dict[str, Dict[str, List[tuple]]] = {}
-    for sale in sales:
+    of_source = all_sales_for_of if all_sales_for_of is not None else sales
+    for sale in of_source:
         product = getattr(sale, "product", None)
         if not product:
             continue
+        if product.source == "outsourced":
+            continue  # outsourced open-field purchases go to Aggregation below
         base = _base_product_display_name(product.name)
         if _classify_base_product_bucket(base) != "open_field":
             continue
-        kg = _weight_summary_kg(sale)
-        if kg <= 0:
+        # Use inward_quantity (harvest) not proportional sales
+        harvest_kg = float(getattr(sale, "inward_quantity", None) or 0)
+        if harvest_kg <= 0:
+            harvest_kg = _weight_summary_kg(sale)  # fallback if not stored
+        if harvest_kg <= 0:
             continue
+        mkey = _to_month_key(getattr(sale, "month", None) or "")
         ckey = _canonical_product_key(base) or base.upper()
         if ckey not in of_grouped:
             of_grouped[ckey] = {
                 "name": base,
                 "inhouse_kg": 0.0,
-                "outsourced_kg": 0.0,
-                "supp_inhouse_kg": 0.0,
-                "supp_outsourced_kg": 0.0,
                 "inhouse_months": set(),
-                "outsourced_months": set(),
             }
-        mkey = _to_month_key(getattr(sale, "month", None) or "")
-        if product.source == "outsourced":
-            of_grouped[ckey]["outsourced_kg"] += kg
-            of_grouped[ckey]["outsourced_months"].add(mkey)
-        else:
-            of_grouped[ckey]["inhouse_kg"] += kg
+        of_grouped[ckey]["inhouse_kg"] += harvest_kg
+        if mkey:
             of_grouped[ckey]["inhouse_months"].add(mkey)
 
-    # Build open-field history across all rows for targeted backfill only.
-    all_rows = all_sales_for_of if all_sales_for_of is not None else sales
-    for sale in all_rows:
-        product = getattr(sale, "product", None)
-        if not product:
-            continue
-        base = _base_product_display_name(product.name)
-        if _classify_base_product_bucket(base) != "open_field":
-            continue
-        kg = _weight_summary_kg(sale)
-        if kg <= 0:
-            continue
-        mkey = _to_month_key(getattr(sale, "month", None) or "")
-        if not mkey:
-            continue
-        ckey = _canonical_product_key(base) or base.upper()
-        if ckey not in of_history:
-            of_history[ckey] = {"inhouse": [], "outsourced": []}
-        source = "outsourced" if product.source == "outsourced" else "inhouse"
-        of_history[ckey][source].append((mkey, kg))
-
-    def _month_to_ord(m: str) -> int:
-        try:
-            yy, mm = m.split("-")
-            return int(yy) * 12 + int(mm)
-        except Exception:
-            return 0
-
-    # Backfill only missing side from nearest month (e.g. inhouse=2026-03, outsourced=2026-02).
-    for ckey, g in of_grouped.items():
-        has_in = g["inhouse_kg"] > 0
-        has_out = g["outsourced_kg"] > 0
-        if has_in and has_out:
-            continue
-        target_months = g["inhouse_months"] or g["outsourced_months"]
-        if not target_months:
-            continue
-        target_ord = max(_month_to_ord(m) for m in target_months if m)
-        miss = "outsourced" if has_in else "inhouse"
-        candidates = of_history.get(ckey, {}).get(miss, [])
-        if not candidates:
-            continue
-        # closest month first; if tie, prefer later month
-        best_m, best_kg = sorted(
-            candidates,
-            key=lambda t: (abs(_month_to_ord(t[0]) - target_ord), -_month_to_ord(t[0]))
-        )[0]
-        if best_kg <= 0:
-            continue
-        if miss == "outsourced":
-            g["outsourced_kg"] += best_kg
-            g["supp_outsourced_kg"] += best_kg
-            g["outsourced_months"].add(best_m)
-        else:
-            g["inhouse_kg"] += best_kg
-            g["supp_inhouse_kg"] += best_kg
-            g["inhouse_months"].add(best_m)
-
-    # Non-open-field products: month-filtered sales only
+    # ─── Non-open-field + outsourced open-field: month-filtered sales only ─────
     non_of_grouped: Dict[str, Dict[str, Any]] = {}
     total_kg = 0.0
     line_count = 0
@@ -469,14 +412,12 @@ def compute_sales_weight_summary(
             line_count += 1
             continue
         base = _base_product_display_name(product.name)
-        if _classify_base_product_bucket(base) == "open_field":
-            # Counted via of_grouped below; still include in line totals
-            if product.source == "outsourced":
-                line_outsourced_kg += kg
-                outsourced_line_count += 1
-            else:
-                line_inhouse_kg += kg
-                inhouse_line_count += 1
+        base_bucket = _classify_base_product_bucket(base)
+
+        if base_bucket == "open_field" and product.source == "inhouse":
+            # Bucket total is handled via of_grouped (harvest qty); track sales for line totals
+            line_inhouse_kg += kg
+            inhouse_line_count += 1
             total_kg += kg
             line_count += 1
             continue
@@ -510,44 +451,26 @@ def compute_sales_weight_summary(
 
     product_lines: List[Dict[str, Any]] = []
 
-    # Open-field lines (all months)
+    # Open-field lines: inhouse harvest only
     for g in of_grouped.values():
         in_kg = g["inhouse_kg"]
-        out_kg = g["outsourced_kg"]
-        total_of = in_kg + out_kg
-        buckets["open_field"] += total_of
+        buckets["open_field"] += in_kg
         bucket_inhouse["open_field"] += in_kg
-        bucket_outsourced["open_field"] += out_kg
         ih_months = sorted(g["inhouse_months"])
-        out_months = sorted(g["outsourced_months"])
-        month_note = ""
-        if ih_months and out_months and set(ih_months) != set(out_months):
-            month_note = (
-                f"⚠ month mismatch — inhouse: {', '.join(ih_months)}; "
-                f"outsourced: {', '.join(out_months)}"
-            )
         product_lines.append({
             "product": g["name"],
             "bucket": "open_field",
             "inhouse_kg": round(in_kg, 3),
-            "outsourced_kg": round(out_kg, 3),
-            "row_total_kg": round(total_of, 3),
-            "counted_in_bucket_kg": round(total_of, 3),
-            "inhouse_inward_kg": None,
+            "outsourced_kg": 0.0,
+            "row_total_kg": round(in_kg, 3),
+            "counted_in_bucket_kg": round(in_kg, 3),
+            "inhouse_inward_kg": round(in_kg, 3),
             "inhouse_wastage_kg": None,
-            "month_note": month_note,
+            "month_note": (
+                f"harvest quantity (inward_quantity) — months: {', '.join(ih_months)}"
+                if ih_months else "harvest quantity (inward_quantity)"
+            ),
         })
-
-    # Add only the supplemented counterpart quantities to the top-level source totals.
-    # (filtered-month quantities were already counted during the main loop)
-    supp_inhouse = sum(g.get("supp_inhouse_kg", 0.0) for g in of_grouped.values())
-    supp_outsourced = sum(g.get("supp_outsourced_kg", 0.0) for g in of_grouped.values())
-    if supp_inhouse > 0:
-        line_inhouse_kg += supp_inhouse
-        total_kg += supp_inhouse
-    if supp_outsourced > 0:
-        line_outsourced_kg += supp_outsourced
-        total_kg += supp_outsourced
 
     # Non-open-field lines
     for g in non_of_grouped.values():
@@ -621,8 +544,9 @@ def compute_sales_weight_summary(
         "distribution": distribution,
         "product_lines": product_lines,
         "weight_basis_note": (
-            "Sales qty (kg) per line; EA products with no kg mapping = 0. "
-            "Open field bucket uses all months so inhouse+outsourced splits are combined correctly."
+            "Open Field = inhouse harvest (inward_quantity) for Iceberg Lettuce, Spring Onion, etc. "
+            "Outsourced purchases of open-field products go to Aggregation. "
+            "All other buckets use sold qty (kg); EA products without kg mapping = 0."
         ),
     }
 
