@@ -545,21 +545,27 @@ function displaySalesWeightSummary(summary) {
     const ofNote = summary.open_field_note
         ? `<p style="margin:0 0 8px;font-size:0.8rem;color:#64748b;">${summary.open_field_note}</p>`
         : '';
-    let rows = (summary.distribution || []).map(d => `
-        <tr>
-            <td><strong>${d.label}</strong></td>
-            <td style="text-align:right;">${formatNumber(d.kg)} kg</td>
-            <td style="text-align:right;">${d.percent}%</td>
-        </tr>
-    `).join('');
     container.style.display = 'block';
     container.innerHTML = `
         <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:16px 20px;">
             <h4 style="margin:0 0 12px;color:#1e293b;">Sales weight summary${monthNote}</h4>
             <p style="margin:0 0 14px;color:#475569;font-size:0.95rem;">
                 <strong>Total sold weight:</strong> ${formatNumber(summary.total_kg)} kg
-                <span style="color:#64748b;"> (${summary.line_count || 0} product lines)</span>
+                <span style="color:#64748b;"> (${summary.line_count || 0} sales lines)</span>
             </p>
+            <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px;margin-bottom:16px;">
+                <div style="background:#ecfdf5;border:1px solid #a7f3d0;border-radius:8px;padding:12px 14px;">
+                    <div style="font-size:0.8rem;color:#047857;font-weight:600;text-transform:uppercase;">Inhouse</div>
+                    <div style="font-size:1.25rem;color:#065f46;font-weight:700;">${formatNumber(summary.line_inhouse_kg || 0)} kg</div>
+                    <div style="font-size:0.85rem;color:#6b7280;">${summary.inhouse_line_count || 0} lines · ${summary.inhouse_share_percent != null ? summary.inhouse_share_percent : '—'}% of total</div>
+                </div>
+                <div style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:8px;padding:12px 14px;">
+                    <div style="font-size:0.8rem;color:#1d4ed8;font-weight:600;text-transform:uppercase;">Outsourced</div>
+                    <div style="font-size:1.25rem;color:#1e40af;font-weight:700;">${formatNumber(summary.line_outsourced_kg || 0)} kg</div>
+                    <div style="font-size:0.85rem;color:#6b7280;">${summary.outsourced_line_count || 0} lines · ${summary.outsourced_share_percent != null ? summary.outsourced_share_percent : '—'}% of total</div>
+                </div>
+            </div>
+            ${summary.unattributed_kg > 0 ? `<p style="margin:0 0 10px;font-size:0.85rem;color:#b45309;"><strong>Note:</strong> ${formatNumber(summary.unattributed_kg)} kg on rows with no linked product (shown under Other).</p>` : ''}
             ${scopeP}
             ${pctNote}
             ${ofNote}
@@ -570,11 +576,21 @@ function displaySalesWeightSummary(summary) {
                 <thead>
                     <tr>
                         <th>Bucket</th>
-                        <th style="text-align:right;">Weight (kg)</th>
+                        <th style="text-align:right;">Inhouse kg</th>
+                        <th style="text-align:right;">Outsourced kg</th>
+                        <th style="text-align:right;">Total kg</th>
                         <th style="text-align:right;">Share</th>
                     </tr>
                 </thead>
-                <tbody>${rows}</tbody>
+                <tbody>${(summary.distribution || []).map(d => `
+        <tr>
+            <td><strong>${d.label}</strong></td>
+            <td style="text-align:right;">${formatNumber(d.inhouse_kg != null ? d.inhouse_kg : 0)}</td>
+            <td style="text-align:right;">${formatNumber(d.outsourced_kg != null ? d.outsourced_kg : 0)}</td>
+            <td style="text-align:right;">${formatNumber(d.kg)}</td>
+            <td style="text-align:right;">${d.percent}%</td>
+        </tr>
+    `).join('')}</tbody>
             </table>
             ${(summary.product_lines && summary.product_lines.length) ? `
             <details style="margin-top:14px;">
@@ -623,6 +639,7 @@ function displaySales(sales) {
             <thead>
                 <tr>
                     <th>Product</th>
+                    <th>Source</th>
                     <th>Quantity</th>
                     <th>Sale Price</th>
                     <th>Direct Cost</th>
@@ -636,9 +653,13 @@ function displaySales(sales) {
     sales.forEach(sale => {
         const revenue = sale.quantity * sale.sale_price;
         const qtyText = formatQtyDisplay(sale.product_name, sale.product?.unit || sale.unit, sale.quantity);
+        const src = sale.product_source || sale.product?.source || '';
+        const badgeClass = src === 'outsourced' ? 'badge-info' : 'badge-success';
+        const srcLabel = src ? src.charAt(0).toUpperCase() + src.slice(1) : '—';
         tableHTML += `
             <tr data-sale-id="${sale.id}">
                 <td><strong>${sale.product_name}</strong></td>
+                <td>${src ? `<span class="badge ${badgeClass}">${srcLabel}</span>` : '—'}</td>
                 <td>${qtyText}</td>
                 <td>₹${sale.sale_price}</td>
                 <td>₹${sale.direct_cost}</td>

@@ -330,9 +330,16 @@ def compute_sales_weight_summary(sales: List) -> Dict[str, Any]:
     """
     bucket_keys = ("strawberry", "lettuce_greens", "open_field", "aggregation", "other")
     buckets: Dict[str, float] = {k: 0.0 for k in bucket_keys}
+    bucket_inhouse: Dict[str, float] = {k: 0.0 for k in bucket_keys}
+    bucket_outsourced: Dict[str, float] = {k: 0.0 for k in bucket_keys}
     grouped: Dict[str, Dict[str, Any]] = {}
     total_kg = 0.0
     line_count = 0
+    line_inhouse_kg = 0.0
+    line_outsourced_kg = 0.0
+    inhouse_line_count = 0
+    outsourced_line_count = 0
+    unattributed_kg = 0.0
 
     for sale in sales:
         kg = _weight_summary_kg(sale)
@@ -343,7 +350,15 @@ def compute_sales_weight_summary(sales: List) -> Dict[str, Any]:
         product = getattr(sale, "product", None)
         if not product:
             buckets["other"] += kg
+            bucket_inhouse["other"] += kg  # no source metadata — show under inhouse for display consistency
+            unattributed_kg += kg
             continue
+        if product.source == "outsourced":
+            line_outsourced_kg += kg
+            outsourced_line_count += 1
+        else:
+            line_inhouse_kg += kg
+            inhouse_line_count += 1
         base = _base_product_display_name(product.name)
         ckey = _canonical_product_key(base) or base.upper()
         if ckey not in grouped:
@@ -363,18 +378,25 @@ def compute_sales_weight_summary(sales: List) -> Dict[str, Any]:
         if bucket == "open_field":
             counted = in_kg + out_kg
             buckets["open_field"] += counted
+            bucket_inhouse["open_field"] += in_kg
+            bucket_outsourced["open_field"] += out_kg
         elif bucket in ("lettuce_greens", "strawberry"):
+            counted = in_kg
             buckets[bucket] += in_kg
             buckets["aggregation"] += out_kg
-            counted = in_kg
+            bucket_inhouse[bucket] += in_kg
+            bucket_outsourced["aggregation"] += out_kg
         elif out_kg > 0 and in_kg <= 0:
             bucket = "aggregation"
             counted = out_kg
             buckets["aggregation"] += out_kg
+            bucket_outsourced["aggregation"] += out_kg
         else:
+            counted = in_kg
             buckets["other"] += in_kg
             buckets["aggregation"] += out_kg
-            counted = in_kg
+            bucket_inhouse["other"] += in_kg
+            bucket_outsourced["aggregation"] += out_kg
 
         product_lines.append({
             "product": base,
@@ -382,7 +404,7 @@ def compute_sales_weight_summary(sales: List) -> Dict[str, Any]:
             "inhouse_kg": round(in_kg, 3),
             "outsourced_kg": round(out_kg, 3),
             "row_total_kg": round(in_kg + out_kg, 3),
-            "counted_in_bucket_kg": round(counted if bucket != "open_field" else in_kg + out_kg, 3),
+            "counted_in_bucket_kg": round(counted, 3),
         })
 
     product_lines.sort(key=lambda x: (-x["counted_in_bucket_kg"], x["product"]))
@@ -399,15 +421,28 @@ def compute_sales_weight_summary(sales: List) -> Dict[str, Any]:
     for key in bucket_keys:
         kg = buckets[key]
         pct = (kg / bucket_total * 100.0) if bucket_total > 0 else 0.0
+        inh = bucket_inhouse[key]
+        out = bucket_outsourced[key]
         distribution.append({
             "bucket": key,
             "label": labels[key],
             "kg": round(kg, 2),
+            "inhouse_kg": round(inh, 2),
+            "outsourced_kg": round(out, 2),
             "percent": round(pct, 2),
         })
+    inhouse_share_pct = (line_inhouse_kg / total_kg * 100.0) if total_kg > 0 else 0.0
+    outsourced_share_pct = (line_outsourced_kg / total_kg * 100.0) if total_kg > 0 else 0.0
     return {
         "total_kg": round(total_kg, 2),
         "line_count": line_count,
+        "line_inhouse_kg": round(line_inhouse_kg, 2),
+        "line_outsourced_kg": round(line_outsourced_kg, 2),
+        "inhouse_line_count": inhouse_line_count,
+        "outsourced_line_count": outsourced_line_count,
+        "inhouse_share_percent": round(inhouse_share_pct, 2),
+        "outsourced_share_percent": round(outsourced_share_pct, 2),
+        "unattributed_kg": round(unattributed_kg, 2),
         "distribution": distribution,
         "product_lines": product_lines,
         "weight_basis_note": (
@@ -794,6 +829,10 @@ class MonthlySaleResponse(BaseModel):
     product_id: int
     product_name: str
     unit: str
+    product_source: Optional[str] = Field(
+        None,
+        description="inhouse or outsourced from linked Product",
+    )
     month: str
     quantity: float
     sale_price: float
@@ -804,6 +843,12 @@ class MonthlySaleResponse(BaseModel):
     inhouse_production: float
     wastage: float
     created_at: datetime
+
+
+def _monthly_sale_public_dict(sale: MonthlySale) -> Dict[str, Any]:
+    """ORM instance fields only (no SQLAlchemy internal attrs)."""
+    return {k: v for k, v in sale.__dict__.items() if not k.startswith("_")}
+
 
 class CostCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=100)
@@ -2046,9 +2091,10 @@ async def create_monthly_sale(sale: MonthlySaleCreate, db: Session = Depends(get
     
     # Add product name and unit to response
     sale_response = MonthlySaleResponse(
-        **db_sale.__dict__,
+        **_monthly_sale_public_dict(db_sale),
         product_name=product.name,
-        unit=getattr(product, 'unit', 'kg')  # Get unit from product, default to 'kg'
+        unit=getattr(product, 'unit', 'kg'),  # Get unit from product, default to 'kg'
+        product_source=getattr(product, "source", None),
     )
     return sale_response
 
@@ -2071,9 +2117,10 @@ async def get_all_sales(db: Session = Depends(get_db)):
     for sale in sales:
         product = product_map.get(sale.product_id)
         sales_with_names.append(MonthlySaleResponse(
-            **sale.__dict__,
+            **_monthly_sale_public_dict(sale),
             product_name=product.name if product else "Unknown",
-            unit=product.unit if product and getattr(product, 'unit', None) else 'kg'
+            unit=product.unit if product and getattr(product, 'unit', None) else 'kg',
+            product_source=product.source if product else None,
         ))
     
     return sales_with_names
@@ -2183,9 +2230,10 @@ async def get_monthly_sales_or_by_id(param: str, db: Session = Depends(get_db)):
             raise HTTPException(status_code=404, detail="Sales record not found")
         
         sale_response = MonthlySaleResponse(
-            **sale.__dict__,
+            **_monthly_sale_public_dict(sale),
             product_name=sale.product.name if sale.product else "Unknown",
-            unit=sale.product.unit if sale.product and getattr(sale.product, 'unit', None) else 'kg'
+            unit=sale.product.unit if sale.product and getattr(sale.product, 'unit', None) else 'kg',
+            product_source=sale.product.source if sale.product else None,
         )
         print(f"DEBUG: Returning single sale: {sale_response}")
         return sale_response
@@ -2199,9 +2247,10 @@ async def get_monthly_sales_or_by_id(param: str, db: Session = Depends(get_db)):
         sales_with_names = []
         for sale in sales:
             sales_with_names.append(MonthlySaleResponse(
-                **sale.__dict__,
+                **_monthly_sale_public_dict(sale),
                 product_name=sale.product.name if sale.product else "Unknown",
-                unit=sale.product.unit if sale.product and getattr(sale.product, 'unit', None) else 'kg'
+                unit=sale.product.unit if sale.product and getattr(sale.product, 'unit', None) else 'kg',
+                product_source=sale.product.source if sale.product else None,
             ))
         
         return sales_with_names
@@ -2217,9 +2266,10 @@ async def get_sale_by_id(sale_id: int, db: Session = Depends(get_db)):
     # Add product name and unit to response
     product = db.query(Product).filter(Product.id == sale.product_id).first()
     sale_response = MonthlySaleResponse(
-        **sale.__dict__,
+        **_monthly_sale_public_dict(sale),
         product_name=product.name if product else "Unknown",
-        unit=product.unit if product and getattr(product, 'unit', None) else 'kg'
+        unit=product.unit if product and getattr(product, 'unit', None) else 'kg',
+        product_source=product.source if product else None,
     )
     print(f"DEBUG: Returning sale: {sale_response}")
     return sale_response
@@ -2241,9 +2291,10 @@ async def update_monthly_sale(sale_id: int, sale_update: MonthlySaleUpdate, db: 
     # Add product name to response
     product = db.query(Product).filter(Product.id == sale.product_id).first()
     return MonthlySaleResponse(
-        **sale.__dict__,
+        **_monthly_sale_public_dict(sale),
         product_name=product.name if product else "Unknown",
-        unit=product.unit if product and getattr(product, 'unit', None) else 'kg'
+        unit=product.unit if product and getattr(product, 'unit', None) else 'kg',
+        product_source=product.source if product else None,
     )
 
 
