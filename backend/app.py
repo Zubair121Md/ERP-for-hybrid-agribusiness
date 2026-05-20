@@ -164,17 +164,91 @@ def _normalize_product_name_upper(name: Optional[str]) -> str:
     return re.sub(r"\s*\((INHOUSE|OUTSOURCED)\)\s*$", "", upper)
 
 
-GREENS_WEIGHT_KEYWORDS = [
-    "GREEN", "LETTUCE", "MICRO", "SALAD", "SPINACH", "ARUGULA",
-    "KALE", "BASIL", "PARSLEY", "CELERY", "CHIVES", "DILL",
-    "OREGANO", "SAGE", "THYME", "TARRAGON", "LEEKS", "ASPARAGUS",
-    "BOK", "MIXED",
-]
+def _canonical_product_key(name: Optional[str]) -> str:
+    return re.sub(r"[^A-Z0-9]", "", _normalize_product_name_upper(name))
+
+
+ALLOWLIST_PATH = Path(__file__).resolve().parent / "product_allowlists.json"
 
 OPEN_FIELD_WEIGHT_KEYWORDS = [
     "CABBAGE", "ONION", "ZUCCHINI", "BEETROOT", "CARROT", "BROCCOLI",
     "RADISH", "TURNIP", "RHUBARB", "FENNEL", "POTATO", "BEANS", "HARICOT",
 ]
+
+# In-memory allowlist keys (reloaded from JSON on save and at import)
+_lettuce_greens_keys: set = set()
+_open_field_extra_keys: set = set()
+
+
+def _default_allowlist_data() -> Dict[str, Any]:
+    return {
+        "lettuce_greens_products": [],
+        "open_field_extra_products": ["Iceberg Lettuce"],
+    }
+
+
+def load_product_allowlists() -> Dict[str, Any]:
+    """Load allowlists from disk; rebuild canonical key sets."""
+    global _lettuce_greens_keys, _open_field_extra_keys
+    data = _default_allowlist_data()
+    try:
+        if ALLOWLIST_PATH.is_file():
+            with open(ALLOWLIST_PATH, "r", encoding="utf-8") as f:
+                loaded = json.load(f)
+            if isinstance(loaded, dict):
+                data.update(loaded)
+    except Exception as e:
+        print(f"⚠️  Could not load product allowlists: {e}")
+    _lettuce_greens_keys = {
+        _canonical_product_key(n)
+        for n in (data.get("lettuce_greens_products") or [])
+        if _canonical_product_key(n)
+    }
+    _open_field_extra_keys = {
+        _canonical_product_key(n)
+        for n in (data.get("open_field_extra_products") or [])
+        if _canonical_product_key(n)
+    }
+    return data
+
+
+def save_product_allowlists(data: Dict[str, Any]) -> Dict[str, Any]:
+    """Persist allowlists and refresh in-memory keys."""
+    clean = {
+        "lettuce_greens_products": list(data.get("lettuce_greens_products") or []),
+        "open_field_extra_products": list(data.get("open_field_extra_products") or ["Iceberg Lettuce"]),
+        "notes": data.get("notes") or _default_allowlist_data().get("notes", ""),
+    }
+    ALLOWLIST_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with open(ALLOWLIST_PATH, "w", encoding="utf-8") as f:
+        json.dump(clean, f, indent=2, ensure_ascii=False)
+    return load_product_allowlists()
+
+
+load_product_allowlists()
+
+
+def is_lettuce_greens_product_name(name: Optional[str]) -> bool:
+    """True only if product name is on the saved lettuce/greens allowlist."""
+    key = _canonical_product_key(name)
+    return bool(key) and key in _lettuce_greens_keys
+
+
+def is_open_field_product_name(name: Optional[str]) -> bool:
+    """Open field: explicit extras (e.g. Iceberg Lettuce) or keyword fallback."""
+    key = _canonical_product_key(name)
+    if key and key in _open_field_extra_keys:
+        return True
+    upper = _normalize_product_name_upper(name)
+    if "ICEBERG" in upper and "LETTUCE" in upper:
+        return True
+    return any(kw in upper for kw in OPEN_FIELD_WEIGHT_KEYWORDS)
+
+
+def is_lettuce_greens_product(product) -> bool:
+    if not product or getattr(product, "source", None) != "inhouse":
+        return False
+    return is_lettuce_greens_product_name(getattr(product, "name", None))
 
 
 def classify_product_weight_bucket(product) -> str:
@@ -189,11 +263,49 @@ def classify_product_weight_bucket(product) -> str:
     name = _normalize_product_name_upper(getattr(product, "name", None))
     if "STRAWBERRY" in name:
         return "strawberry"
-    if any(kw in name for kw in GREENS_WEIGHT_KEYWORDS):
-        return "lettuce_greens"
-    if any(kw in name for kw in OPEN_FIELD_WEIGHT_KEYWORDS):
+    if "RASPBERRY" in name or "BLUEBERRY" in name or "BLUBERRY" in name:
+        return "other"
+    if is_open_field_product_name(getattr(product, "name", None)):
         return "open_field"
+    if is_lettuce_greens_product_name(getattr(product, "name", None)):
+        return "lettuce_greens"
     return "other"
+
+
+def _get_purchase_accounts_pool_for_month(db: Session, month_key: str) -> float:
+    total = 0.0
+    for c in db.query(Cost).all():
+        if _to_month_key(c.month) != month_key:
+            continue
+        if (c.category or "").strip() == "variable_cost_item":
+            continue
+        if "PURCHASE ACCOUNTS" in (c.name or "").upper():
+            total += float(c.amount or 0)
+    return total
+
+
+def _compute_purchase_direct_shares(
+    sales_map: Dict,
+    product_map: Dict,
+    pool_total: float,
+) -> Dict[int, float]:
+    """Split PURCHASE ACCOUNTS pool across outsourced lines (direct_cost weight, else sales kg)."""
+    if pool_total <= 0:
+        return {}
+    entries: List[tuple] = []
+    for pid, sale in sales_map.items():
+        product = product_map.get(pid)
+        if not product or product.source != "outsourced":
+            continue
+        weight = float(getattr(sale, "direct_cost", None) or 0)
+        if weight <= 0:
+            weight = _sale_quantity_kg(sale)
+        if weight > 0:
+            entries.append((pid, weight))
+    total_w = sum(w for _, w in entries)
+    if total_w <= 0:
+        return {}
+    return {pid: pool_total * (w / total_w) for pid, w in entries}
 
 
 def compute_sales_weight_summary(sales: List) -> Dict[str, Any]:
@@ -1121,16 +1233,10 @@ class CostAllocationEngine:
                         continue
                 
                 elif fixed_cost_category == "greens":
-                    # FIXED COST CAT - II (Greens): Only apply to greens/lettuce products (inhouse)
-                    # Match products with "greens", "lettuce", "micro", "salad", or other greens keywords
+                    # FIXED COST CAT - II (Greens): inhouse products on saved lettuce/greens allowlist only
                     if product.source != "inhouse":
                         continue
-                    # Check for greens/lettuce keywords
-                    greens_keywords = ["GREEN", "LETTUCE", "MICRO", "SALAD", "SPINACH", "ARUGULA", 
-                                     "KALE", "BASIL", "PARSLEY", "CELERY", "CHIVES", "DILL", 
-                                     "OREGANO", "SAGE", "THYME", "TARRAGON", "LEEKS", "ASPARAGUS",
-                                     "BOK", "MIXED"]
-                    if not any(keyword in product_name_upper for keyword in greens_keywords):
+                    if not is_lettuce_greens_product_name(product.name):
                         continue
                 
                 elif fixed_cost_category == "open_field":
@@ -1146,8 +1252,7 @@ class CostAllocationEngine:
                             if product_normalized in product_name_normalized_map:
                                 product_mapped = True
                     if not product_mapped:
-                        open_field_keywords = ["CABBAGE", "ONION", "ZUCCHINI", "BEETROOT", "CARROT", "BROCCOLI", "RADISH", "TURNIP", "RHUBARB", "FENNEL", "POTATO", "BEANS", "HARICOT"]
-                        if any(keyword in product_name_upper for keyword in open_field_keywords):
+                        if is_open_field_product_name(product.name):
                             product_mapped = True
                     if not product_mapped:
                         continue
@@ -1221,9 +1326,9 @@ class CostAllocationEngine:
                         if "STRAWBERRY" in product_name_upper:
                             product_mapped = True
                     
-                    # LETTUCE: Only match products with "lettuce" in name
+                    # LETTUCE: saved allowlist only (not keyword match)
                     elif cost_section == "Lettuce":
-                        if "LETTUCE" in product_name_upper:
+                        if is_lettuce_greens_product_name(product.name):
                             product_mapped = True
                     
                     # POLYHOUSE: match products in Polyhouse sections (for other Polyhouse costs, not LETTUCE)
@@ -1233,9 +1338,7 @@ class CostAllocationEngine:
                     
                     # OPEN FIELD: match products typically grown in open field
                     elif cost_section == "Open Field":
-                        # Open field products: Chinese Cabbage, Spring Onion, Zucchini, Beetroot, Carrot, Broccoli, Radish, Turnip, Rhubarb, Fennel, Potato, etc.
-                        open_field_keywords = ["CABBAGE", "ONION", "ZUCCHINI", "BEETROOT", "CARROT", "BROCCOLI", "RADISH", "TURNIP", "RHUBARB", "FENNEL", "POTATO", "BEANS", "HARICOT"]
-                        if any(keyword in product_name_upper for keyword in open_field_keywords):
+                        if is_open_field_product_name(product.name):
                             product_mapped = True
                     
                     # RASPBERRY & BLUEBERRY: match products with "raspberry" or "blueberry" in name
@@ -1324,6 +1427,13 @@ class CostAllocationEngine:
         outsourced_profit = 0.0      # Profit after BOTH direct + P&L
         
         cost_breakdown = {}
+        month_key = _to_month_key(month)
+        purchase_shares: Dict[int, float] = {}
+        purchase_pool_total = 0.0
+        if self.purchase_cost_mode == "direct":
+            purchase_pool_total = _get_purchase_accounts_pool_for_month(self.db, month_key)
+            purchase_shares = _compute_purchase_direct_shares(sales_map, product_map, purchase_pool_total)
+
         # Sum of sales kg across products in sales_map (one row per product_id: last sale wins if duplicates)
         total_sales_kg_basis = sum(
             _sale_quantity_kg(s) for s in sales_map.values()
@@ -1337,8 +1447,11 @@ class CostAllocationEngine:
             direct_cost = getattr(sale, 'direct_cost', None)
             if direct_cost is None:
                 direct_cost = 0.0
-            # sales_kg mode: purchase pool is allocated; do not also count per-line inward direct_cost on outsourced
-            if self.purchase_cost_mode == "sales_kg" and product.source == "outsourced":
+            purchase_cost = 0.0
+            if product.source == "outsourced" and self.purchase_cost_mode == "direct":
+                purchase_cost = float(purchase_shares.get(product_id, 0.0))
+                direct_cost = purchase_cost
+            elif self.purchase_cost_mode == "sales_kg" and product.source == "outsourced":
                 direct_cost = 0.0
             
             total_allocated = sum(a.allocated_amount for a in allocated_costs)
@@ -1360,6 +1473,22 @@ class CostAllocationEngine:
                 if category not in cost_breakdown:
                     cost_breakdown[category] = 0.0
                 cost_breakdown[category] += allocation.allocated_amount
+            if purchase_cost > 0:
+                cost_breakdown["purchase_accounts"] = cost_breakdown.get("purchase_accounts", 0.0) + purchase_cost
+            
+            allocation_rows = [
+                {
+                    "cost_name": getattr(a.cost, "name", None) or "Unknown",
+                    "category": getattr(a.cost, "category", None) or "general",
+                    "amount": a.allocated_amount
+                } for a in allocated_costs
+            ]
+            if purchase_cost > 0:
+                allocation_rows.append({
+                    "cost_name": "PURCHASE ACCOUNTS",
+                    "category": "purchase_accounts",
+                    "amount": purchase_cost,
+                })
             
             product_data = {
                 "product_id": product_id,
@@ -1369,6 +1498,7 @@ class CostAllocationEngine:
                 "quantity": sale.quantity,
                 "sale_price": sale.sale_price,
                 "direct_cost": direct_cost,
+                "purchase_cost": purchase_cost,
                 "allocated_costs": total_allocated,
                 "total_cost": total_cost,
                 "revenue": revenue,
@@ -1378,13 +1508,7 @@ class CostAllocationEngine:
                 # Keep key name "profit_margin" for backwards compatibility,
                 # but now it represents margin % on Cost Price (CP).
                 "profit_margin": margin_pct_cp,
-                "allocations": [
-                    {
-                        "cost_name": getattr(a.cost, "name", None) or "Unknown",
-                        "category": getattr(a.cost, "category", None) or "general",
-                        "amount": a.allocated_amount
-                    } for a in allocated_costs
-                ]
+                "allocations": allocation_rows,
             }
             
             products_data.append(product_data)
@@ -1430,6 +1554,7 @@ class CostAllocationEngine:
             "month": month,
             "purchase_cost_mode": self.purchase_cost_mode,
             "purchase_cost_mode_label": purchase_mode_label,
+            "purchase_accounts_pool_total": purchase_pool_total,
             "products": products_data,
             "total_revenue": total_revenue,
             "total_costs": total_costs,
@@ -1896,7 +2021,32 @@ async def get_sales_weight_summary(
         sales = [s for s in sales if _to_month_key(s.month) == target]
     summary = compute_sales_weight_summary(sales)
     summary["month"] = _to_month_key(month) if month else None
+    summary["lettuce_greens_product_count"] = len(_lettuce_greens_keys)
     return summary
+
+
+class ProductAllowlistUpdate(BaseModel):
+    lettuce_greens_products: List[str] = Field(default_factory=list)
+    open_field_extra_products: List[str] = Field(default_factory=lambda: ["Iceberg Lettuce"])
+
+
+@app.get("/api/product-allowlists")
+async def get_product_allowlists():
+    data = load_product_allowlists()
+    return {
+        **data,
+        "lettuce_greens_count": len(_lettuce_greens_keys),
+    }
+
+
+@app.put("/api/product-allowlists")
+async def put_product_allowlists(body: ProductAllowlistUpdate):
+    data = save_product_allowlists(body.model_dump())
+    return {
+        "message": "Product allowlists saved",
+        **data,
+        "lettuce_greens_count": len(_lettuce_greens_keys),
+    }
 
 
 @app.get("/api/monthly-sales/{param}", response_model=Union[MonthlySaleResponse, List[MonthlySaleResponse]])
@@ -2082,8 +2232,17 @@ async def allocate_costs(
     return result
 
 @app.get("/api/product-cost-breakdown/{product_id}")
-async def get_product_cost_breakdown(product_id: int, db: Session = Depends(get_db)):
+async def get_product_cost_breakdown(
+    product_id: int,
+    purchase_cost_mode: str = Query("direct"),
+    month: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+):
     """Get detailed cost breakdown for a specific product"""
+    mode = (purchase_cost_mode or "direct").strip().lower()
+    if mode not in ("direct", "sales_kg"):
+        mode = "direct"
+
     # Get product
     product = db.query(Product).filter(Product.id == product_id).first()
     if not product:
@@ -2097,6 +2256,21 @@ async def get_product_cost_breakdown(product_id: int, db: Session = Depends(get_
     # Get all allocations for this product
     allocations = db.query(Allocation).filter(Allocation.product_id == product_id).all()
     sales_kg = _sale_quantity_kg(sale)
+
+    month_key = _to_month_key(month) if month else _to_month_key(sale.month)
+    products = db.query(Product).filter(Product.is_active == True).all()
+    product_map = {p.id: p for p in products}
+    monthly_sales = [s for s in db.query(MonthlySale).all() if _to_month_key(s.month) == month_key]
+    sales_map = {s.product_id: s for s in monthly_sales}
+    purchase_cost = 0.0
+    direct_cost = float(sale.direct_cost or 0)
+    if product.source == "outsourced" and mode == "direct":
+        pool = _get_purchase_accounts_pool_for_month(db, month_key)
+        shares = _compute_purchase_direct_shares(sales_map, product_map, pool)
+        purchase_cost = float(shares.get(product_id, 0.0))
+        direct_cost = purchase_cost
+    elif product.source == "outsourced" and mode == "sales_kg":
+        direct_cost = 0.0
     
     # Group allocations by cost category and type
     cost_breakdown = {
@@ -2107,7 +2281,9 @@ async def get_product_cost_breakdown(product_id: int, db: Session = Depends(get_
         "quantity": sale.quantity,
         "sale_price": sale.sale_price,
         "revenue": sale.quantity * sale.sale_price,
-        "direct_cost": sale.direct_cost,
+        "direct_cost": direct_cost,
+        "purchase_cost": purchase_cost,
+        "purchase_cost_mode": mode,
         "total_allocated": sum(a.allocated_amount for a in allocations),
         "costs_by_category": {},
         "costs_by_type": {
@@ -2153,9 +2329,31 @@ async def get_product_cost_breakdown(product_id: int, db: Session = Depends(get_
             cost_breakdown["costs_by_type"]["outsourced_only"].append(cost_info)
         else:
             cost_breakdown["costs_by_type"]["common"].append(cost_info)
+
+    if purchase_cost > 0:
+        purchase_info = {
+            "cost_id": None,
+            "cost_name": "PURCHASE ACCOUNTS",
+            "category": "purchase_accounts",
+            "applies_to": "outsourced",
+            "basis": "direct_cost",
+            "amount": purchase_cost,
+            "total_cost_amount": _get_purchase_accounts_pool_for_month(db, month_key),
+            "amount_per_kg": (purchase_cost / sales_kg) if sales_kg > 0 else 0.0,
+        }
+        cost_breakdown["detailed_costs"].append(purchase_info)
+        if "purchase_accounts" not in cost_breakdown["costs_by_category"]:
+            cost_breakdown["costs_by_category"]["purchase_accounts"] = {
+                "total": 0.0,
+                "per_kg": 0.0,
+                "costs": [],
+            }
+        cost_breakdown["costs_by_category"]["purchase_accounts"]["total"] += purchase_cost
+        cost_breakdown["costs_by_category"]["purchase_accounts"]["costs"].append(purchase_info)
+        cost_breakdown["costs_by_type"]["outsourced_only"].append(purchase_info)
     
     # Calculate totals
-    cost_breakdown["total_cost"] = sale.direct_cost + cost_breakdown["total_allocated"]
+    cost_breakdown["total_cost"] = direct_cost + cost_breakdown["total_allocated"]
     cost_breakdown["profit"] = cost_breakdown["revenue"] - cost_breakdown["total_cost"]
     cost_breakdown["profit_margin"] = (cost_breakdown["profit"] / cost_breakdown["revenue"] * 100) if cost_breakdown["revenue"] > 0 else 0
     _qkg = sales_kg

@@ -154,7 +154,7 @@ function showTab(tabName) {
     } else if (tabName === 'costs') {
         loadCosts();
     } else if (tabName === 'harvest-mapping') {
-        // No data loading needed for mapping tab
+        loadProductAllowlists();
         console.log('✅ Mapping tab activated');
     }
 }
@@ -1303,6 +1303,61 @@ function updateProductDropdowns(products) {
     });
 }
 
+function formatCategoryLabel(category) {
+    const labels = {
+        purchase_accounts: 'PURCHASE ACCOUNTS',
+        fixed_cost_cat_i: 'Fixed Cost Cat I',
+        fixed_cost_cat_ii: 'Fixed Cost Cat II',
+        variable_cost: 'Variable Cost',
+        distribution_cost: 'Distribution Cost',
+        marketing_expenses: 'Marketing Expenses',
+        vehicle_running_cost: 'Vehicle Running Cost',
+        others: 'Others',
+        wastage: 'Wastage',
+        general: 'General',
+    };
+    return labels[category] || category;
+}
+
+async function loadProductAllowlists() {
+    const textarea = document.getElementById('lettuce-greens-allowlist');
+    if (!textarea) return;
+    try {
+        const res = await fetch(`${API_BASE}/product-allowlists`);
+        if (!res.ok) return;
+        const data = await res.json();
+        const lines = (data.lettuce_greens_products || []).join('\n');
+        textarea.value = lines;
+    } catch (e) {
+        console.error('Failed to load allowlists', e);
+    }
+}
+
+async function saveLettuceGreensAllowlist() {
+    const textarea = document.getElementById('lettuce-greens-allowlist');
+    const status = document.getElementById('allowlist-save-status');
+    if (!textarea) return;
+    const names = textarea.value.split('\n').map(s => s.trim()).filter(Boolean);
+    try {
+        const res = await fetch(`${API_BASE}/product-allowlists`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                lettuce_greens_products: names,
+                open_field_extra_products: ['Iceberg Lettuce'],
+            }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || 'Save failed');
+        if (status) status.textContent = `Saved ${data.lettuce_greens_count || names.length} products`;
+        showAlert('Lettuce/greens allowlist saved', 'success');
+        loadSales();
+    } catch (e) {
+        if (status) status.textContent = 'Save failed';
+        showAlert('Could not save allowlist: ' + e.message, 'error');
+    }
+}
+
 // Allocation functions
 async function runAllocation() {
     const month = normalizeMonthKey(document.getElementById('allocation-month').value);
@@ -1405,6 +1460,21 @@ function displayAllocationResults(result) {
     });
     
     html += '</tbody></table>';
+
+    if (result.cost_breakdown && Object.keys(result.cost_breakdown).length > 0) {
+        const poolNote = result.purchase_accounts_pool_total
+            ? `<p style="font-size:0.9rem;color:#64748b;margin:8px 0 12px;">PURCHASE ACCOUNTS pool (P&amp;L): ₹${formatNumber(result.purchase_accounts_pool_total)} — split across outsourced lines in direct mode.</p>`
+            : '';
+        html += `${poolNote}<h3 style="margin-top:24px;">Cost Breakdown by Category</h3>
+        <table class="table"><thead><tr><th>Category</th><th style="text-align:right;">Amount</th></tr></thead><tbody>`;
+        Object.entries(result.cost_breakdown)
+            .sort((a, b) => b[1] - a[1])
+            .forEach(([cat, amt]) => {
+                html += `<tr><td><strong>${formatCategoryLabel(cat)}</strong></td><td style="text-align:right;">₹${formatNumber(amt)}</td></tr>`;
+            });
+        html += '</tbody></table>';
+    }
+
     container.innerHTML = html;
     
     // Add event delegation for product rows (in case onclick doesn't work)
@@ -1436,7 +1506,11 @@ async function showCostBreakdown(productId) {
         // Don't show loading for cost breakdown - we're opening a modal, not replacing content
         console.log('📡 Fetching from:', `${API_BASE}/product-cost-breakdown/${productId}`);
         
-        const response = await fetch(`${API_BASE}/product-cost-breakdown/${productId}`);
+        const purchaseCostMode = getCheckedRadioValue('purchase-cost-mode') || 'direct';
+        const month = normalizeMonthKey(document.getElementById('allocation-month')?.value || '');
+        const params = new URLSearchParams({ purchase_cost_mode: purchaseCostMode });
+        if (month) params.set('month', month);
+        const response = await fetch(`${API_BASE}/product-cost-breakdown/${productId}?${params}`);
         
         console.log('📥 Response status:', response.status, response.statusText);
         
@@ -1528,12 +1602,20 @@ function displayCostBreakdownModal(breakdown) {
                         <tbody>
                             ${Object.entries(breakdown.costs_by_category).map(([category, data]) => `
                                 <tr>
-                                    <td><strong>${category}</strong></td>
+                                    <td><strong>${formatCategoryLabel(category)}</strong></td>
                                     <td>₹${formatNumber(data.total)}</td>
                                     <td>₹${formatNumber(data.per_kg || 0)}</td>
                                     <td>${data.costs.length}</td>
                                 </tr>
                             `).join('')}
+                            ${(breakdown.purchase_cost > 0 && !breakdown.costs_by_category.purchase_accounts) ? `
+                                <tr>
+                                    <td><strong>PURCHASE ACCOUNTS</strong></td>
+                                    <td>₹${formatNumber(breakdown.purchase_cost)}</td>
+                                    <td>₹${salesKg > 0 ? formatNumber(breakdown.purchase_cost / salesKg) : '0'}</td>
+                                    <td>1</td>
+                                </tr>
+                            ` : ''}
                         </tbody>
                     </table>
                     

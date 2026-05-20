@@ -1,0 +1,42 @@
+{
+  "lettuce_greens_products": [
+    "Arugula(Rocket Lettuce)",
+    "Baby Bokchoy",
+    "BABY SPINACH BOX",
+    "Basil",
+    "Bok Choy",
+    "Butterhead lettuce",
+    "Celery",
+    "Chinese Cabbage",
+    "Chives",
+    "Curly Parsley",
+    "Dill Leaves",
+    "Edible Flowers",
+    "Fennel Leaves",
+    "Flat Parsely",
+    "Kale Leaves",
+    "Kale Red",
+    "Lettuce Curly Green",
+    "Lettuce Red",
+    "Lollo Bionda Lettuce",
+    "Lollo Rosa",
+    "Microgreens-Beetroot",
+    "Micro Greens-Radish",
+    "MICROGREENS (SUNFLOWER)",
+    "MIXED SALAD GREENS",
+    "Oregano",
+    "Rhubarb",
+    "Romaine Lettuce",
+    "Sage",
+    "Salad Spinach",
+    "Spring Onion",
+    "Swiss Chard",
+    "Tarragon",
+    "Watercress lettuce",
+    "Zucchini Flower"
+  ],
+  "open_field_extra_products": [
+    "Iceberg Lettuce"
+  ],
+  "notes": "Lettuce/greens bucket and VARIABLE COST - LETTUCE / FC-II Greens use lettuce_greens_products only. Iceberg Lettuce is open field only. Berry and strawberry lines are excluded from lettuce matching even if similar names appear elsewhere."
+}
