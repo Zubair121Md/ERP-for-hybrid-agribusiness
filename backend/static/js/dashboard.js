@@ -496,20 +496,27 @@ async function loadSales() {
     try {
         showLoading('sales-table');
         
-        const [salesRes, summaryRes] = await Promise.all([
-            fetch(`${API_BASE}/sales`),
-            fetch(`${API_BASE}/sales-weight-summary`)
-        ]);
+        const salesRes = await fetch(`${API_BASE}/sales`);
         const sales = await salesRes.json();
         cachedSalesMonths = [...new Set((sales || []).map(s => normalizeMonthKey(s.month)).filter(Boolean))];
         refreshAllocationMonthOptionsFromCache();
-        
-        if (summaryRes.ok) {
-            const summary = await summaryRes.json();
-            displaySalesWeightSummary(summary);
-        } else {
-            displaySalesWeightSummary(null);
+
+        const allocSel = normalizeMonthKey(document.getElementById('allocation-month')?.value || '');
+        const hasAllocMonth = allocSel && (sales || []).some(s => normalizeMonthKey(s.month) === allocSel);
+        const sortedMonths = [...cachedSalesMonths].sort();
+        const monthForSummary = hasAllocMonth ? allocSel : (sortedMonths.length ? sortedMonths[sortedMonths.length - 1] : '');
+        const summaryUrl = monthForSummary
+            ? `${API_BASE}/sales-weight-summary?month=${encodeURIComponent(monthForSummary)}`
+            : `${API_BASE}/sales-weight-summary`;
+
+        let summary = null;
+        try {
+            const summaryRes = await fetch(summaryUrl);
+            if (summaryRes.ok) summary = await summaryRes.json();
+        } catch (e) {
+            console.warn('sales-weight-summary failed', e);
         }
+        displaySalesWeightSummary(summary);
         displaySales(sales);
         
     } catch (error) {
@@ -526,7 +533,18 @@ function displaySalesWeightSummary(summary) {
         container.innerHTML = '';
         return;
     }
-    const monthNote = summary.month ? ` (${summary.month})` : ' (all months)';
+    const monthNote = summary.month
+        ? ` — ${summary.month}`
+        : (summary.scope === 'all_time' ? ' — all months' : '');
+    const scopeP = summary.scope_note
+        ? `<p style="margin:0 0 10px;font-size:0.85rem;color:#64748b;">${summary.scope_note}</p>`
+        : '';
+    const pctNote = summary.distribution_percent_note
+        ? `<p style="margin:0 0 6px;font-size:0.8rem;color:#94a3b8;">${summary.distribution_percent_note}</p>`
+        : '';
+    const ofNote = summary.open_field_note
+        ? `<p style="margin:0 0 8px;font-size:0.8rem;color:#64748b;">${summary.open_field_note}</p>`
+        : '';
     let rows = (summary.distribution || []).map(d => `
         <tr>
             <td><strong>${d.label}</strong></td>
@@ -540,8 +558,11 @@ function displaySalesWeightSummary(summary) {
             <h4 style="margin:0 0 12px;color:#1e293b;">Sales weight summary${monthNote}</h4>
             <p style="margin:0 0 14px;color:#475569;font-size:0.95rem;">
                 <strong>Total sold weight:</strong> ${formatNumber(summary.total_kg)} kg
-                <span style="color:#64748b;"> (${summary.line_count || 0} product lines with quantity)</span>
+                <span style="color:#64748b;"> (${summary.line_count || 0} product lines)</span>
             </p>
+            ${scopeP}
+            ${pctNote}
+            ${ofNote}
             <p style="margin:0 0 8px;font-size:0.85rem;color:#64748b;">
                 ${summary.weight_basis_note || 'Sales quantity (kg); wastage is not subtracted.'}
             </p>
@@ -1346,6 +1367,11 @@ function formatCategoryLabel(category) {
         others: 'Others',
         wastage: 'Wastage',
         general: 'General',
+        open_field: 'Open Field',
+        lettuce_greens: 'Lettuce / Greens',
+        aggregation: 'Aggregation (Outsourced)',
+        strawberry: 'Strawberry',
+        other: 'Other (Inhouse)',
     };
     return labels[category] || category;
 }

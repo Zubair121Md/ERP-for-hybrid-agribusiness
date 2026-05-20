@@ -2081,16 +2081,61 @@ async def get_all_sales(db: Session = Depends(get_db)):
 
 @app.get("/api/sales-weight-summary")
 async def get_sales_weight_summary(
-    month: Optional[str] = Query(None, description="YYYY-MM; omit for all months"),
+    month: Optional[str] = Query(None, description="YYYY-MM filter; omit to use latest month with sales"),
+    all_time: bool = Query(
+        False,
+        description="If true, sum every sales row in the database (omit month filter)",
+    ),
     db: Session = Depends(get_db),
 ):
-    """Total sales kg and FC-II-aligned weight distribution for the sales tab."""
-    sales = db.query(MonthlySale).join(Product).all()
-    if month:
+    """
+    Total sales kg and FC-II bucket distribution.
+
+    By default uses the **latest calendar month** that has sales rows (not all history),
+    so Open Field % is share of that month's bucketed kg, not lifetime totals.
+    Pass month=YYYY-MM for a specific period, or all_time=true for cumulative.
+    """
+    sales_all = db.query(MonthlySale).join(Product).all()
+    applied_month: Optional[str] = None
+    scope_note = ""
+
+    if all_time:
+        sales = sales_all
+        scope_note = "All uploaded months combined."
+        applied_month = None
+    elif month:
         target = _to_month_key(month)
-        sales = [s for s in sales if _to_month_key(s.month) == target]
+        sales = [s for s in sales_all if _to_month_key(s.month) == target]
+        applied_month = target
+        scope_note = f"Month {target} only."
+    else:
+        month_keys = sorted(
+            {_to_month_key(s.month) for s in sales_all if _to_month_key(s.month)}
+        )
+        if month_keys:
+            latest = month_keys[-1]
+            sales = [s for s in sales_all if _to_month_key(s.month) == latest]
+            applied_month = latest
+            scope_note = (
+                f"Latest month with sales data: {latest}. "
+                "Pass ?month=YYYY-MM to choose another month, or ?all_time=true for all history."
+            )
+        else:
+            sales = []
+
     summary = compute_sales_weight_summary(sales)
-    summary["month"] = _to_month_key(month) if month else None
+    summary["month"] = applied_month
+    summary["scope"] = "all_time" if all_time else ("month" if month else "latest_month")
+    summary["scope_note"] = scope_note
+    summary["distribution_percent_note"] = (
+        "Each % is that bucket's kg divided by the sum of all buckets "
+        "(strawberry + lettuce/greens + open field + aggregation + other) for this scope."
+    )
+    summary["open_field_note"] = (
+        "Open Field kg is sales quantity for products on the open-field allowlist "
+        "(Mapping tab), combining inhouse and outsourced split lines per product. "
+        "Wastage is not subtracted from these weights."
+    )
     summary["lettuce_greens_product_count"] = len(_lettuce_greens_keys)
     return summary
 
