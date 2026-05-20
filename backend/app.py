@@ -238,9 +238,12 @@ def _base_product_display_name(name: Optional[str]) -> str:
 def _weight_summary_kg(sale) -> float:
     """
     Sold qty in kg for the weight distribution summary.
-    Uses _sale_quantity_kg but explicitly returns 0 for EA products
-    whose weight cannot be determined (no conversion mapping).
-    Raw EA counts must not be treated as kg in weight displays.
+
+    For inhouse "Both" type products (harvest + purchase), sale.quantity = opening + harvest.
+    The opening stock was grown in a prior period and should not inflate the current harvest count.
+    If sale.quantity > inward_quantity (harvest), use inward_quantity (harvest only).
+
+    EA products with no kg-conversion mapping return 0.
     """
     product = getattr(sale, "product", None)
     qty = float(sale.quantity or 0)
@@ -250,6 +253,13 @@ def _weight_summary_kg(sale) -> float:
     if unit.upper() in ["EA", "EACH", "PC", "PCS", "UNIT", "UNITS"]:
         # Convert EA → kg via known conversions; 0 if no conversion (don't treat EA count as kg)
         return _to_kg(product.name or "", qty, unit)
+    # For inhouse "Both" type products: sale.quantity = opening_stock + harvest_qty.
+    # inward_quantity stores only harvest_qty so we can detect when opening is included.
+    if product.source == "inhouse":
+        inward = float(getattr(sale, "inward_quantity", None) or 0)
+        if inward > 0 and qty > inward:
+            # sale.quantity includes opening stock from prior period; use harvest only
+            return inward
     return qty
 
 
@@ -1310,6 +1320,10 @@ class CostAllocationEngine:
                     applicable[product_id] = product
             return applicable
 
+        # WASTAGE & SHORTAGE: physical wastage on purchased stock → outsourced only
+        if "WASTAGE" in cost_name_upper and "SHORTAGE" in cost_name_upper:
+            cost.applies_to = "outsourced"
+
         manual_pool = (getattr(cost, "allocation_pool", None) or "").lower().strip()
         
         # FC II: pooled rupee amount for one bucket; split only among that bucket's products by sales kg
@@ -1349,6 +1363,9 @@ class CostAllocationEngine:
                     cost_section = "Open Field"
             elif manual_pool in {"distribution_cost", "marketing_expenses", "vehicle_running_cost", "others", "wastage_shortage", "purchase_accounts"}:
                 # These are global category pools; keep applies_to filtering only.
+                # WASTAGE & SHORTAGE: always outsourced only (physical wastage is on purchased stock).
+                if manual_pool == "wastage_shortage":
+                    cost.applies_to = "outsourced"
                 is_variable_cost = False
         
         # Check if this is a VARIABLE COST that needs section-based filtering
@@ -3950,10 +3967,22 @@ def parse_new_sales_stock_format(df_raw: pd.DataFrame, db: Session, file_name: s
                 sales_created += 1
                 parsed_data.append(ExcelRowData(month=month, particulars=particulars, type="Inhouse", inward_quantity=total_inward_qty, inward_rate=0.0, inward_value=0.0, outward_quantity=revenue_qty, outward_rate=sales_rate, outward_value=sales_value if sales_value > 0 else (revenue_qty * sales_rate), inhouse_production=harvest_qty, wastage=total_wastage))
             else:
-                product = upsert_product(f"{particulars} (Outsourced)", "outsourced")
-                db.add(MonthlySale(product_id=product.id, month=month, quantity=revenue_qty, sale_price=sales_rate, direct_cost=purchase_value if purchase_value > 0 else total_inward_qty * purchase_rate, inward_quantity=total_inward_qty if total_inward_qty > 0 else purchase_qty, inward_rate=purchase_rate, inward_value=purchase_value if purchase_value > 0 else total_inward_qty * purchase_rate, inhouse_production=0.0, wastage=total_wastage))
-                sales_created += 1
-                parsed_data.append(ExcelRowData(month=month, particulars=particulars, type="Outsourced", inward_quantity=total_inward_qty if total_inward_qty > 0 else purchase_qty, inward_rate=purchase_rate, inward_value=purchase_value if purchase_value > 0 else total_inward_qty * purchase_rate, outward_quantity=revenue_qty, outward_rate=sales_rate, outward_value=sales_value if sales_value > 0 else (revenue_qty * sales_rate), inhouse_production=0.0, wastage=total_wastage))
+                # harvest=0, purchase=0 but opening_stock > 0 → prior-period farm produce (inhouse)
+                if purchase_qty <= 0 and purchase_value <= 0 and open_qty > 0:
+                    product = upsert_product(f"{particulars} (Inhouse)", "inhouse")
+                    db.add(MonthlySale(
+                        product_id=product.id, month=month,
+                        quantity=revenue_qty, sale_price=sales_rate,
+                        direct_cost=0.0, inward_quantity=0.0, inward_rate=0.0, inward_value=0.0,
+                        inhouse_production=0.0, wastage=total_wastage,
+                    ))
+                    sales_created += 1
+                    parsed_data.append(ExcelRowData(month=month, particulars=particulars, type="Inhouse", inward_quantity=0.0, inward_rate=0.0, inward_value=0.0, outward_quantity=revenue_qty, outward_rate=sales_rate, outward_value=sales_value if sales_value > 0 else (revenue_qty * sales_rate), inhouse_production=0.0, wastage=total_wastage))
+                else:
+                    product = upsert_product(f"{particulars} (Outsourced)", "outsourced")
+                    db.add(MonthlySale(product_id=product.id, month=month, quantity=revenue_qty, sale_price=sales_rate, direct_cost=purchase_value if purchase_value > 0 else total_inward_qty * purchase_rate, inward_quantity=total_inward_qty if total_inward_qty > 0 else purchase_qty, inward_rate=purchase_rate, inward_value=purchase_value if purchase_value > 0 else total_inward_qty * purchase_rate, inhouse_production=0.0, wastage=total_wastage))
+                    sales_created += 1
+                    parsed_data.append(ExcelRowData(month=month, particulars=particulars, type="Outsourced", inward_quantity=total_inward_qty if total_inward_qty > 0 else purchase_qty, inward_rate=purchase_rate, inward_value=purchase_value if purchase_value > 0 else total_inward_qty * purchase_rate, outward_quantity=revenue_qty, outward_rate=sales_rate, outward_value=sales_value if sales_value > 0 else (revenue_qty * sales_rate), inhouse_production=0.0, wastage=total_wastage))
         except Exception as e:
             errors.append(f"Row {ridx + 1}: {e}")
 
@@ -6198,8 +6227,8 @@ async def upload_cost_sheet(file: UploadFile = File(...), db: Session = Depends(
             
             if wastage_total > 0:
                 save_cost(
-                    "WASTAGE & SHORTAGE", wastage_total, "both", "wastage_shortage",
-                    "sales_kg",  # Default: Sales KG (all products)
+                    "WASTAGE & SHORTAGE", wastage_total, "outsourced", "wastage_shortage",
+                    "sales_kg",  # Allocated by sold kg to outsourced products only
                     pl_class="B", allocation_pool="wastage_shortage"
                 )
             
