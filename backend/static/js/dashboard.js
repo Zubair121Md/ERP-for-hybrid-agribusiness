@@ -131,7 +131,7 @@ function showTab(tabName) {
     const titles = {
         'dashboard': { title: 'Dashboard', subtitle: 'Overview & Analytics' },
         'products': { title: 'Products', subtitle: 'Manage Your Inventory' },
-        'sales': { title: 'Sales', subtitle: 'Track Monthly Sales Data' },
+        'sales': { title: 'Sales before removal of Wastage', subtitle: 'Track Monthly Sales Data (harvest & purchase inward)' },
         'costs': { title: 'Costs', subtitle: 'Manage Operational Costs' },
         'allocation': { title: 'Allocation', subtitle: 'Cost Distribution Analysis' },
         'data-upload': { title: 'Data Upload', subtitle: 'Upload Sales & P&L Data' },
@@ -547,25 +547,42 @@ function displaySalesWeightSummary(summary) {
         ? `<p style="margin:0 0 8px;font-size:0.8rem;color:#64748b;">${summary.open_field_note}</p>`
         : '';
     container.style.display = 'block';
+    const inhouseGross = summary.line_inhouse_gross_kg != null ? summary.line_inhouse_gross_kg : 0;
+    const inhouseWastage = summary.line_inhouse_farm_wastage_kg || 0;
+    const inhouseNet = summary.line_inhouse_kg != null ? summary.line_inhouse_kg : Math.max(0, inhouseGross - inhouseWastage);
+    const inhouseSold = summary.line_inhouse_sold_kg != null ? summary.line_inhouse_sold_kg : 0;
+    const outPurchase = summary.line_outsourced_purchase_kg != null
+        ? summary.line_outsourced_purchase_kg
+        : (summary.line_outsourced_kg || 0);
+    const outSold = summary.line_outsourced_sold_kg != null ? summary.line_outsourced_sold_kg : 0;
+
     container.innerHTML = `
         <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:16px 20px;">
-            <h4 style="margin:0 0 12px;color:#1e293b;">Sales weight summary${monthNote}</h4>
-            <p style="margin:0 0 14px;color:#475569;font-size:0.95rem;">
-                <strong>Total sold weight:</strong> ${formatNumber(summary.total_kg)} kg
-                <span style="color:#64748b;"> (${summary.line_count || 0} sales lines)</span>
+            <h4 style="margin:0 0 4px;color:#1e293b;">Inward weight (before wastage removal)${monthNote}</h4>
+            <p style="margin:0 0 14px;color:#64748b;font-size:0.85rem;">
+                From upload Harvest / Purchase columns — not sold qty. Sold totals are listed below for reference.
             </p>
-            <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px;margin-bottom:16px;">
+            <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin-bottom:16px;">
                 <div style="background:#ecfdf5;border:1px solid #a7f3d0;border-radius:8px;padding:12px 14px;">
-                    <div style="font-size:0.8rem;color:#047857;font-weight:600;text-transform:uppercase;">Inhouse</div>
-                    <div style="font-size:1.25rem;color:#065f46;font-weight:700;">${formatNumber(summary.line_inhouse_kg || 0)} kg</div>
-                    <div style="font-size:0.85rem;color:#6b7280;">${summary.inhouse_line_count || 0} lines · ${summary.inhouse_share_percent != null ? summary.inhouse_share_percent : '—'}% of total</div>
+                    <div style="font-size:0.8rem;color:#047857;font-weight:600;">Inhouse — farm harvest <span style="font-weight:500;">(before wastage in farm)</span></div>
+                    <div style="font-size:1.35rem;color:#065f46;font-weight:700;">${formatNumber(inhouseGross)} kg</div>
+                    ${inhouseWastage > 0 ? `<div style="font-size:0.85rem;color:#6b7280;margin-top:4px;">After wastage in farm: <strong>${formatNumber(inhouseNet)} kg</strong> (−${formatNumber(inhouseWastage)} kg)</div>` : ''}
+                    ${inhouseSold > 0 ? `<div style="font-size:0.85rem;color:#94a3b8;margin-top:4px;">Sold kg (separate): ${formatNumber(inhouseSold)} kg</div>` : ''}
+                    <div style="font-size:0.85rem;color:#6b7280;margin-top:6px;">${summary.inhouse_line_count || 0} products with harvest · ${summary.inhouse_share_percent != null ? summary.inhouse_share_percent : '—'}% of inward</div>
                 </div>
                 <div style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:8px;padding:12px 14px;">
-                    <div style="font-size:0.8rem;color:#1d4ed8;font-weight:600;text-transform:uppercase;">Outsourced</div>
-                    <div style="font-size:1.25rem;color:#1e40af;font-weight:700;">${formatNumber(summary.line_outsourced_kg || 0)} kg</div>
-                    <div style="font-size:0.85rem;color:#6b7280;">${summary.outsourced_line_count || 0} lines · ${summary.outsourced_share_percent != null ? summary.outsourced_share_percent : '—'}% of total</div>
+                    <div style="font-size:0.8rem;color:#1d4ed8;font-weight:600;">Outsourced — purchase <span style="font-weight:500;">(before dispatch wastage)</span></div>
+                    <div style="font-size:1.35rem;color:#1e40af;font-weight:700;">${formatNumber(outPurchase)} kg</div>
+                    <div style="font-size:0.85rem;color:#6b7280;margin-top:4px;">Purchase column only; opening stock not included</div>
+                    ${outSold > 0 ? `<div style="font-size:0.85rem;color:#94a3b8;margin-top:4px;">Sold kg (separate): ${formatNumber(outSold)} kg</div>` : ''}
+                    <div style="font-size:0.85rem;color:#6b7280;margin-top:6px;">${summary.outsourced_line_count || 0} products with purchase · ${summary.outsourced_share_percent != null ? summary.outsourced_share_percent : '—'}% of inward</div>
                 </div>
             </div>
+            <p style="margin:0 0 14px;color:#475569;font-size:0.95rem;">
+                <strong>Total sold weight (after your process, for allocation):</strong> ${formatNumber(summary.total_kg)} kg
+                <span style="color:#64748b;"> (${summary.line_count || 0} sales lines)</span>
+            </p>
+            ${summary.harvest_data_note ? `<p style="margin:0 0 10px;font-size:0.85rem;color:#b45309;"><strong>Note:</strong> ${summary.harvest_data_note}</p>` : ''}
             ${summary.unattributed_kg > 0 ? `<p style="margin:0 0 10px;font-size:0.85rem;color:#b45309;"><strong>Note:</strong> ${formatNumber(summary.unattributed_kg)} kg on rows with no linked product (shown under Other).</p>` : ''}
             ${scopeP}
             ${pctNote}
@@ -595,14 +612,7 @@ function displaySalesWeightSummary(summary) {
             </table>
             ${(summary.product_lines && summary.product_lines.length) ? (() => {
                 const hasInward = summary.product_lines.some(p => p.inhouse_inward_kg != null);
-                const warnings = summary.product_lines.filter(p => p.month_note);
-                const warnHtml = warnings.length
-                    ? `<div style="margin-bottom:10px;padding:10px 14px;background:#fef9c3;border-left:4px solid #ca8a04;border-radius:6px;font-size:0.82rem;color:#713f12;">
-                            <strong>⚠ Month mismatch detected</strong> — inhouse and outsourced portions of the same product were uploaded with different month keys. The open-field bucket combines both automatically.<br>
-                            ${warnings.map(p => `<span style="margin-right:16px;">• ${p.product}: ${p.month_note}</span>`).join('')}
-                        </div>`
-                    : '';
-                return `${warnHtml}
+                return `
                 <details style="margin-top:10px;" open>
                     <summary style="cursor:pointer;font-weight:600;color:#374151;">Product breakdown (${summary.product_lines.length} products)</summary>
                     <div style="overflow-x:auto;">
@@ -613,19 +623,19 @@ function displaySalesWeightSummary(summary) {
                                 <th>Bucket</th>
                                 <th style="text-align:right;">Inhouse sold kg</th>
                                 <th style="text-align:right;">Outsourced sold kg</th>
-                                ${hasInward ? '<th style="text-align:right;">Inward kg</th><th style="text-align:right;">Wastage kg</th>' : ''}
+                                ${hasInward ? '<th style="text-align:right;">Harvest inward</th><th style="text-align:right;">Purchase inward</th><th style="text-align:right;">Farm wastage</th>' : ''}
                                 <th style="text-align:right;">Row total kg</th>
                                 <th style="text-align:right;">In bucket</th>
                             </tr>
                         </thead>
                         <tbody>
                             ${summary.product_lines.map(p => `
-                                <tr style="${p.month_note ? 'background:#fefce8;' : ''}">
-                                    <td>${p.product}${p.month_note ? ' <span title="'+p.month_note+'" style="color:#ca8a04;cursor:help;">⚠</span>' : ''}</td>
+                                <tr>
+                                    <td>${p.product}</td>
                                     <td><span style="font-size:0.78rem;background:#e2e8f0;padding:2px 6px;border-radius:4px;">${formatCategoryLabel(p.bucket)}</span></td>
                                     <td style="text-align:right;">${formatNumber(p.inhouse_kg)}</td>
                                     <td style="text-align:right;">${formatNumber(p.outsourced_kg)}</td>
-                                    ${hasInward ? `<td style="text-align:right;">${p.inhouse_inward_kg != null ? formatNumber(p.inhouse_inward_kg) : '—'}</td><td style="text-align:right;">${p.inhouse_wastage_kg != null ? formatNumber(p.inhouse_wastage_kg) : '—'}</td>` : ''}
+                                    ${hasInward ? `<td style="text-align:right;">${p.inhouse_inward_kg != null ? formatNumber(p.inhouse_inward_kg) : '—'}</td><td style="text-align:right;">${p.outsourced_inward_kg != null ? formatNumber(p.outsourced_inward_kg) : '—'}</td><td style="text-align:right;">${p.inhouse_wastage_kg != null ? formatNumber(p.inhouse_wastage_kg) : '—'}</td>` : ''}
                                     <td style="text-align:right;">${formatNumber(p.row_total_kg)}</td>
                                     <td style="text-align:right;"><strong>${formatNumber(p.counted_in_bucket_kg)}</strong></td>
                                 </tr>

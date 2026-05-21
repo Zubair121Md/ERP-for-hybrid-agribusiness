@@ -831,7 +831,7 @@
                 </a>
                 <a href="#" class="nav-item" data-tab="sales">
                     <i class="fas fa-chart-line"></i>
-                    <span>Sales</span>
+                    <span>Sales before removal of Wastage</span>
                 </a>
                 <a href="#" class="nav-item" data-tab="costs">
                     <i class="fas fa-receipt"></i>
@@ -939,8 +939,13 @@
                 <div id="sales" class="tab-content">
                     <div class="table-card">
                         <div class="table-header">
-                            <h3 class="table-title">Sales Data</h3>
+                            <h3 class="table-title">Sales before removal of Wastage</h3>
+                            <p style="margin:4px 0 0;color:#64748b;font-size:0.9rem;">Track Monthly Sales Data — harvest &amp; purchase inward from your stock-flow sheet</p>
                             <div class="table-actions">
+                                <button class="btn btn-secondary" onclick="loadSales()" title="Reload sales and inward summary">
+                                    <i class="fas fa-sync-alt"></i>
+                                    Refresh
+                                </button>
                                 <button class="btn btn-primary" onclick="showSalesForm()">
                                     <i class="fas fa-plus"></i>
                                     Add Sales
@@ -1548,7 +1553,7 @@
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/chart.js@3.9.1/dist/chart.min.js"></script>
-    <script src="static/js/dashboard.js?v=20250101000003"></script>
+    <script src="static/js/dashboard.js?v=20260321120000"></script>
     <script src="static/js/upload-fix.js?v=20250101000002"></script>
     
     <!-- INLINE UPLOAD FIX - This will definitely work -->

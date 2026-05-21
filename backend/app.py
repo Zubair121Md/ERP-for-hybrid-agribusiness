@@ -263,6 +263,70 @@ def _weight_summary_kg(sale) -> float:
     return qty
 
 
+def _inhouse_harvest_inward_kg(sale) -> float:
+    """Farm harvest kg from Harvest column (inhouse_production), not sold qty or opening stock."""
+    product = getattr(sale, "product", None)
+    if not product or product.source != "inhouse":
+        return 0.0
+    harvest = float(getattr(sale, "inhouse_production", None) or 0)
+    if harvest > 0:
+        return harvest
+    inward = float(getattr(sale, "inward_quantity", None) or 0)
+    qty = float(getattr(sale, "quantity", None) or 0)
+    if inward <= 0:
+        return 0.0
+    # Both-type uploads store harvest-only in inward_quantity; sold qty can include opening.
+    if qty > inward:
+        return inward
+    # Legacy harvest-only rows may only have inward_quantity (= total inward). Use as best available.
+    return inward
+
+
+def _backfill_harvest_fields(db: Session) -> int:
+    """
+    Repair inhouse rows uploaded before harvest was stored on inhouse_production / inward_quantity.
+    Returns number of rows updated.
+    """
+    updated = 0
+    rows = (
+        db.query(MonthlySale)
+        .join(Product)
+        .filter(Product.source == "inhouse")
+        .all()
+    )
+    for sale in rows:
+        if float(getattr(sale, "inhouse_production", None) or 0) > 0:
+            continue
+        inward = float(getattr(sale, "inward_quantity", None) or 0)
+        qty = float(getattr(sale, "quantity", None) or 0)
+        harvest = 0.0
+        if inward > 0 and qty > inward:
+            harvest = inward
+        elif inward > 0:
+            harvest = inward
+        if harvest <= 0:
+            continue
+        sale.inhouse_production = harvest
+        if float(getattr(sale, "inward_quantity", None) or 0) != harvest:
+            sale.inward_quantity = harvest
+        updated += 1
+    if updated:
+        db.commit()
+    return updated
+
+
+def _outsourced_purchase_inward_kg(sale) -> float:
+    """Purchase-column kg for outsourced lines (excludes opening stock on the row)."""
+    product = getattr(sale, "product", None)
+    if not product or product.source != "outsourced":
+        return 0.0
+    rate = float(getattr(sale, "inward_rate", None) or 0)
+    value = float(getattr(sale, "inward_value", None) or 0)
+    if rate > 0 and value > 0:
+        return value / rate
+    return float(getattr(sale, "inward_quantity", None) or 0)
+
+
 def is_lettuce_greens_product_name(name: Optional[str]) -> bool:
     """True only if product name is on the saved lettuce/greens allowlist."""
     key = _canonical_product_key(_base_product_display_name(name))
@@ -345,10 +409,7 @@ def _compute_purchase_direct_shares(
     return {pid: pool_total * (w / total_w) for pid, w in entries}
 
 
-def compute_sales_weight_summary(
-    sales: List,
-    all_sales_for_of: Optional[List] = None,
-) -> Dict[str, Any]:
+def compute_sales_weight_summary(sales: List) -> Dict[str, Any]:
     """
     Sum sales kg by FC-II bucket using base product names.
 
@@ -366,13 +427,41 @@ def compute_sales_weight_summary(
     bucket_inhouse: Dict[str, float] = {k: 0.0 for k in bucket_keys}
     bucket_outsourced: Dict[str, float] = {k: 0.0 for k in bucket_keys}
 
-    # ─── Open field: inhouse harvest quantity only ─────────────────────────────
-    # Use inward_quantity (= harvest kg) for inhouse lines so that a "Both" type
-    # product (e.g. Iceberg Lettuce: harvest=65, purchase=2604) shows the actual
-    # farm yield, not the proportionally split sales quantity.
+    # ─── Inward totals (harvest / purchase from upload columns, not sold qty) ───
+    line_inhouse_sold_kg = 0.0
+    line_outsourced_sold_kg = 0.0
+    line_inhouse_gross_kg = 0.0
+    line_inhouse_farm_wastage_kg = 0.0
+    line_outsourced_purchase_kg = 0.0
+    inhouse_harvest_line_count = 0
+    outsourced_purchase_line_count = 0
+
+    for sale in sales:
+        product = getattr(sale, "product", None)
+        if not product:
+            continue
+        sold = _weight_summary_kg(sale)
+        if product.source == "inhouse":
+            if sold > 0:
+                line_inhouse_sold_kg += sold
+            harvest_kg = _inhouse_harvest_inward_kg(sale)
+            if harvest_kg > 0:
+                line_inhouse_gross_kg += harvest_kg
+                line_inhouse_farm_wastage_kg += float(getattr(sale, "wastage", None) or 0)
+                inhouse_harvest_line_count += 1
+        elif product.source == "outsourced":
+            if sold > 0:
+                line_outsourced_sold_kg += sold
+            purchase_kg = _outsourced_purchase_inward_kg(sale)
+            if purchase_kg <= 0:
+                purchase_kg = float(getattr(sale, "inward_quantity", None) or 0)
+            if purchase_kg > 0:
+                line_outsourced_purchase_kg += purchase_kg
+                outsourced_purchase_line_count += 1
+
+    # ─── Open field: inhouse harvest quantity only (same month scope as sales) ─
     of_grouped: Dict[str, Dict[str, Any]] = {}
-    of_source = all_sales_for_of if all_sales_for_of is not None else sales
-    for sale in of_source:
+    for sale in sales:
         product = getattr(sale, "product", None)
         if not product:
             continue
@@ -381,32 +470,18 @@ def compute_sales_weight_summary(
         base = _base_product_display_name(product.name)
         if _classify_base_product_bucket(base) != "open_field":
             continue
-        # Use inward_quantity (harvest) not proportional sales
-        harvest_kg = float(getattr(sale, "inward_quantity", None) or 0)
-        if harvest_kg <= 0:
-            harvest_kg = _weight_summary_kg(sale)  # fallback if not stored
+        harvest_kg = _inhouse_harvest_inward_kg(sale)
         if harvest_kg <= 0:
             continue
-        mkey = _to_month_key(getattr(sale, "month", None) or "")
         ckey = _canonical_product_key(base) or base.upper()
         if ckey not in of_grouped:
-            of_grouped[ckey] = {
-                "name": base,
-                "inhouse_kg": 0.0,
-                "inhouse_months": set(),
-            }
+            of_grouped[ckey] = {"name": base, "inhouse_kg": 0.0}
         of_grouped[ckey]["inhouse_kg"] += harvest_kg
-        if mkey:
-            of_grouped[ckey]["inhouse_months"].add(mkey)
 
     # ─── Non-open-field + outsourced open-field: month-filtered sales only ─────
     non_of_grouped: Dict[str, Dict[str, Any]] = {}
     total_kg = 0.0
     line_count = 0
-    line_inhouse_kg = 0.0
-    line_outsourced_kg = 0.0
-    inhouse_line_count = 0
-    outsourced_line_count = 0
     unattributed_kg = 0.0
 
     for sale in sales:
@@ -425,9 +500,6 @@ def compute_sales_weight_summary(
         base_bucket = _classify_base_product_bucket(base)
 
         if base_bucket == "open_field" and product.source == "inhouse":
-            # Bucket total is handled via of_grouped (harvest qty); track sales for line totals
-            line_inhouse_kg += kg
-            inhouse_line_count += 1
             total_kg += kg
             line_count += 1
             continue
@@ -444,18 +516,18 @@ def compute_sales_weight_summary(
             }
         inward = float(getattr(sale, "inward_quantity", None) or 0)
         wastage = float(getattr(sale, "wastage", None) or 0)
+        purchase_inward = _outsourced_purchase_inward_kg(sale)
+        if purchase_inward <= 0:
+            purchase_inward = inward
+        harvest_inward = _inhouse_harvest_inward_kg(sale)
         if product.source == "outsourced":
             non_of_grouped[ckey]["outsourced_kg"] += kg
-            non_of_grouped[ckey]["outsourced_inward"] += inward
+            non_of_grouped[ckey]["outsourced_inward"] += purchase_inward
             non_of_grouped[ckey]["outsourced_wastage"] += wastage
-            line_outsourced_kg += kg
-            outsourced_line_count += 1
         else:
             non_of_grouped[ckey]["inhouse_kg"] += kg
-            non_of_grouped[ckey]["inhouse_inward"] += inward
+            non_of_grouped[ckey]["inhouse_inward"] += harvest_inward if harvest_inward > 0 else inward
             non_of_grouped[ckey]["inhouse_wastage"] += wastage
-            line_inhouse_kg += kg
-            inhouse_line_count += 1
         total_kg += kg
         line_count += 1
 
@@ -466,7 +538,6 @@ def compute_sales_weight_summary(
         in_kg = g["inhouse_kg"]
         buckets["open_field"] += in_kg
         bucket_inhouse["open_field"] += in_kg
-        ih_months = sorted(g["inhouse_months"])
         product_lines.append({
             "product": g["name"],
             "bucket": "open_field",
@@ -476,34 +547,35 @@ def compute_sales_weight_summary(
             "counted_in_bucket_kg": round(in_kg, 3),
             "inhouse_inward_kg": round(in_kg, 3),
             "inhouse_wastage_kg": None,
-            "month_note": (
-                f"harvest quantity (inward_quantity) — months: {', '.join(ih_months)}"
-                if ih_months else "harvest quantity (inward_quantity)"
-            ),
+            "month_note": "",
         })
 
     # Non-open-field lines
     for g in non_of_grouped.values():
         in_kg = g["inhouse_kg"]
         out_kg = g["outsourced_kg"]
+        in_inward = g["inhouse_inward"]
+        out_inward = g["outsourced_inward"]
+        in_harvest = in_inward if in_inward > 0 else 0.0
+        out_purchase = out_inward if out_inward > 0 else out_kg
         bucket = _classify_base_product_bucket(g["name"])
         if bucket in ("lettuce_greens", "strawberry"):
-            counted = in_kg
-            buckets[bucket] += in_kg
-            buckets["aggregation"] += out_kg
-            bucket_inhouse[bucket] += in_kg
-            bucket_outsourced["aggregation"] += out_kg
-        elif out_kg > 0 and in_kg <= 0:
+            counted = in_harvest if in_harvest > 0 else in_kg
+            buckets[bucket] += counted
+            buckets["aggregation"] += out_purchase
+            bucket_inhouse[bucket] += counted
+            bucket_outsourced["aggregation"] += out_purchase
+        elif out_purchase > 0 and in_harvest <= 0 and in_kg <= 0:
             bucket = "aggregation"
-            counted = out_kg
-            buckets["aggregation"] += out_kg
-            bucket_outsourced["aggregation"] += out_kg
+            counted = out_purchase
+            buckets["aggregation"] += out_purchase
+            bucket_outsourced["aggregation"] += out_purchase
         else:
-            counted = in_kg
-            buckets["other"] += in_kg
-            buckets["aggregation"] += out_kg
-            bucket_inhouse["other"] += in_kg
-            bucket_outsourced["aggregation"] += out_kg
+            counted = in_harvest if in_harvest > 0 else in_kg
+            buckets["other"] += counted
+            buckets["aggregation"] += out_purchase
+            bucket_inhouse["other"] += counted
+            bucket_outsourced["aggregation"] += out_purchase
 
         product_lines.append({
             "product": g["name"],
@@ -513,6 +585,7 @@ def compute_sales_weight_summary(
             "row_total_kg": round(in_kg + out_kg, 3),
             "counted_in_bucket_kg": round(counted, 3),
             "inhouse_inward_kg": round(g["inhouse_inward"], 3) or None,
+            "outsourced_inward_kg": round(g["outsourced_inward"], 3) or None,
             "inhouse_wastage_kg": round(g["inhouse_wastage"], 3) or None,
             "month_note": "",
         })
@@ -539,24 +612,42 @@ def compute_sales_weight_summary(
             "outsourced_kg": round(bucket_outsourced[key], 2),
             "percent": round(pct, 2),
         })
-    inhouse_share_pct = (line_inhouse_kg / total_kg * 100.0) if total_kg > 0 else 0.0
-    outsourced_share_pct = (line_outsourced_kg / total_kg * 100.0) if total_kg > 0 else 0.0
+    line_inhouse_net_kg = max(0.0, line_inhouse_gross_kg - line_inhouse_farm_wastage_kg)
+    inward_total = line_inhouse_gross_kg + line_outsourced_purchase_kg
+    inhouse_share_pct = (line_inhouse_gross_kg / inward_total * 100.0) if inward_total > 0 else 0.0
+    outsourced_share_pct = (line_outsourced_purchase_kg / inward_total * 100.0) if inward_total > 0 else 0.0
+    harvest_data_note = (
+        "Harvest kg uses the inhouse_production field from your upload (Harvest column). "
+        "Re-upload March sales if totals still match sold kg only."
+        if line_inhouse_gross_kg <= 0 and line_inhouse_sold_kg > 0
+        else (
+            "Purchase kg uses Purchase column (value ÷ rate when available); opening stock is excluded on new uploads."
+            if line_outsourced_purchase_kg <= 0 and line_outsourced_sold_kg > 0
+            else ""
+        )
+    )
     return {
         "total_kg": round(total_kg, 2),
         "line_count": line_count,
-        "line_inhouse_kg": round(line_inhouse_kg, 2),
-        "line_outsourced_kg": round(line_outsourced_kg, 2),
-        "inhouse_line_count": inhouse_line_count,
-        "outsourced_line_count": outsourced_line_count,
+        "line_inhouse_kg": round(line_inhouse_net_kg, 2),
+        "line_inhouse_gross_kg": round(line_inhouse_gross_kg, 2),
+        "line_inhouse_farm_wastage_kg": round(line_inhouse_farm_wastage_kg, 2),
+        "line_inhouse_sold_kg": round(line_inhouse_sold_kg, 2),
+        "line_outsourced_kg": round(line_outsourced_purchase_kg, 2),
+        "line_outsourced_purchase_kg": round(line_outsourced_purchase_kg, 2),
+        "line_outsourced_sold_kg": round(line_outsourced_sold_kg, 2),
+        "inhouse_line_count": inhouse_harvest_line_count,
+        "outsourced_line_count": outsourced_purchase_line_count,
+        "harvest_data_note": harvest_data_note,
         "inhouse_share_percent": round(inhouse_share_pct, 2),
         "outsourced_share_percent": round(outsourced_share_pct, 2),
         "unattributed_kg": round(unattributed_kg, 2),
         "distribution": distribution,
         "product_lines": product_lines,
         "weight_basis_note": (
-            "Open Field = inhouse harvest (inward_quantity) for Iceberg Lettuce, Spring Onion, etc. "
-            "Outsourced purchases of open-field products go to Aggregation. "
-            "All other buckets use sold qty (kg); EA products without kg mapping = 0."
+            "Inhouse card: Harvest column kg before wastage in farm; net = gross − farm wastage on inhouse rows. "
+            "Outsourced card: Purchase column kg (not sold kg; opening stock excluded on re-upload). "
+            "Sold kg totals are shown separately and still drive cost allocation."
         ),
     }
 
@@ -2275,9 +2366,25 @@ async def get_sales_weight_summary(
         else:
             sales = []
 
-    # For open-field products pass ALL rows so inhouse/outsourced split lines
-    # that land on different month keys are still correctly combined.
-    summary = compute_sales_weight_summary(sales, all_sales_for_of=sales_all)
+    summary = compute_sales_weight_summary(sales)
+    if (
+        summary.get("line_inhouse_gross_kg", 0) <= 0
+        and summary.get("line_inhouse_sold_kg", 0) > 0
+    ):
+        repaired = _backfill_harvest_fields(db)
+        if repaired:
+            sales_all = db.query(MonthlySale).join(Product).all()
+            if all_time:
+                sales = sales_all
+            elif applied_month:
+                sales = [s for s in sales_all if _to_month_key(s.month) == applied_month]
+            else:
+                sales = []
+            summary = compute_sales_weight_summary(sales)
+            summary["harvest_data_note"] = (
+                f"Repaired harvest kg on {repaired} inhouse row(s) from stored inward quantities. "
+                "Re-upload March sales for opening vs harvest split accuracy."
+            )
     summary["month"] = applied_month
     summary["scope"] = "all_time" if all_time else ("month" if month else "latest_month")
     summary["scope_note"] = scope_note
@@ -2286,9 +2393,8 @@ async def get_sales_weight_summary(
         "(strawberry + lettuce/greens + open field + aggregation + other) for this scope."
     )
     summary["open_field_note"] = (
-        "Open Field kg is sales quantity for products on the open-field allowlist "
-        "(Mapping tab), combining inhouse and outsourced split lines per product. "
-        "Wastage is not subtracted from these weights."
+        "Open Field kg is inhouse harvest for allowlisted products (e.g. Iceberg Lettuce, Spring Onion). "
+        "Outsourced purchases of those products are counted under Aggregation purchase kg."
     )
     summary["lettuce_greens_product_count"] = len(_lettuce_greens_keys)
     return summary
@@ -3947,7 +4053,7 @@ def parse_new_sales_stock_format(df_raw: pd.DataFrame, db: Session, file_name: s
                     inward_quantity=harvest_qty,   # harvest only → used by weight summary
                     inward_rate=0.0, inward_value=0.0,
                     inhouse_production=harvest_qty,
-                    wastage=0.0,                   # no wastage on farm side
+                    wastage=round(wf_qty, 4),      # farm wastage on harvest row
                 ))
                 db.add(MonthlySale(
                     product_id=outsourced_product.id, month=month,
@@ -3957,13 +4063,17 @@ def parse_new_sales_stock_format(df_raw: pd.DataFrame, db: Session, file_name: s
                     inward_quantity=purchase_qty,
                     inward_rate=purchase_rate, inward_value=purchase_value,
                     inhouse_production=0.0,
-                    wastage=round(total_wastage, 4),  # wastage came from purchased stock
+                    wastage=round(wd_qty, 4),      # dispatch wastage on purchased stock
                 ))
                 sales_created += 2
                 parsed_data.append(ExcelRowData(month=month, particulars=particulars, type="Both", inward_quantity=total_inward_qty, inward_rate=purchase_rate, inward_value=purchase_value, outward_quantity=revenue_qty, outward_rate=sales_rate, outward_value=sales_value if sales_value > 0 else (revenue_qty * sales_rate), inhouse_production=harvest_qty, wastage=total_wastage))
             elif harvest_qty > 0:
                 product = upsert_product(f"{particulars} (Inhouse)", "inhouse")
-                db.add(MonthlySale(product_id=product.id, month=month, quantity=revenue_qty, sale_price=sales_rate, direct_cost=0.0, inward_quantity=total_inward_qty, inward_rate=0.0, inward_value=0.0, inhouse_production=harvest_qty, wastage=total_wastage))
+                db.add(MonthlySale(
+                    product_id=product.id, month=month, quantity=revenue_qty, sale_price=sales_rate,
+                    direct_cost=0.0, inward_quantity=harvest_qty, inward_rate=0.0, inward_value=0.0,
+                    inhouse_production=harvest_qty, wastage=total_wastage,
+                ))
                 sales_created += 1
                 parsed_data.append(ExcelRowData(month=month, particulars=particulars, type="Inhouse", inward_quantity=total_inward_qty, inward_rate=0.0, inward_value=0.0, outward_quantity=revenue_qty, outward_rate=sales_rate, outward_value=sales_value if sales_value > 0 else (revenue_qty * sales_rate), inhouse_production=harvest_qty, wastage=total_wastage))
             else:
@@ -3980,13 +4090,25 @@ def parse_new_sales_stock_format(df_raw: pd.DataFrame, db: Session, file_name: s
                     parsed_data.append(ExcelRowData(month=month, particulars=particulars, type="Inhouse", inward_quantity=0.0, inward_rate=0.0, inward_value=0.0, outward_quantity=revenue_qty, outward_rate=sales_rate, outward_value=sales_value if sales_value > 0 else (revenue_qty * sales_rate), inhouse_production=0.0, wastage=total_wastage))
                 else:
                     product = upsert_product(f"{particulars} (Outsourced)", "outsourced")
-                    db.add(MonthlySale(product_id=product.id, month=month, quantity=revenue_qty, sale_price=sales_rate, direct_cost=purchase_value if purchase_value > 0 else total_inward_qty * purchase_rate, inward_quantity=total_inward_qty if total_inward_qty > 0 else purchase_qty, inward_rate=purchase_rate, inward_value=purchase_value if purchase_value > 0 else total_inward_qty * purchase_rate, inhouse_production=0.0, wastage=total_wastage))
+                    purchase_inward = purchase_qty if purchase_qty > 0 else max(0.0, total_inward_qty - open_qty)
+                    db.add(MonthlySale(
+                        product_id=product.id, month=month, quantity=revenue_qty, sale_price=sales_rate,
+                        direct_cost=purchase_value if purchase_value > 0 else purchase_inward * purchase_rate,
+                        inward_quantity=purchase_inward,
+                        inward_rate=purchase_rate,
+                        inward_value=purchase_value if purchase_value > 0 else purchase_inward * purchase_rate,
+                        inhouse_production=0.0, wastage=total_wastage,
+                    ))
                     sales_created += 1
                     parsed_data.append(ExcelRowData(month=month, particulars=particulars, type="Outsourced", inward_quantity=total_inward_qty if total_inward_qty > 0 else purchase_qty, inward_rate=purchase_rate, inward_value=purchase_value if purchase_value > 0 else total_inward_qty * purchase_rate, outward_quantity=revenue_qty, outward_rate=sales_rate, outward_value=sales_value if sales_value > 0 else (revenue_qty * sales_rate), inhouse_production=0.0, wastage=total_wastage))
         except Exception as e:
             errors.append(f"Row {ridx + 1}: {e}")
 
     db.commit()
+    try:
+        _backfill_harvest_fields(db)
+    except Exception as _bf_e:
+        print(f"⚠️  Harvest backfill after upload: {_bf_e}")
     try:
         refresh_allocation_denominator_kg_for_all_costs(db)
     except Exception as _den_e:
