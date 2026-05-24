@@ -989,8 +989,70 @@ class FinancialAdjustment(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
+class MonthlyWastageOverride(Base):
+    """Per-month manual wastage kg (when Excel WD+WF totals are wrong)."""
+    __tablename__ = "monthly_wastage_overrides"
+
+    id = Column(Integer, primary_key=True, index=True)
+    month = Column(String, unique=True, index=True)  # YYYY-MM
+    inhouse_wastage_kg = Column(Float, nullable=True)
+    outsourced_wastage_kg = Column(Float, nullable=True)
+    notes = Column(Text, nullable=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 # Create tables
 Base.metadata.create_all(bind=engine)
+
+
+def _get_monthly_wastage_override(db: Session, month_key: str) -> Optional[MonthlyWastageOverride]:
+    key = _to_month_key(month_key)
+    if not key:
+        return None
+    return db.query(MonthlyWastageOverride).filter(MonthlyWastageOverride.month == key).first()
+
+
+def _outsourced_wastage_excel_total_kg(sales_map: Dict, product_map: Dict) -> float:
+    total = 0.0
+    for pid, sale in sales_map.items():
+        product = product_map.get(pid)
+        if product and product.source == "outsourced":
+            total += _sale_wastage_for_allocation_kg(sale)
+    return total
+
+
+def _outsourced_wastage_allocation_kg(
+    sale: MonthlySale,
+    month_key: str,
+    db: Session,
+    sales_map: Dict,
+    product_map: Dict,
+) -> float:
+    """
+    Outsourced line weight for WASTAGE & SHORTAGE pool.
+    Uses manual month override total when set; splits by Excel line wastage shares,
+    else by sold kg share among outsourced lines.
+    """
+    product = getattr(sale, "product", None) or product_map.get(getattr(sale, "product_id", None))
+    if not product or product.source != "outsourced":
+        return 0.0
+    line_w = _sale_wastage_for_allocation_kg(sale)
+    ov = _get_monthly_wastage_override(db, month_key)
+    if not ov or ov.outsourced_wastage_kg is None or ov.outsourced_wastage_kg <= 0:
+        return line_w
+    target = float(ov.outsourced_wastage_kg)
+    excel_total = _outsourced_wastage_excel_total_kg(sales_map, product_map)
+    if excel_total > 0 and line_w > 0:
+        return target * (line_w / excel_total)
+    sold = _sale_quantity_kg(sale)
+    sold_total = 0.0
+    for pid, s in sales_map.items():
+        p = product_map.get(pid)
+        if p and p.source == "outsourced":
+            sold_total += _sale_quantity_kg(s)
+    if sold_total > 0 and sold > 0:
+        return target * (sold / sold_total)
+    return 0.0
 
 
 def _get_financial_adjustment(db: Session) -> "FinancialAdjustment":
@@ -1489,7 +1551,7 @@ class CostAllocationEngine:
         # Do NOT subtract wastage again.
         use_direct_sales_kg = (cost.basis == "sales_kg")
         if use_direct_sales_kg:
-            total_basis_f = self._compute_total_basis(cost, applicable_products, sales_map)
+            total_basis_f = self._compute_total_basis(cost, applicable_products, sales_map, month=month)
             if total_basis_f <= 0:
                 return
             total_basis_dec = Decimal(str(total_basis_f))
@@ -1503,7 +1565,7 @@ class CostAllocationEngine:
                 total_basis_dec = Decimal(str(den))
                 cost.allocation_denominator_kg = float(den)
             else:
-                total_basis_f = self._compute_total_basis(cost, applicable_products, sales_map)
+                total_basis_f = self._compute_total_basis(cost, applicable_products, sales_map, month=month)
                 if total_basis_f <= 0:
                     return
                 total_basis_dec = Decimal(str(total_basis_f))
@@ -1517,7 +1579,9 @@ class CostAllocationEngine:
                 continue
                 
             sale = sales_map[product_id]
-            product_basis = self._compute_product_basis(cost, sale)
+            product_basis = self._compute_product_basis(
+                cost, sale, month=month, sales_map=sales_map, product_map=product_map
+            )
             
             if product_basis > 0:
                 pb = Decimal(str(product_basis))
@@ -1819,42 +1883,65 @@ class CostAllocationEngine:
         
         return applicable
     
-    def _compute_total_basis(self, cost: Cost, applicable_products: Dict, sales_map: Dict) -> float:
+    def _compute_total_basis(
+        self, cost: Cost, applicable_products: Dict, sales_map: Dict, month: Optional[str] = None
+    ) -> float:
         """Compute total basis for allocation"""
+        cost_name_upper = (cost.name or "").upper()
+        month_key = _to_month_key(month or getattr(cost, "month", None) or "")
+        if "WASTAGE" in cost_name_upper and "SHORTAGE" in cost_name_upper:
+            ov = _get_monthly_wastage_override(self.db, month_key)
+            if ov and ov.outsourced_wastage_kg is not None and ov.outsourced_wastage_kg > 0:
+                return float(ov.outsourced_wastage_kg)
         total = 0.0
-        
+        product_map = {pid: applicable_products[pid] for pid in applicable_products}
         for product_id in applicable_products:
             if product_id in sales_map:
                 sale = sales_map[product_id]
-                total += self._compute_product_basis(cost, sale)
-        
+                total += self._compute_product_basis(
+                    cost, sale, month=month, sales_map=sales_map, product_map=product_map
+                )
         return total
     
-    def _compute_product_basis(self, cost: Cost, sale: MonthlySale) -> float:
+    def _compute_product_basis(
+        self,
+        cost: Cost,
+        sale: MonthlySale,
+        month: Optional[str] = None,
+        sales_map: Optional[Dict] = None,
+        product_map: Optional[Dict] = None,
+    ) -> float:
         """Compute basis for a single product based on cost allocation rules"""
-        # Get product to access unit information
         product = sale.product
         pname = (product.name or "").lower()
         is_hamper = "hamper" in pname
 
-        # Hampers: no allocation for inhouse-specific (I) cultivation/wastage costs; otherwise sales kg like others
         if is_hamper:
             is_inhouse_cost = cost.pl_classification == "I" if hasattr(cost, 'pl_classification') and cost.pl_classification else False
             if is_inhouse_cost:
                 return 0.0
 
         cost_name_upper = (cost.name or "").upper()
+        month_key = _to_month_key(month or getattr(cost, "month", None) or "")
         if "WASTAGE" in cost_name_upper and "SHORTAGE" in cost_name_upper:
+            if sales_map is not None and product_map is not None:
+                return _outsourced_wastage_allocation_kg(
+                    sale, month_key, self.db, sales_map, product_map
+                )
             return _sale_wastage_for_allocation_kg(sale)
 
-        # Allocatable costs: share ∝ sales kg (cost.basis is metadata only, except direct_cost rows which are never allocated).
         return _sale_quantity_kg(sale)
 
     def _net_product_basis(self, cost: Cost, sale: MonthlySale) -> float:
         """Basis kg for denominator refresh (wastage pool uses outsourced wastage kg only)."""
         cost_name_upper = (cost.name or "").upper()
         if "WASTAGE" in cost_name_upper and "SHORTAGE" in cost_name_upper:
-            return _sale_wastage_for_allocation_kg(sale)
+            month_key = _to_month_key(getattr(cost, "month", None) or "")
+            sales_map = {sale.product_id: sale}
+            product_map = {sale.product_id: sale.product} if sale.product else {}
+            return _outsourced_wastage_allocation_kg(
+                sale, month_key, self.db, sales_map, product_map
+            )
         gross = self._compute_product_basis(cost, sale)
         if gross <= 0:
             return 0.0
@@ -2060,7 +2147,11 @@ def refresh_allocation_denominator_kg_for_all_costs(db: Session) -> None:
             if pid not in sales_map:
                 continue
             net_total += engine._net_product_basis(cost, sales_map[pid])
-        gross_total = engine._compute_total_basis(cost, applicable, sales_map)
+        gross_total = engine._compute_total_basis(cost, applicable, sales_map, month=cost.month)
+        if "WASTAGE" in (cost.name or "").upper() and "SHORTAGE" in (cost.name or "").upper():
+            if gross_total > 0:
+                cost.allocation_denominator_kg = float(gross_total)
+            continue
         if net_total > 0:
             cost.allocation_denominator_kg = float(net_total)
         elif gross_total > 0:
@@ -2547,7 +2638,93 @@ async def get_sales_weight_summary(
         "Outsourced purchases of those products are counted under Aggregation purchase kg."
     )
     summary["lettuce_greens_product_count"] = len(_lettuce_greens_keys)
+    if applied_month:
+        ov = _get_monthly_wastage_override(db, applied_month)
+        excel_in = round(float(summary.get("line_inhouse_farm_wf_kg") or 0), 3)
+        excel_out = round(float(summary.get("line_outsourced_wastage_kg") or 0), 3)
+        summary["excel_scan"] = {
+            "inhouse_wastage_kg": excel_in,
+            "outsourced_wastage_kg": excel_out,
+        }
+        summary["wastage_override"] = {
+            "month": applied_month,
+            "inhouse_wastage_kg": float(ov.inhouse_wastage_kg) if ov and ov.inhouse_wastage_kg is not None else None,
+            "outsourced_wastage_kg": float(ov.outsourced_wastage_kg) if ov and ov.outsourced_wastage_kg is not None else None,
+            "notes": (ov.notes or "") if ov else "",
+            "updated_at": ov.updated_at.isoformat() if ov and ov.updated_at else None,
+        }
+        eff_in = (
+            float(ov.inhouse_wastage_kg)
+            if ov and ov.inhouse_wastage_kg is not None
+            else excel_in
+        )
+        eff_out = (
+            float(ov.outsourced_wastage_kg)
+            if ov and ov.outsourced_wastage_kg is not None
+            else excel_out
+        )
+        summary["effective_wastage"] = {
+            "inhouse_wastage_kg": round(eff_in, 3),
+            "outsourced_wastage_kg": round(eff_out, 3),
+        }
     return summary
+
+
+class MonthlyWastageOverrideBody(BaseModel):
+    month: str = Field(..., pattern=r"^\d{4}-\d{2}$")
+    inhouse_wastage_kg: Optional[float] = Field(None, ge=0)
+    outsourced_wastage_kg: Optional[float] = Field(None, ge=0)
+    notes: Optional[str] = Field(None, max_length=500)
+
+
+@app.get("/api/monthly-wastage-override")
+async def get_monthly_wastage_override(
+    month: str = Query(..., description="YYYY-MM"),
+    db: Session = Depends(get_db),
+):
+    key = _to_month_key(month)
+    if not key:
+        raise HTTPException(status_code=400, detail="Invalid month; use YYYY-MM")
+    ov = _get_monthly_wastage_override(db, key)
+    return {
+        "month": key,
+        "inhouse_wastage_kg": float(ov.inhouse_wastage_kg) if ov and ov.inhouse_wastage_kg is not None else None,
+        "outsourced_wastage_kg": float(ov.outsourced_wastage_kg) if ov and ov.outsourced_wastage_kg is not None else None,
+        "notes": (ov.notes or "") if ov else "",
+        "updated_at": ov.updated_at.isoformat() if ov and ov.updated_at else None,
+    }
+
+
+@app.put("/api/monthly-wastage-override")
+async def put_monthly_wastage_override(
+    body: MonthlyWastageOverrideBody,
+    db: Session = Depends(get_db),
+):
+    key = _to_month_key(body.month)
+    if not key:
+        raise HTTPException(status_code=400, detail="Invalid month; use YYYY-MM")
+    ov = _get_monthly_wastage_override(db, key)
+    if not ov:
+        ov = MonthlyWastageOverride(month=key)
+        db.add(ov)
+    ov.inhouse_wastage_kg = body.inhouse_wastage_kg
+    ov.outsourced_wastage_kg = body.outsourced_wastage_kg
+    ov.notes = body.notes or ""
+    ov.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(ov)
+    try:
+        refresh_allocation_denominator_kg_for_all_costs(db)
+    except Exception as e:
+        print(f"⚠️  Denominator refresh after wastage override: {e}")
+    return {
+        "message": f"Wastage override saved for {key}",
+        "month": key,
+        "inhouse_wastage_kg": ov.inhouse_wastage_kg,
+        "outsourced_wastage_kg": ov.outsourced_wastage_kg,
+        "notes": ov.notes,
+        "updated_at": ov.updated_at.isoformat() if ov.updated_at else None,
+    }
 
 
 class ProductAllowlistUpdate(BaseModel):

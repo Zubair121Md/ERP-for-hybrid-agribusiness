@@ -548,30 +548,80 @@ function displaySalesWeightSummary(summary) {
         : '';
     container.style.display = 'block';
     const inhouseGross = summary.line_inhouse_gross_kg != null ? summary.line_inhouse_gross_kg : 0;
-    const inhouseFarmWf = summary.line_inhouse_farm_wf_kg != null
-        ? summary.line_inhouse_farm_wf_kg
-        : (summary.line_inhouse_farm_wastage_kg || 0);
+    const excelInW = summary.excel_scan?.inhouse_wastage_kg != null
+        ? summary.excel_scan.inhouse_wastage_kg
+        : (summary.line_inhouse_farm_wf_kg != null ? summary.line_inhouse_farm_wf_kg : (summary.line_inhouse_farm_wastage_kg || 0));
+    const excelOutW = summary.excel_scan?.outsourced_wastage_kg != null
+        ? summary.excel_scan.outsourced_wastage_kg
+        : (summary.line_outsourced_wastage_kg || 0);
+    const effInW = summary.effective_wastage?.inhouse_wastage_kg != null
+        ? summary.effective_wastage.inhouse_wastage_kg
+        : excelInW;
+    const effOutW = summary.effective_wastage?.outsourced_wastage_kg != null
+        ? summary.effective_wastage.outsourced_wastage_kg
+        : excelOutW;
+    const ovIn = summary.wastage_override?.inhouse_wastage_kg;
+    const ovOut = summary.wastage_override?.outsourced_wastage_kg;
+    const wastageMonth = summary.month || summary.wastage_override?.month || '';
     const inhouseSold = summary.line_inhouse_sold_kg != null ? summary.line_inhouse_sold_kg : 0;
     const outPurchase = summary.line_outsourced_purchase_kg != null
         ? summary.line_outsourced_purchase_kg
         : (summary.line_outsourced_kg || 0);
     const outOpening = summary.line_outsourced_opening_kg || 0;
-    const outWastage = summary.line_outsourced_wastage_kg || 0;
     const outWd = summary.line_outsourced_wd_kg || 0;
     const outSold = summary.line_outsourced_sold_kg != null ? summary.line_outsourced_sold_kg : 0;
+    const hasOverride = ovIn != null || ovOut != null;
 
     container.innerHTML = `
         <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:16px 20px;">
             <h4 style="margin:0 0 4px;color:#1e293b;">Inward weight (before wastage removal)${monthNote}</h4>
             <p style="margin:0 0 14px;color:#64748b;font-size:0.85rem;">
-                From upload Harvest / Purchase columns — not sold qty. Sold totals are listed below for reference.
+                From upload Harvest / Purchase columns — not sold qty. Override wastage below if Excel WD+WF totals are wrong.
             </p>
+            ${wastageMonth ? `
+            <div style="background:#fff;border:1px solid #e2e8f0;border-radius:8px;padding:14px 16px;margin-bottom:16px;">
+                <div style="font-weight:600;color:#374151;margin-bottom:10px;">Manual wastage (kg) — ${wastageMonth}</div>
+                <p style="margin:0 0 12px;font-size:0.82rem;color:#64748b;">
+                    Excel scan: inhouse (WF on harvest rows) <strong>${formatNumber(excelInW)}</strong> kg ·
+                    outsourced (WD+WF) <strong>${formatNumber(excelOutW)}</strong> kg.
+                    Saved values are used for display and for WASTAGE &amp; SHORTAGE allocation (outsourced only).
+                </p>
+                <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px;align-items:end;">
+                    <label style="display:block;font-size:0.85rem;color:#374151;">
+                        Inhouse wastage (kg)
+                        <input type="number" id="wastage-override-inhouse" step="0.001" min="0" class="form-control"
+                            style="margin-top:4px;width:100%;"
+                            value="${ovIn != null ? ovIn : ''}"
+                            placeholder="Excel: ${formatNumber(excelInW)}">
+                    </label>
+                    <label style="display:block;font-size:0.85rem;color:#374151;">
+                        Outsourced wastage (kg)
+                        <input type="number" id="wastage-override-outsourced" step="0.001" min="0" class="form-control"
+                            style="margin-top:4px;width:100%;"
+                            value="${ovOut != null ? ovOut : ''}"
+                            placeholder="e.g. 1180.55">
+                    </label>
+                    <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                        <button type="button" class="btn btn-primary" onclick="saveMonthlyWastageOverride('${wastageMonth}')">
+                            Save wastage
+                        </button>
+                        <button type="button" class="btn btn-secondary" onclick="clearMonthlyWastageOverride('${wastageMonth}')">
+                            Use Excel scan
+                        </button>
+                    </div>
+                </div>
+                ${hasOverride ? `<p style="margin:10px 0 0;font-size:0.82rem;color:#047857;">Using saved: inhouse <strong>${formatNumber(effInW)}</strong> kg · outsourced <strong>${formatNumber(effOutW)}</strong> kg (re-run allocation to apply).</p>` : ''}
+            </div>
+            ` : ''}
             <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin-bottom:16px;">
                 <div style="background:#ecfdf5;border:1px solid #a7f3d0;border-radius:8px;padding:12px 14px;">
                     <div style="font-size:0.8rem;color:#047857;font-weight:600;">Inhouse — Harvest column <span style="font-weight:500;">(before wastage removal)</span></div>
                     <div style="font-size:1.35rem;color:#065f46;font-weight:700;">${formatNumber(inhouseGross)} kg</div>
-                    ${inhouseFarmWf > 0 ? `<div style="font-size:0.85rem;color:#6b7280;margin-top:4px;">Wastage in farm on harvest rows (info only, not deducted): ${formatNumber(inhouseFarmWf)} kg</div>` : ''}
-                    <div style="font-size:0.85rem;color:#64748b;margin-top:4px;">WASTAGE &amp; SHORTAGE is <strong>not</strong> allocated to inhouse lines.</div>
+                    <div style="font-size:0.85rem;color:#6b7280;margin-top:4px;">
+                        Inhouse wastage: <strong>${formatNumber(effInW)}</strong> kg
+                        ${hasOverride && ovIn != null ? ' (manual)' : (excelInW > 0 ? ` (Excel scan ${formatNumber(excelInW)} kg)` : '')}
+                    </div>
+                    <div style="font-size:0.85rem;color:#64748b;margin-top:4px;">Not deducted from harvest · not used for WASTAGE pool.</div>
                     ${inhouseSold > 0 ? `<div style="font-size:0.85rem;color:#94a3b8;margin-top:4px;">Sold kg (separate): ${formatNumber(inhouseSold)} kg</div>` : ''}
                     <div style="font-size:0.85rem;color:#6b7280;margin-top:6px;">${summary.inhouse_line_count || 0} products with harvest · ${summary.inhouse_share_percent != null ? summary.inhouse_share_percent : '—'}% of inward</div>
                 </div>
@@ -579,7 +629,11 @@ function displaySalesWeightSummary(summary) {
                     <div style="font-size:0.8rem;color:#1d4ed8;font-weight:600;">Outsourced — Purchase column</div>
                     <div style="font-size:1.35rem;color:#1e40af;font-weight:700;">${formatNumber(outPurchase)} kg</div>
                     ${outOpening > 0 ? `<div style="font-size:0.85rem;color:#6b7280;margin-top:4px;">Opening stock (excluded from purchase): ${formatNumber(outOpening)} kg</div>` : '<div style="font-size:0.85rem;color:#6b7280;margin-top:4px;">Opening stock excluded from purchase total</div>'}
-                    ${outWastage > 0 ? `<div style="font-size:0.85rem;color:#6b7280;margin-top:4px;">Wastage on outsourced (WD+WF, used for WASTAGE &amp; SHORTAGE pool): ${formatNumber(outWastage)} kg${outWd > 0 ? ` (dispatch ${formatNumber(outWd)} kg)` : ''}</div>` : ''}
+                    <div style="font-size:0.85rem;color:#6b7280;margin-top:4px;">
+                        Outsourced wastage (WD+WF): <strong>${formatNumber(effOutW)}</strong> kg
+                        ${hasOverride && ovOut != null ? ' (manual — used for WASTAGE &amp; SHORTAGE)' : (excelOutW > 0 ? ` (Excel scan ${formatNumber(excelOutW)} kg)` : '')}
+                        ${outWd > 0 && !hasOverride ? ` · dispatch scan ${formatNumber(outWd)} kg` : ''}
+                    </div>
                     ${outSold > 0 ? `<div style="font-size:0.85rem;color:#94a3b8;margin-top:4px;">Sold kg (separate): ${formatNumber(outSold)} kg</div>` : ''}
                     <div style="font-size:0.85rem;color:#6b7280;margin-top:6px;">${summary.outsourced_line_count || 0} products with purchase · ${summary.outsourced_share_percent != null ? summary.outsourced_share_percent : '—'}% of inward</div>
                 </div>
@@ -656,6 +710,66 @@ function displaySalesWeightSummary(summary) {
 }
 
 // Display sales data
+async function saveMonthlyWastageOverride(month) {
+    const m = normalizeMonthKey(month);
+    if (!m) {
+        showAlert('Select a valid month (YYYY-MM)', 'error');
+        return;
+    }
+    const inEl = document.getElementById('wastage-override-inhouse');
+    const outEl = document.getElementById('wastage-override-outsourced');
+    const payload = { month: m };
+    if (inEl && inEl.value !== '') {
+        const v = parseFloat(inEl.value);
+        if (Number.isNaN(v) || v < 0) {
+            showAlert('Inhouse wastage must be a non-negative number', 'error');
+            return;
+        }
+        payload.inhouse_wastage_kg = v;
+    } else {
+        payload.inhouse_wastage_kg = null;
+    }
+    if (outEl && outEl.value !== '') {
+        const v = parseFloat(outEl.value);
+        if (Number.isNaN(v) || v < 0) {
+            showAlert('Outsourced wastage must be a non-negative number', 'error');
+            return;
+        }
+        payload.outsourced_wastage_kg = v;
+    } else {
+        payload.outsourced_wastage_kg = null;
+    }
+    try {
+        const res = await fetch(`${API_BASE}/monthly-wastage-override`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+            throw new Error(data.detail || data.message || 'Save failed');
+        }
+        showAlert(data.message || 'Wastage saved. Re-run allocation to apply.', 'success');
+        await loadSales();
+    } catch (e) {
+        console.error(e);
+        showAlert(e.message || 'Failed to save wastage override', 'error');
+    }
+}
+
+async function clearMonthlyWastageOverride(month) {
+    const m = normalizeMonthKey(month);
+    if (!m) return;
+    const inEl = document.getElementById('wastage-override-inhouse');
+    const outEl = document.getElementById('wastage-override-outsourced');
+    if (inEl) inEl.value = '';
+    if (outEl) outEl.value = '';
+    await saveMonthlyWastageOverride(m);
+}
+
+window.saveMonthlyWastageOverride = saveMonthlyWastageOverride;
+window.clearMonthlyWastageOverride = clearMonthlyWastageOverride;
+
 function displaySales(sales) {
     const container = document.getElementById('sales-table');
     
