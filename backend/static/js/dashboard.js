@@ -548,12 +548,16 @@ function displaySalesWeightSummary(summary) {
         : '';
     container.style.display = 'block';
     const inhouseGross = summary.line_inhouse_gross_kg != null ? summary.line_inhouse_gross_kg : 0;
-    const inhouseWastage = summary.line_inhouse_farm_wastage_kg || 0;
-    const inhouseNet = summary.line_inhouse_kg != null ? summary.line_inhouse_kg : Math.max(0, inhouseGross - inhouseWastage);
+    const inhouseFarmWf = summary.line_inhouse_farm_wf_kg != null
+        ? summary.line_inhouse_farm_wf_kg
+        : (summary.line_inhouse_farm_wastage_kg || 0);
     const inhouseSold = summary.line_inhouse_sold_kg != null ? summary.line_inhouse_sold_kg : 0;
     const outPurchase = summary.line_outsourced_purchase_kg != null
         ? summary.line_outsourced_purchase_kg
         : (summary.line_outsourced_kg || 0);
+    const outOpening = summary.line_outsourced_opening_kg || 0;
+    const outWastage = summary.line_outsourced_wastage_kg || 0;
+    const outWd = summary.line_outsourced_wd_kg || 0;
     const outSold = summary.line_outsourced_sold_kg != null ? summary.line_outsourced_sold_kg : 0;
 
     container.innerHTML = `
@@ -564,16 +568,18 @@ function displaySalesWeightSummary(summary) {
             </p>
             <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin-bottom:16px;">
                 <div style="background:#ecfdf5;border:1px solid #a7f3d0;border-radius:8px;padding:12px 14px;">
-                    <div style="font-size:0.8rem;color:#047857;font-weight:600;">Inhouse — farm harvest <span style="font-weight:500;">(before wastage in farm)</span></div>
+                    <div style="font-size:0.8rem;color:#047857;font-weight:600;">Inhouse — Harvest column <span style="font-weight:500;">(before wastage removal)</span></div>
                     <div style="font-size:1.35rem;color:#065f46;font-weight:700;">${formatNumber(inhouseGross)} kg</div>
-                    ${inhouseWastage > 0 ? `<div style="font-size:0.85rem;color:#6b7280;margin-top:4px;">After wastage in farm: <strong>${formatNumber(inhouseNet)} kg</strong> (−${formatNumber(inhouseWastage)} kg)</div>` : ''}
+                    ${inhouseFarmWf > 0 ? `<div style="font-size:0.85rem;color:#6b7280;margin-top:4px;">Wastage in farm on harvest rows (info only, not deducted): ${formatNumber(inhouseFarmWf)} kg</div>` : ''}
+                    <div style="font-size:0.85rem;color:#64748b;margin-top:4px;">WASTAGE &amp; SHORTAGE is <strong>not</strong> allocated to inhouse lines.</div>
                     ${inhouseSold > 0 ? `<div style="font-size:0.85rem;color:#94a3b8;margin-top:4px;">Sold kg (separate): ${formatNumber(inhouseSold)} kg</div>` : ''}
                     <div style="font-size:0.85rem;color:#6b7280;margin-top:6px;">${summary.inhouse_line_count || 0} products with harvest · ${summary.inhouse_share_percent != null ? summary.inhouse_share_percent : '—'}% of inward</div>
                 </div>
                 <div style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:8px;padding:12px 14px;">
-                    <div style="font-size:0.8rem;color:#1d4ed8;font-weight:600;">Outsourced — purchase <span style="font-weight:500;">(before dispatch wastage)</span></div>
+                    <div style="font-size:0.8rem;color:#1d4ed8;font-weight:600;">Outsourced — Purchase column</div>
                     <div style="font-size:1.35rem;color:#1e40af;font-weight:700;">${formatNumber(outPurchase)} kg</div>
-                    <div style="font-size:0.85rem;color:#6b7280;margin-top:4px;">Purchase column only; opening stock not included</div>
+                    ${outOpening > 0 ? `<div style="font-size:0.85rem;color:#6b7280;margin-top:4px;">Opening stock (excluded from purchase): ${formatNumber(outOpening)} kg</div>` : '<div style="font-size:0.85rem;color:#6b7280;margin-top:4px;">Opening stock excluded from purchase total</div>'}
+                    ${outWastage > 0 ? `<div style="font-size:0.85rem;color:#6b7280;margin-top:4px;">Wastage on outsourced (WD+WF, used for WASTAGE &amp; SHORTAGE pool): ${formatNumber(outWastage)} kg${outWd > 0 ? ` (dispatch ${formatNumber(outWd)} kg)` : ''}</div>` : ''}
                     ${outSold > 0 ? `<div style="font-size:0.85rem;color:#94a3b8;margin-top:4px;">Sold kg (separate): ${formatNumber(outSold)} kg</div>` : ''}
                     <div style="font-size:0.85rem;color:#6b7280;margin-top:6px;">${summary.outsourced_line_count || 0} products with purchase · ${summary.outsourced_share_percent != null ? summary.outsourced_share_percent : '—'}% of inward</div>
                 </div>

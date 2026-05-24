@@ -64,7 +64,8 @@ def _allocation_forced_applies_to(cost_name: Optional[str]) -> Optional[str]:
     Pooled costs that must split over sales kg as follows (overrides wrong DB applies_to):
     - Packing (variable): all inhouse + outsourced
     - Variable Aggregation: outsourced only
-    - Distribution, Marketing, Vehicle, OTHERS, Wastage & Shortage: all products with sales
+    - Distribution, Marketing, Vehicle, OTHERS: all products with sales
+    - Wastage & Shortage: outsourced only, by wastage kg (not sales kg)
     """
     u = (cost_name or "").upper()
     if not u:
@@ -78,7 +79,7 @@ def _allocation_forced_applies_to(cost_name: Optional[str]) -> Optional[str]:
     if "DISTRIBUTION COST" in u or "MARKETING EXPENSES" in u or "VEHICLE RUNNING COST" in u:
         return "both"
     if "WASTAGE" in u and "SHORTAGE" in u:
-        return "both"
+        return "outsourced"
     if u.strip() == "OTHERS":
         return "both"
     return None
@@ -315,16 +316,112 @@ def _backfill_harvest_fields(db: Session) -> int:
     return updated
 
 
+def _backfill_stock_flow_columns(db: Session) -> int:
+    """
+    Repair stock-flow columns and wastage placement on rows from older uploads.
+    - Inhouse: wf_quantity from legacy wastage; wastage=0 (not allocated to inhouse).
+    - Outsourced: purchase_quantity, wd/wf split, wastage = wd + wf.
+    """
+    updated = 0
+    rows = db.query(MonthlySale).join(Product).all()
+    for sale in rows:
+        product = sale.product
+        if not product:
+            continue
+        changed = False
+        legacy_w = float(getattr(sale, "wastage", None) or 0)
+        wf = float(getattr(sale, "wf_quantity", None) or 0)
+        wd = float(getattr(sale, "wd_quantity", None) or 0)
+
+        if product.source == "inhouse":
+            if legacy_w > 0 and wf <= 0:
+                sale.wf_quantity = legacy_w
+                wf = legacy_w
+                changed = True
+            if float(getattr(sale, "wastage", None) or 0) != 0:
+                sale.wastage = 0.0
+                changed = True
+            if wf > 0 and float(getattr(sale, "wastage", None) or 0) != 0:
+                sale.wastage = 0.0
+                changed = True
+        else:
+            rate = float(getattr(sale, "inward_rate", None) or 0)
+            value = float(getattr(sale, "inward_value", None) or 0)
+            pq = float(getattr(sale, "purchase_quantity", None) or 0)
+            inward = float(getattr(sale, "inward_quantity", None) or 0)
+            opening = float(getattr(sale, "opening_quantity", None) or 0)
+            if pq <= 0 and rate > 0 and value > 0:
+                sale.purchase_quantity = value / rate
+                pq = sale.purchase_quantity
+                changed = True
+            if pq <= 0 and inward > 0:
+                sale.purchase_quantity = max(0.0, inward - opening) if opening > 0 else inward
+                pq = sale.purchase_quantity
+                changed = True
+            if pq > 0 and opening <= 0 and inward > pq + 0.01:
+                sale.opening_quantity = inward - pq
+                opening = sale.opening_quantity
+                changed = True
+            if pq > 0 and float(getattr(sale, "inward_quantity", None) or 0) != pq:
+                sale.inward_quantity = pq
+                changed = True
+            if legacy_w > 0 and wd <= 0 and wf <= 0:
+                sale.wd_quantity = legacy_w
+                wd = legacy_w
+                changed = True
+            correct_w = wd + wf
+            if correct_w > 0 and abs(float(getattr(sale, "wastage", None) or 0) - correct_w) > 0.001:
+                sale.wastage = correct_w
+                changed = True
+            elif legacy_w > 0 and correct_w <= 0:
+                sale.wastage = legacy_w
+                sale.wd_quantity = legacy_w
+                changed = True
+
+        if changed:
+            updated += 1
+    if updated:
+        db.commit()
+    return updated
+
+
 def _outsourced_purchase_inward_kg(sale) -> float:
     """Purchase-column kg for outsourced lines (excludes opening stock on the row)."""
     product = getattr(sale, "product", None)
     if not product or product.source != "outsourced":
         return 0.0
+    purchase = float(getattr(sale, "purchase_quantity", None) or 0)
+    if purchase > 0:
+        return purchase
     rate = float(getattr(sale, "inward_rate", None) or 0)
     value = float(getattr(sale, "inward_value", None) or 0)
     if rate > 0 and value > 0:
         return value / rate
-    return float(getattr(sale, "inward_quantity", None) or 0)
+    inward = float(getattr(sale, "inward_quantity", None) or 0)
+    opening = float(getattr(sale, "opening_quantity", None) or 0)
+    if inward > 0 and opening > 0 and inward > opening:
+        return inward - opening
+    return inward
+
+
+def _sale_wastage_for_allocation_kg(sale) -> float:
+    """Wastage kg on outsourced rows only (wd + wf from Excel). Used for WASTAGE & SHORTAGE pool."""
+    product = getattr(sale, "product", None)
+    if not product or product.source != "outsourced":
+        return 0.0
+    wd = float(getattr(sale, "wd_quantity", None) or 0)
+    wf = float(getattr(sale, "wf_quantity", None) or 0)
+    if wd > 0 or wf > 0:
+        return wd + wf
+    return float(getattr(sale, "wastage", None) or 0)
+
+
+def _sale_inhouse_farm_wf_kg(sale) -> float:
+    """Wastage in farm on harvest rows — informational only, not used for WASTAGE & SHORTAGE allocation."""
+    product = getattr(sale, "product", None)
+    if not product or product.source != "inhouse":
+        return 0.0
+    return float(getattr(sale, "wf_quantity", None) or 0)
 
 
 def is_lettuce_greens_product_name(name: Optional[str]) -> bool:
@@ -431,8 +528,11 @@ def compute_sales_weight_summary(sales: List) -> Dict[str, Any]:
     line_inhouse_sold_kg = 0.0
     line_outsourced_sold_kg = 0.0
     line_inhouse_gross_kg = 0.0
-    line_inhouse_farm_wastage_kg = 0.0
+    line_inhouse_farm_wf_kg = 0.0
     line_outsourced_purchase_kg = 0.0
+    line_outsourced_opening_kg = 0.0
+    line_outsourced_wastage_kg = 0.0
+    line_outsourced_wd_kg = 0.0
     inhouse_harvest_line_count = 0
     outsourced_purchase_line_count = 0
 
@@ -447,17 +547,20 @@ def compute_sales_weight_summary(sales: List) -> Dict[str, Any]:
             harvest_kg = _inhouse_harvest_inward_kg(sale)
             if harvest_kg > 0:
                 line_inhouse_gross_kg += harvest_kg
-                line_inhouse_farm_wastage_kg += float(getattr(sale, "wastage", None) or 0)
+                line_inhouse_farm_wf_kg += _sale_inhouse_farm_wf_kg(sale)
                 inhouse_harvest_line_count += 1
         elif product.source == "outsourced":
             if sold > 0:
                 line_outsourced_sold_kg += sold
             purchase_kg = _outsourced_purchase_inward_kg(sale)
-            if purchase_kg <= 0:
-                purchase_kg = float(getattr(sale, "inward_quantity", None) or 0)
             if purchase_kg > 0:
                 line_outsourced_purchase_kg += purchase_kg
                 outsourced_purchase_line_count += 1
+            line_outsourced_opening_kg += float(getattr(sale, "opening_quantity", None) or 0)
+            w_kg = _sale_wastage_for_allocation_kg(sale)
+            if w_kg > 0:
+                line_outsourced_wastage_kg += w_kg
+            line_outsourced_wd_kg += float(getattr(sale, "wd_quantity", None) or 0)
 
     # ─── Open field: inhouse harvest quantity only (same month scope as sales) ─
     of_grouped: Dict[str, Dict[str, Any]] = {}
@@ -612,7 +715,8 @@ def compute_sales_weight_summary(sales: List) -> Dict[str, Any]:
             "outsourced_kg": round(bucket_outsourced[key], 2),
             "percent": round(pct, 2),
         })
-    line_inhouse_net_kg = max(0.0, line_inhouse_gross_kg - line_inhouse_farm_wastage_kg)
+    # Harvest card shows gross only; farm WF is informational (WASTAGE pool uses outsourced wd+wf only).
+    line_inhouse_net_kg = line_inhouse_gross_kg
     inward_total = line_inhouse_gross_kg + line_outsourced_purchase_kg
     inhouse_share_pct = (line_inhouse_gross_kg / inward_total * 100.0) if inward_total > 0 else 0.0
     outsourced_share_pct = (line_outsourced_purchase_kg / inward_total * 100.0) if inward_total > 0 else 0.0
@@ -631,10 +735,14 @@ def compute_sales_weight_summary(sales: List) -> Dict[str, Any]:
         "line_count": line_count,
         "line_inhouse_kg": round(line_inhouse_net_kg, 2),
         "line_inhouse_gross_kg": round(line_inhouse_gross_kg, 2),
-        "line_inhouse_farm_wastage_kg": round(line_inhouse_farm_wastage_kg, 2),
+        "line_inhouse_farm_wf_kg": round(line_inhouse_farm_wf_kg, 2),
+        "line_inhouse_farm_wastage_kg": round(line_inhouse_farm_wf_kg, 2),
         "line_inhouse_sold_kg": round(line_inhouse_sold_kg, 2),
         "line_outsourced_kg": round(line_outsourced_purchase_kg, 2),
         "line_outsourced_purchase_kg": round(line_outsourced_purchase_kg, 2),
+        "line_outsourced_opening_kg": round(line_outsourced_opening_kg, 2),
+        "line_outsourced_wastage_kg": round(line_outsourced_wastage_kg, 2),
+        "line_outsourced_wd_kg": round(line_outsourced_wd_kg, 2),
         "line_outsourced_sold_kg": round(line_outsourced_sold_kg, 2),
         "inhouse_line_count": inhouse_harvest_line_count,
         "outsourced_line_count": outsourced_purchase_line_count,
@@ -645,9 +753,9 @@ def compute_sales_weight_summary(sales: List) -> Dict[str, Any]:
         "distribution": distribution,
         "product_lines": product_lines,
         "weight_basis_note": (
-            "Inhouse card: Harvest column kg before wastage in farm; net = gross − farm wastage on inhouse rows. "
-            "Outsourced card: Purchase column kg (not sold kg; opening stock excluded on re-upload). "
-            "Sold kg totals are shown separately and still drive cost allocation."
+            "Inhouse = Harvest column (before wastage). Farm WF is shown for reference only — "
+            "WASTAGE & SHORTAGE is allocated on outsourced wastage kg (dispatch + farm on purchased stock), not inhouse. "
+            "Outsourced purchase = Purchase column; opening stock is excluded. Sold kg is separate."
         ),
     }
 
@@ -784,8 +892,12 @@ class MonthlySale(Base):
     inward_quantity = Column(Float, default=0.0)  # Inward quantity (purchased/grown)
     inward_rate = Column(Float, default=0.0)  # Inward rate per kg
     inward_value = Column(Float, default=0.0)  # Total inward value
-    inhouse_production = Column(Float, default=0.0)  # Extra production (outward > inward)
-    wastage = Column(Float, default=0.0)  # Wastage (inward > outward)
+    inhouse_production = Column(Float, default=0.0)  # Harvest column kg (farm production)
+    wastage = Column(Float, default=0.0)  # Outsourced only: wd + wf for allocation
+    opening_quantity = Column(Float, default=0.0)  # Opening stock column
+    purchase_quantity = Column(Float, default=0.0)  # Purchase column (outsourced inward)
+    wf_quantity = Column(Float, default=0.0)  # Wastage in farm (Excel)
+    wd_quantity = Column(Float, default=0.0)  # Wastage in dispatch (Excel)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     
@@ -935,6 +1047,30 @@ def _ensure_allocation_pool_column():
 
 
 _ensure_allocation_pool_column()
+
+
+def _ensure_monthly_sale_stock_flow_columns():
+    """Add Excel stock-flow columns when missing (SQLite / Postgres)."""
+    from sqlalchemy import inspect as sa_inspect, text
+
+    insp = sa_inspect(engine)
+    if "monthly_sales" not in insp.get_table_names():
+        return
+    cols = {c["name"] for c in insp.get_columns("monthly_sales")}
+    dialect = engine.dialect.name
+    additions = [
+        ("opening_quantity", "DOUBLE PRECISION" if dialect == "postgresql" else "FLOAT"),
+        ("purchase_quantity", "DOUBLE PRECISION" if dialect == "postgresql" else "FLOAT"),
+        ("wf_quantity", "DOUBLE PRECISION" if dialect == "postgresql" else "FLOAT"),
+        ("wd_quantity", "DOUBLE PRECISION" if dialect == "postgresql" else "FLOAT"),
+    ]
+    with engine.begin() as conn:
+        for name, col_type in additions:
+            if name not in cols:
+                conn.execute(text(f"ALTER TABLE monthly_sales ADD COLUMN {name} {col_type} DEFAULT 0"))
+
+
+_ensure_monthly_sale_stock_flow_columns()
 
 
 # Official kg denominators (management / P&L sheet). Keys = cost names uppercased like saved in DB.
@@ -1707,11 +1843,18 @@ class CostAllocationEngine:
             if is_inhouse_cost:
                 return 0.0
 
+        cost_name_upper = (cost.name or "").upper()
+        if "WASTAGE" in cost_name_upper and "SHORTAGE" in cost_name_upper:
+            return _sale_wastage_for_allocation_kg(sale)
+
         # Allocatable costs: share ∝ sales kg (cost.basis is metadata only, except direct_cost rows which are never allocated).
         return _sale_quantity_kg(sale)
 
     def _net_product_basis(self, cost: Cost, sale: MonthlySale) -> float:
-        """Sold quantity kg (same basis as allocation) minus damage/wastage kg from sales row."""
+        """Basis kg for denominator refresh (wastage pool uses outsourced wastage kg only)."""
+        cost_name_upper = (cost.name or "").upper()
+        if "WASTAGE" in cost_name_upper and "SHORTAGE" in cost_name_upper:
+            return _sale_wastage_for_allocation_kg(sale)
         gross = self._compute_product_basis(cost, sale)
         if gross <= 0:
             return 0.0
@@ -2338,6 +2481,12 @@ async def get_sales_weight_summary(
     so Open Field % is share of that month's bucketed kg, not lifetime totals.
     Pass month=YYYY-MM for a specific period, or all_time=true for cumulative.
     """
+    try:
+        _backfill_stock_flow_columns(db)
+        _backfill_harvest_fields(db)
+    except Exception as _sf_e:
+        print(f"⚠️  Stock-flow backfill before summary: {_sf_e}")
+
     sales_all = db.query(MonthlySale).join(Product).all()
     applied_month: Optional[str] = None
     scope_note = ""
@@ -2372,6 +2521,7 @@ async def get_sales_weight_summary(
         and summary.get("line_inhouse_sold_kg", 0) > 0
     ):
         repaired = _backfill_harvest_fields(db)
+        _backfill_stock_flow_columns(db)
         if repaired:
             sales_all = db.query(MonthlySale).join(Product).all()
             if all_time:
@@ -4045,25 +4195,34 @@ def parse_new_sales_stock_format(df_raw: pd.DataFrame, db: Session, file_name: s
 
                 inhouse_product = upsert_product(f"{particulars} (Inhouse)", "inhouse")
                 outsourced_product = upsert_product(f"{particulars} (Outsourced)", "outsourced")
+                out_wastage = round(wd_qty + wf_qty, 4)
                 db.add(MonthlySale(
                     product_id=inhouse_product.id, month=month,
                     quantity=inhouse_qty_sold,
                     sale_price=sales_rate,
                     direct_cost=0.0,
-                    inward_quantity=harvest_qty,   # harvest only → used by weight summary
+                    inward_quantity=harvest_qty,
                     inward_rate=0.0, inward_value=0.0,
                     inhouse_production=harvest_qty,
-                    wastage=round(wf_qty, 4),      # farm wastage on harvest row
+                    opening_quantity=open_qty,
+                    purchase_quantity=0.0,
+                    wf_quantity=round(wf_qty, 4),
+                    wd_quantity=0.0,
+                    wastage=0.0,
                 ))
                 db.add(MonthlySale(
                     product_id=outsourced_product.id, month=month,
                     quantity=outsourced_qty_sold,
                     sale_price=sales_rate,
-                    direct_cost=purchase_value,    # full purchase cost (includes wastage portion)
+                    direct_cost=purchase_value,
                     inward_quantity=purchase_qty,
                     inward_rate=purchase_rate, inward_value=purchase_value,
                     inhouse_production=0.0,
-                    wastage=round(wd_qty, 4),      # dispatch wastage on purchased stock
+                    opening_quantity=0.0,
+                    purchase_quantity=purchase_qty,
+                    wf_quantity=round(wf_qty, 4),
+                    wd_quantity=round(wd_qty, 4),
+                    wastage=out_wastage,
                 ))
                 sales_created += 2
                 parsed_data.append(ExcelRowData(month=month, particulars=particulars, type="Both", inward_quantity=total_inward_qty, inward_rate=purchase_rate, inward_value=purchase_value, outward_quantity=revenue_qty, outward_rate=sales_rate, outward_value=sales_value if sales_value > 0 else (revenue_qty * sales_rate), inhouse_production=harvest_qty, wastage=total_wastage))
@@ -4072,7 +4231,9 @@ def parse_new_sales_stock_format(df_raw: pd.DataFrame, db: Session, file_name: s
                 db.add(MonthlySale(
                     product_id=product.id, month=month, quantity=revenue_qty, sale_price=sales_rate,
                     direct_cost=0.0, inward_quantity=harvest_qty, inward_rate=0.0, inward_value=0.0,
-                    inhouse_production=harvest_qty, wastage=total_wastage,
+                    inhouse_production=harvest_qty,
+                    opening_quantity=open_qty, purchase_quantity=0.0,
+                    wf_quantity=round(wf_qty, 4), wd_quantity=0.0, wastage=0.0,
                 ))
                 sales_created += 1
                 parsed_data.append(ExcelRowData(month=month, particulars=particulars, type="Inhouse", inward_quantity=total_inward_qty, inward_rate=0.0, inward_value=0.0, outward_quantity=revenue_qty, outward_rate=sales_rate, outward_value=sales_value if sales_value > 0 else (revenue_qty * sales_rate), inhouse_production=harvest_qty, wastage=total_wastage))
@@ -4084,7 +4245,9 @@ def parse_new_sales_stock_format(df_raw: pd.DataFrame, db: Session, file_name: s
                         product_id=product.id, month=month,
                         quantity=revenue_qty, sale_price=sales_rate,
                         direct_cost=0.0, inward_quantity=0.0, inward_rate=0.0, inward_value=0.0,
-                        inhouse_production=0.0, wastage=total_wastage,
+                        inhouse_production=0.0,
+                        opening_quantity=open_qty, purchase_quantity=0.0,
+                        wf_quantity=round(wf_qty, 4), wd_quantity=0.0, wastage=0.0,
                     ))
                     sales_created += 1
                     parsed_data.append(ExcelRowData(month=month, particulars=particulars, type="Inhouse", inward_quantity=0.0, inward_rate=0.0, inward_value=0.0, outward_quantity=revenue_qty, outward_rate=sales_rate, outward_value=sales_value if sales_value > 0 else (revenue_qty * sales_rate), inhouse_production=0.0, wastage=total_wastage))
@@ -4097,7 +4260,12 @@ def parse_new_sales_stock_format(df_raw: pd.DataFrame, db: Session, file_name: s
                         inward_quantity=purchase_inward,
                         inward_rate=purchase_rate,
                         inward_value=purchase_value if purchase_value > 0 else purchase_inward * purchase_rate,
-                        inhouse_production=0.0, wastage=total_wastage,
+                        inhouse_production=0.0,
+                        opening_quantity=open_qty,
+                        purchase_quantity=purchase_inward,
+                        wf_quantity=round(wf_qty, 4),
+                        wd_quantity=round(wd_qty, 4),
+                        wastage=round(total_wastage, 4),
                     ))
                     sales_created += 1
                     parsed_data.append(ExcelRowData(month=month, particulars=particulars, type="Outsourced", inward_quantity=total_inward_qty if total_inward_qty > 0 else purchase_qty, inward_rate=purchase_rate, inward_value=purchase_value if purchase_value > 0 else total_inward_qty * purchase_rate, outward_quantity=revenue_qty, outward_rate=sales_rate, outward_value=sales_value if sales_value > 0 else (revenue_qty * sales_rate), inhouse_production=0.0, wastage=total_wastage))
@@ -4107,8 +4275,9 @@ def parse_new_sales_stock_format(df_raw: pd.DataFrame, db: Session, file_name: s
     db.commit()
     try:
         _backfill_harvest_fields(db)
+        _backfill_stock_flow_columns(db)
     except Exception as _bf_e:
-        print(f"⚠️  Harvest backfill after upload: {_bf_e}")
+        print(f"⚠️  Stock-flow backfill after upload: {_bf_e}")
     try:
         refresh_allocation_denominator_kg_for_all_costs(db)
     except Exception as _den_e:
