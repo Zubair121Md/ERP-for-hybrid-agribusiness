@@ -534,6 +534,226 @@
             padding: 6px 12px;
             font-size: 0.8em;
         }
+
+        /* Data Upload */
+        .upload-page {
+            display: flex;
+            flex-direction: column;
+            gap: 28px;
+        }
+
+        .upload-panel {
+            background: white;
+            border-radius: 16px;
+            box-shadow: var(--shadow);
+            border: 1px solid var(--border-color);
+            overflow: hidden;
+        }
+
+        .upload-panel__header {
+            display: flex;
+            align-items: flex-start;
+            justify-content: space-between;
+            gap: 20px;
+            padding: 24px 28px;
+            border-bottom: 1px solid var(--border-color);
+            background: linear-gradient(135deg, #faf5ff 0%, #f8fafc 100%);
+        }
+
+        .upload-panel__header h3 {
+            font-size: 1.25rem;
+            font-weight: 600;
+            color: var(--dark-text);
+            margin-bottom: 4px;
+        }
+
+        .upload-panel__header p {
+            color: var(--light-text);
+            font-size: 0.9rem;
+        }
+
+        .upload-panel__actions {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            flex-shrink: 0;
+        }
+
+        .upload-panel__body {
+            padding: 28px;
+        }
+
+        .upload-month-field {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+            margin-bottom: 24px;
+            padding: 16px 20px;
+            background: #f8fafc;
+            border-radius: 12px;
+            border: 1px solid var(--border-color);
+        }
+
+        .upload-month-field label {
+            font-weight: 600;
+            color: var(--dark-text);
+            white-space: nowrap;
+        }
+
+        .upload-month-field input[type="month"] {
+            padding: 10px 14px;
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            font-family: inherit;
+            font-size: 0.95rem;
+            color: var(--dark-text);
+            background: white;
+            min-width: 180px;
+        }
+
+        .upload-month-field .field-hint {
+            color: var(--light-text);
+            font-size: 0.85rem;
+        }
+
+        .upload-dropzone {
+            border: 2px dashed #c4b5fd;
+            border-radius: 14px;
+            padding: 40px 24px;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            background: linear-gradient(180deg, #faf5ff 0%, #ffffff 100%);
+            margin-bottom: 28px;
+        }
+
+        .upload-dropzone:hover,
+        .upload-dropzone.dragover {
+            border-color: var(--primary-color);
+            background: #f5f3ff;
+        }
+
+        .upload-dropzone__icon {
+            width: 56px;
+            height: 56px;
+            margin: 0 auto 16px;
+            border-radius: 50%;
+            background: linear-gradient(135deg, var(--primary-color), #7c3aed);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            font-size: 1.4rem;
+        }
+
+        .upload-dropzone__title {
+            font-weight: 600;
+            color: var(--dark-text);
+            margin-bottom: 6px;
+        }
+
+        .upload-dropzone__subtitle {
+            color: var(--light-text);
+            font-size: 0.9rem;
+        }
+
+        .schema-card {
+            background: #f8fafc;
+            border-radius: 12px;
+            border: 1px solid var(--border-color);
+            overflow: hidden;
+            margin-bottom: 24px;
+        }
+
+        .schema-card__title {
+            padding: 14px 20px;
+            font-weight: 600;
+            font-size: 0.9rem;
+            color: var(--dark-text);
+            border-bottom: 1px solid var(--border-color);
+            background: white;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .schema-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.875rem;
+        }
+
+        .schema-table th {
+            padding: 12px 16px;
+            text-align: left;
+            font-weight: 600;
+            color: var(--light-text);
+            background: #f1f5f9;
+            border-bottom: 1px solid var(--border-color);
+            font-size: 0.75rem;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+        }
+
+        .schema-table td {
+            padding: 11px 16px;
+            border-bottom: 1px solid #e2e8f0;
+            color: var(--dark-text);
+        }
+
+        .schema-table tr:last-child td {
+            border-bottom: none;
+        }
+
+        .schema-table .col-name {
+            font-weight: 500;
+        }
+
+        .schema-table .col-sub {
+            color: var(--light-text);
+            font-size: 0.8rem;
+        }
+
+        .upload-alert {
+            padding: 16px 20px;
+            border-radius: 10px;
+            margin-bottom: 20px;
+            display: flex;
+            align-items: flex-start;
+            gap: 12px;
+        }
+
+        .upload-alert--success {
+            background: #ecfdf5;
+            border: 1px solid #a7f3d0;
+            color: #065f46;
+        }
+
+        .upload-alert--error {
+            background: #fef2f2;
+            border: 1px solid #fecaca;
+            color: #991b1b;
+        }
+
+        .upload-stats-row {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 12px;
+            margin-top: 12px;
+        }
+
+        .upload-stat-chip {
+            background: white;
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 8px 14px;
+            font-size: 0.85rem;
+            color: var(--dark-text);
+        }
+
+        .upload-stat-chip strong {
+            color: var(--primary-color);
+        }
         
         /* Tables */
         .table {
@@ -1106,160 +1326,147 @@
 
                 <!-- Data Upload Tab -->
                 <div id="data-upload" class="tab-content">
-                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 25px;">
-                        <!-- Sales Data Upload Section -->
-                    <div class="table-card">
-                        <div class="table-header">
-                                <h3 class="table-title">Sales Data Upload</h3>
-                            <div class="table-actions">
-                                <button class="btn btn-primary" onclick="document.getElementById('excel-file-input').click()">
-                                    <i class="fas fa-upload"></i>
-                                    Upload Excel File
-                                </button>
-                                <button class="btn btn-danger" onclick="deleteSalesUploadData()">
-                                    <i class="fas fa-trash"></i>
-                                    Delete Sales Data
-                                </button>
+                    <div class="upload-page">
+                        <section class="upload-panel upload-panel--sales">
+                            <header class="upload-panel__header">
+                                <div>
+                                    <h3><i class="fas fa-file-excel" style="color: var(--primary-color); margin-right: 8px;"></i>Stock Flow Upload</h3>
+                                    <p>Upload the monthly Tally stock movement sheet — one file per reporting month.</p>
+                                </div>
+                                <div class="upload-panel__actions">
+                                    <button class="btn btn-danger btn-sm" onclick="deleteSalesUploadData()">
+                                        <i class="fas fa-trash"></i> Delete Sales Data
+                                    </button>
+                                </div>
+                            </header>
+                            <div class="upload-panel__body">
+                                <div class="upload-month-field">
+                                    <label for="sales-upload-month"><i class="fas fa-calendar-alt"></i> Reporting month</label>
+                                    <input type="month" id="sales-upload-month" required>
+                                    <span class="field-hint">Select the month this file belongs to — no date range needed in the Excel file.</span>
+                                </div>
+
+                                <div class="upload-dropzone" id="sales-dropzone" onclick="document.getElementById('excel-file-input').click()">
+                                    <div class="upload-dropzone__icon"><i class="fas fa-cloud-upload-alt"></i></div>
+                                    <div class="upload-dropzone__title">Drop your stock-flow Excel here or click to browse</div>
+                                    <div class="upload-dropzone__subtitle">Supported formats: .xlsx, .xls</div>
+                                </div>
                                 <input type="file" id="excel-file-input" accept=".xlsx,.xls" style="display: none;" onchange="handleExcelUpload(event)">
-                            </div>
-                        </div>
-                        <div style="padding: 25px;">
-                            <!-- Upload Instructions -->
-                            <div class="upload-instructions" style="background: #f8fafc; padding: 20px; border-radius: 8px; margin-bottom: 25px; border-left: 4px solid var(--primary-color);">
-                                <h4 style="margin-bottom: 15px; color: var(--primary-color);">
-                                    <i class="fas fa-info-circle"></i>
-                                    Excel Upload Instructions
-                                </h4>
-                                <p style="margin-bottom: 10px; color: var(--light-text);">
-                                    Upload the new single sales format with stock flow columns:
-                                </p>
-                                <ul style="margin-left: 20px; color: var(--light-text); line-height: 1.8;">
-                                    <li><strong>Particulars</strong></li>
-                                    <li><strong>Opening Stock</strong> (Quantity / Eff. Rate / Value)</li>
-                                    <li><strong>Harvest</strong> (Quantity / Eff. Rate / Value)</li>
-                                    <li><strong>Purchase</strong> (Quantity / Eff. Rate / Value)</li>
-                                    <li><strong>Total Inward</strong> (Quantity / Eff. Rate / Value)</li>
-                                    <li><strong>Sales</strong> (Quantity / Eff. Rate / Value)</li>
-                                    <li><strong>Wastage In Dispatch</strong>, <strong>Wastage In Farm</strong></li>
-                                    <li><strong>Total Outward</strong>, <strong>Closing Stock</strong></li>
-                                </ul>
-                                <p style="margin-top: 15px; color: var(--light-text); font-size: 14px;">
-                                    <i class="fas fa-lightbulb"></i>
-                                        <strong>Auto-Detection:</strong> The parser reads multi-row headers and computes missing totals/rates safely.
-                                </p>
-                            </div>
 
-                            <!-- Upload Progress -->
-                            <div id="upload-progress" style="display: none; margin-bottom: 25px;">
-                                <div class="progress-bar" style="background: #e2e8f0; height: 8px; border-radius: 4px; overflow: hidden;">
-                                    <div id="progress-fill" style="background: var(--primary-color); height: 100%; width: 0%; transition: width 0.3s ease;"></div>
+                                <div class="schema-card">
+                                    <div class="schema-card__title">
+                                        <i class="fas fa-table"></i> Expected sheet layout
+                                    </div>
+                                    <div style="overflow-x: auto;">
+                                        <table class="schema-table">
+                                            <thead>
+                                                <tr>
+                                                    <th>Column block</th>
+                                                    <th>Quantity</th>
+                                                    <th>Eff. Rate</th>
+                                                    <th>Value</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody>
+                                                <tr><td class="col-name">Particulars</td><td colspan="3" class="col-sub">Product name per row</td></tr>
+                                                <tr><td class="col-name">Opening Stock</td><td>✓</td><td>✓</td><td>✓</td></tr>
+                                                <tr><td class="col-name">Harvest</td><td>✓</td><td>✓</td><td>✓</td></tr>
+                                                <tr><td class="col-name">Purchase</td><td>✓</td><td>✓</td><td>✓</td></tr>
+                                                <tr><td class="col-name">Inward Stock</td><td>✓</td><td>✓</td><td>✓</td></tr>
+                                                <tr><td class="col-name">Sales</td><td>✓</td><td>✓</td><td>✓</td></tr>
+                                                <tr><td class="col-name">Wastage — Dispatch</td><td>✓</td><td>✓</td><td>✓</td></tr>
+                                                <tr><td class="col-name">Wastage — Farm (Quality Check)</td><td>✓</td><td>✓</td><td>✓</td></tr>
+                                                <tr><td class="col-name">Harvest Rejection</td><td>✓</td><td>✓</td><td>✓</td></tr>
+                                                <tr><td class="col-name">Total Outwards</td><td>✓</td><td>✓</td><td>✓</td></tr>
+                                                <tr><td class="col-name">Closing Stock</td><td>✓</td><td>✓</td><td>✓</td></tr>
+                                            </tbody>
+                                        </table>
+                                    </div>
                                 </div>
-                                <p id="upload-status" style="margin-top: 10px; color: var(--light-text); text-align: center;"></p>
-                            </div>
 
-                            <!-- Upload Results -->
-                            <div id="upload-results" style="display: none; margin-bottom: 25px;">
-                                <div class="alert alert-success" style="background: #d1fae5; color: #065f46; padding: 15px; border-radius: 8px; border: 1px solid #a7f3d0;">
-                                    <h4 style="margin-bottom: 10px;">
-                                        <i class="fas fa-check-circle"></i>
-                                        Upload Successful!
+                                <div id="upload-progress" style="display: none; margin-bottom: 20px;">
+                                    <div class="progress-bar" style="background: #e2e8f0; height: 6px; border-radius: 3px; overflow: hidden;">
+                                        <div id="progress-fill" style="background: linear-gradient(90deg, var(--primary-color), #7c3aed); height: 100%; width: 0%; transition: width 0.3s ease;"></div>
+                                    </div>
+                                    <p id="upload-status" style="margin-top: 10px; color: var(--light-text); text-align: center; font-size: 0.9rem;"></p>
+                                </div>
+
+                                <div id="upload-results" style="display: none;">
+                                    <div id="upload-alert-box" class="upload-alert upload-alert--success">
+                                        <i class="fas fa-check-circle" style="font-size: 1.25rem; margin-top: 2px;"></i>
+                                        <div>
+                                            <strong>Upload complete</strong>
+                                            <p id="upload-message" style="margin: 4px 0 0; font-size: 0.9rem;"></p>
+                                            <div class="upload-stats-row">
+                                                <span class="upload-stat-chip" id="products-created"></span>
+                                                <span class="upload-stat-chip" id="sales-created"></span>
+                                                <span class="upload-stat-chip" id="upload-month-display" style="display: none;"></span>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div id="excel-preview" style="display: none; margin-top: 24px;">
+                                    <h4 style="margin-bottom: 16px; color: var(--dark-text); font-weight: 600;">
+                                        <i class="fas fa-eye"></i> Preview
                                     </h4>
-                                    <p id="upload-message" style="margin-bottom: 10px;"></p>
-                                    <div id="upload-stats" style="display: flex; gap: 20px; font-size: 14px;">
-                                        <span id="products-created"></span>
-                                        <span id="sales-created"></span>
+                                    <div class="preview-summary" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin-bottom: 20px;">
+                                        <div class="summary-card" style="background: #f8fafc; padding: 16px; border-radius: 10px; text-align: center; border: 1px solid var(--border-color);">
+                                            <h3 id="preview-products-count" style="color: var(--primary-color); font-size: 1.5rem; margin-bottom: 4px;">0</h3>
+                                            <p style="color: var(--light-text); font-size: 0.8rem;">Products</p>
+                                        </div>
+                                        <div class="summary-card" style="background: #f8fafc; padding: 16px; border-radius: 10px; text-align: center; border: 1px solid var(--border-color);">
+                                            <h3 id="preview-sales-count" style="color: var(--secondary-color); font-size: 1.5rem; margin-bottom: 4px;">0</h3>
+                                            <p style="color: var(--light-text); font-size: 0.8rem;">Sales records</p>
+                                        </div>
+                                        <div class="summary-card" style="background: #f8fafc; padding: 16px; border-radius: 10px; text-align: center; border: 1px solid var(--border-color);">
+                                            <h3 id="preview-revenue" style="color: var(--accent-color); font-size: 1.5rem; margin-bottom: 4px;">₹0</h3>
+                                            <p style="color: var(--light-text); font-size: 0.8rem;">Revenue</p>
+                                        </div>
+                                        <div class="summary-card" style="background: #f8fafc; padding: 16px; border-radius: 10px; text-align: center; border: 1px solid var(--border-color);">
+                                            <h3 id="preview-production" style="color: var(--info-color); font-size: 1.5rem; margin-bottom: 4px;">0 kg</h3>
+                                            <p style="color: var(--light-text); font-size: 0.8rem;">Inhouse production</p>
+                                        </div>
+                                    </div>
+                                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px;">
+                                        <div>
+                                            <h5 style="margin-bottom: 12px; font-weight: 600; color: var(--dark-text);">Products</h5>
+                                            <div class="table-responsive" style="max-height: 280px; overflow-y: auto; border: 1px solid var(--border-color); border-radius: 10px;">
+                                                <table class="data-table" style="width: 100%; border-collapse: collapse;">
+                                                    <thead>
+                                                        <tr style="background: #f1f5f9;">
+                                                            <th style="padding: 10px 12px; text-align: left; font-size: 0.8rem;">Product</th>
+                                                            <th style="padding: 10px 12px; text-align: left; font-size: 0.8rem;">Source</th>
+                                                        </tr>
+                                                    </thead>
+                                                    <tbody id="preview-products-table"></tbody>
+                                                </table>
+                                            </div>
+                                        </div>
+                                        <div>
+                                            <h5 style="margin-bottom: 12px; font-weight: 600; color: var(--dark-text);">Sales</h5>
+                                            <div class="table-responsive" style="max-height: 280px; overflow-y: auto; border: 1px solid var(--border-color); border-radius: 10px;">
+                                                <table class="data-table" style="width: 100%; border-collapse: collapse;">
+                                                    <thead>
+                                                        <tr style="background: #f1f5f9;">
+                                                            <th style="padding: 10px 12px; text-align: left; font-size: 0.8rem;">Product</th>
+                                                            <th style="padding: 10px 12px; text-align: right; font-size: 0.8rem;">Qty</th>
+                                                            <th style="padding: 10px 12px; text-align: right; font-size: 0.8rem;">Rate</th>
+                                                            <th style="padding: 10px 12px; text-align: right; font-size: 0.8rem;">Value</th>
+                                                        </tr>
+                                                    </thead>
+                                                    <tbody id="preview-sales-table"></tbody>
+                                                </table>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <div style="display: flex; gap: 12px; margin-top: 20px; justify-content: center;">
+                                        <button class="btn btn-primary" onclick="confirmExcelUpload()"><i class="fas fa-check"></i> Confirm &amp; Save</button>
+                                        <button class="btn btn-secondary" onclick="cancelExcelUpload()"><i class="fas fa-times"></i> Cancel</button>
                                     </div>
                                 </div>
                             </div>
-
-                            <!-- Preview Section -->
-                            <div id="excel-preview" style="display: none;">
-                                <h4 style="margin-bottom: 20px; color: var(--dark-text);">
-                                    <i class="fas fa-eye"></i>
-                                    Data Preview
-                                </h4>
-                                
-                                <!-- Summary Cards -->
-                                <div class="preview-summary" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; margin-bottom: 25px;">
-                                    <div class="summary-card" style="background: white; padding: 20px; border-radius: 8px; box-shadow: var(--shadow); text-align: center;">
-                                        <h3 id="preview-products-count" style="color: var(--primary-color); font-size: 24px; margin-bottom: 5px;">0</h3>
-                                        <p style="color: var(--light-text); font-size: 14px;">Products</p>
-                                    </div>
-                                    <div class="summary-card" style="background: white; padding: 20px; border-radius: 8px; box-shadow: var(--shadow); text-align: center;">
-                                        <h3 id="preview-sales-count" style="color: var(--secondary-color); font-size: 24px; margin-bottom: 5px;">0</h3>
-                                        <p style="color: var(--light-text); font-size: 14px;">Sales Records</p>
-                                    </div>
-                                    <div class="summary-card" style="background: white; padding: 20px; border-radius: 8px; box-shadow: var(--shadow); text-align: center;">
-                                        <h3 id="preview-revenue" style="color: var(--accent-color); font-size: 24px; margin-bottom: 5px;">₹0</h3>
-                                        <p style="color: var(--light-text); font-size: 14px;">Total Revenue</p>
-                                    </div>
-                                    <div class="summary-card" style="background: white; padding: 20px; border-radius: 8px; box-shadow: var(--shadow); text-align: center;">
-                                        <h3 id="preview-production" style="color: var(--info-color); font-size: 24px; margin-bottom: 5px;">0 kg</h3>
-                                        <p style="color: var(--light-text); font-size: 14px;">Inhouse Production</p>
-                                    </div>
-                                </div>
-
-                                <!-- Data Tables -->
-                                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 25px;">
-                                    <!-- Products Preview -->
-                                    <div>
-                                        <h5 style="margin-bottom: 15px; color: var(--dark-text);">
-                                            <i class="fas fa-boxes"></i>
-                                            Products Preview
-                                        </h5>
-                                        <div class="table-responsive" style="max-height: 300px; overflow-y: auto;">
-                                            <table class="data-table" style="width: 100%; border-collapse: collapse;">
-                                                <thead>
-                                                    <tr style="background: #f8fafc;">
-                                                        <th style="padding: 12px; text-align: left; border-bottom: 1px solid var(--border-color); font-weight: 600; color: var(--dark-text);">Name</th>
-                                                        <th style="padding: 12px; text-align: left; border-bottom: 1px solid var(--border-color); font-weight: 600; color: var(--dark-text);">Type</th>
-                                                    </tr>
-                                                </thead>
-                                                <tbody id="preview-products-table">
-                                                    <!-- Products will be loaded here -->
-                                                </tbody>
-                                            </table>
-                                        </div>
-                                    </div>
-
-                                    <!-- Sales Preview -->
-                                    <div>
-                                        <h5 style="margin-bottom: 15px; color: var(--dark-text);">
-                                            <i class="fas fa-chart-line"></i>
-                                            Sales Preview
-                                        </h5>
-                                        <div class="table-responsive" style="max-height: 300px; overflow-y: auto;">
-                                            <table class="data-table" style="width: 100%; border-collapse: collapse;">
-                                                <thead>
-                                                    <tr style="background: #f8fafc;">
-                                                        <th style="padding: 12px; text-align: left; border-bottom: 1px solid var(--border-color); font-weight: 600; color: var(--dark-text);">Product</th>
-                                                        <th style="padding: 12px; text-align: left; border-bottom: 1px solid var(--border-color); font-weight: 600; color: var(--dark-text);">Qty</th>
-                                                        <th style="padding: 12px; text-align: left; border-bottom: 1px solid var(--border-color); font-weight: 600; color: var(--dark-text);">Rate</th>
-                                                        <th style="padding: 12px; text-align: left; border-bottom: 1px solid var(--border-color); font-weight: 600; color: var(--dark-text);">Value</th>
-                                                    </tr>
-                                                </thead>
-                                                <tbody id="preview-sales-table">
-                                                    <!-- Sales will be loaded here -->
-                                                </tbody>
-                                            </table>
-                                        </div>
-                                    </div>
-                                </div>
-
-                                <!-- Action Buttons -->
-                                <div style="display: flex; gap: 15px; margin-top: 25px; justify-content: center;">
-                                    <button class="btn btn-primary" onclick="confirmExcelUpload()">
-                                        <i class="fas fa-check"></i>
-                                        Confirm & Save Data
-                                    </button>
-                                    <button class="btn btn-secondary" onclick="cancelExcelUpload()">
-                                        <i class="fas fa-times"></i>
-                                        Cancel
-                                    </button>
-                            </div>
-                        </div>
-                    </div>
-                </div>
+                        </section>
 
                         <!-- P&L Cost Upload Section -->
                     <div class="table-card">
@@ -1553,12 +1760,56 @@
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/chart.js@3.9.1/dist/chart.min.js"></script>
-    <script src="static/js/dashboard.js?v=20260321200000"></script>
-    <script src="static/js/upload-fix.js?v=20250101000002"></script>
+    <script src="static/js/dashboard.js?v=20260521120000"></script>
+    <script src="static/js/upload-fix.js?v=20260521120000"></script>
     
     <!-- INLINE UPLOAD FIX - This will definitely work -->
     <script>
     console.log('🔧 INLINE UPLOAD FIX LOADED');
+
+    function getSalesUploadMonth() {
+        const el = document.getElementById('sales-upload-month');
+        if (el && el.value) return el.value;
+        const alloc = document.getElementById('allocation-month');
+        if (alloc && alloc.value && alloc.value !== 'any') return alloc.value;
+        const now = new Date();
+        return now.getFullYear() + '-' + String(now.getMonth() + 1).padStart(2, '0');
+    }
+
+    function initSalesUploadMonth() {
+        const el = document.getElementById('sales-upload-month');
+        if (!el || el.value) return;
+        const alloc = document.getElementById('allocation-month');
+        if (alloc && alloc.value && alloc.value !== 'any') {
+            el.value = alloc.value;
+        } else {
+            el.value = getSalesUploadMonth();
+        }
+    }
+
+    function initSalesDropzone() {
+        const zone = document.getElementById('sales-dropzone');
+        const input = document.getElementById('excel-file-input');
+        if (!zone || !input) return;
+        ['dragenter', 'dragover'].forEach(evt => {
+            zone.addEventListener(evt, e => { e.preventDefault(); zone.classList.add('dragover'); });
+        });
+        ['dragleave', 'drop'].forEach(evt => {
+            zone.addEventListener(evt, e => { e.preventDefault(); zone.classList.remove('dragover'); });
+        });
+        zone.addEventListener('drop', e => {
+            const files = e.dataTransfer && e.dataTransfer.files;
+            if (files && files.length) {
+                input.files = files;
+                handleExcelUpload({ target: input });
+            }
+        });
+    }
+
+    document.addEventListener('DOMContentLoaded', () => {
+        initSalesUploadMonth();
+        initSalesDropzone();
+    });
     
     // Override the upload function with a working version
     function handleExcelUpload(event) {
@@ -1569,8 +1820,15 @@
             console.log('❌ No file selected');
             return;
         }
+
+        const month = getSalesUploadMonth();
+        if (!month) {
+            alert('Please select a reporting month before uploading.');
+            event.target.value = '';
+            return;
+        }
         
-        console.log(`📁 File: ${file.name} (${file.size} bytes)`);
+        console.log(`📁 File: ${file.name} (${file.size} bytes), month: ${month}`);
         
         // Validate file type
         if (!file.name.endsWith('.xlsx') && !file.name.endsWith('.xls')) {
@@ -1581,12 +1839,14 @@
         // Show progress
         const progressDiv = document.getElementById('upload-progress');
         const resultsDiv = document.getElementById('upload-results');
+        const alertBox = document.getElementById('upload-alert-box');
         if (progressDiv) progressDiv.style.display = 'block';
         if (resultsDiv) resultsDiv.style.display = 'none';
         
         // Create form data
         const formData = new FormData();
         formData.append('file', file);
+        formData.append('month', month);
         
         console.log('📤 Sending to backend...');
         
@@ -1608,23 +1868,29 @@
             // Show results
             if (resultsDiv) {
                 resultsDiv.style.display = 'block';
+                if (alertBox) {
+                    alertBox.className = 'upload-alert ' + (data.success ? 'upload-alert--success' : 'upload-alert--error');
+                }
                 
-                // Update the message
                 const messageDiv = document.getElementById('upload-message');
                 if (messageDiv) {
-                    messageDiv.textContent = data.message || 'Upload completed';
+                    messageDiv.textContent = data.message || (data.success ? 'Upload completed' : 'Upload failed');
                 }
                 
-                // Update products created
                 const productsDiv = document.getElementById('products-created');
                 if (productsDiv) {
-                    productsDiv.textContent = `Products Created: ${data.products_created || 0}`;
+                    productsDiv.innerHTML = '<strong>' + (data.products_created || 0) + '</strong> products';
                 }
                 
-                // Update sales created
                 const salesDiv = document.getElementById('sales-created');
                 if (salesDiv) {
-                    salesDiv.textContent = `Sales Records: ${data.sales_created || 0}`;
+                    salesDiv.innerHTML = '<strong>' + (data.sales_created || 0) + '</strong> sales records';
+                }
+
+                const monthDiv = document.getElementById('upload-month-display');
+                if (monthDiv && data.month) {
+                    monthDiv.style.display = 'inline';
+                    monthDiv.innerHTML = 'Month: <strong>' + data.month + '</strong>';
                 }
                 
                 // Display parsed sales data

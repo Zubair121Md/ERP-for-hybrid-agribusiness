@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Depends, status, UploadFile, File, Query
+from fastapi import FastAPI, HTTPException, Depends, status, UploadFile, File, Form, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, StreamingResponse
@@ -898,6 +898,7 @@ class MonthlySale(Base):
     purchase_quantity = Column(Float, default=0.0)  # Purchase column (outsourced inward)
     wf_quantity = Column(Float, default=0.0)  # Wastage in farm (Excel)
     wd_quantity = Column(Float, default=0.0)  # Wastage in dispatch (Excel)
+    harvest_rejection_qty = Column(Float, default=0.0)  # Harvest rejection column
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     
@@ -1125,6 +1126,7 @@ def _ensure_monthly_sale_stock_flow_columns():
         ("purchase_quantity", "DOUBLE PRECISION" if dialect == "postgresql" else "FLOAT"),
         ("wf_quantity", "DOUBLE PRECISION" if dialect == "postgresql" else "FLOAT"),
         ("wd_quantity", "DOUBLE PRECISION" if dialect == "postgresql" else "FLOAT"),
+        ("harvest_rejection_qty", "DOUBLE PRECISION" if dialect == "postgresql" else "FLOAT"),
     ]
     with engine.begin() as conn:
         for name, col_type in additions:
@@ -3206,7 +3208,11 @@ async def export_monthly_xlsx(month: str, db: Session = Depends(get_db)):
 
 # Excel Upload endpoints
 @app.post("/api/upload-excel")
-async def upload_excel(file: UploadFile = File(...), db: Session = Depends(get_db)):
+async def upload_excel(
+    file: UploadFile = File(...),
+    month: Optional[str] = Form(None),
+    db: Session = Depends(get_db),
+):
     """
     BULLETPROOF Excel upload - handles all edge cases and data formats.
     Now with Auto-Detection Mode for Purple Patch Farms format.
@@ -3234,7 +3240,7 @@ async def upload_excel(file: UploadFile = File(...), db: Session = Depends(get_d
 
         # New single sales format parser (Opening/Harvest/Purchase/.../Closing Stock)
         if detect_new_sales_stock_format(df_raw):
-            return parse_new_sales_stock_format(df_raw, db, file.filename)
+            return parse_new_sales_stock_format(df_raw, db, file.filename, month_override=month)
         
         print(f"📋 Excel columns: {list(df.columns)}")
         print(f"📊 Total rows: {len(df)}")
@@ -3892,9 +3898,38 @@ def read_excel_layout_with_openpyxl(file_bytes: bytes) -> Dict[str, Any]:
     }
 
 
+def _classify_sales_block_header(header: str) -> Optional[str]:
+    """Map a stock-flow block header cell to a canonical block key."""
+    t = re.sub(r"\s+", " ", (header or "").strip().upper())
+    if not t or "PARTICULARS" in t:
+        return None
+    if "OPENING" in t and "STOCK" in t:
+        return "opening"
+    if "HARVEST" in t and "REJECT" in t:
+        return "harvest_rejection"
+    if t == "HARVEST" or (t.startswith("HARVEST") and "REJECT" not in t and "WASTAGE" not in t):
+        return "harvest"
+    if "PURCHASE" in t:
+        return "purchase"
+    if ("INWARD" in t and "STOCK" in t) or "TOTAL INWARD" in t:
+        return "inward"
+    if t == "SALES" or (t.startswith("SALES") and "WASTAGE" not in t):
+        return "sales"
+    if ("WASTAGE" in t or "WASTAGE-" in t) and ("DISPATCH" in t or "DISPTACH" in t):
+        return "wd"
+    if ("WASTAGE" in t or "WASTAGE-" in t) and "FARM" in t:
+        return "wf"
+    if "TOTAL OUTWARD" in t or "TOTAL OUTWARDS" in t:
+        return "total_outward"
+    if "CLOSING" in t and "STOCK" in t:
+        return "closing"
+    return None
+
+
 def detect_sales_structure(df_raw: pd.DataFrame) -> Dict[str, Any]:
     """
     Structure Detection Engine + Header Detection for sales sheet.
+    Supports Purple Patch stock-flow layouts (Inward Stock, Wastage-Dispatch, Harvest Rejection, etc.).
     """
     particulars_row = None
     blocks_row = None
@@ -3907,9 +3942,13 @@ def detect_sales_structure(df_raw: pd.DataFrame) -> Dict[str, Any]:
         text = " ".join(row_vals)
         if particulars_row is None and "PARTICULARS" in text:
             particulars_row = r
-        if blocks_row is None and ("OPENING STOCK" in text or "HARVEST" in text or "PURCHASE" in text) and ("TOTAL OUTWARD" in text or "CLOSING STOCK" in text):
+        has_inward = "INWARD" in text and ("STOCK" in text or "TOTAL" in text)
+        has_outward = "TOTAL OUTWARD" in text or "TOTAL OUTWARDS" in text or "CLOSING STOCK" in text
+        if blocks_row is None and ("OPENING STOCK" in text or "OPENING" in text) and (
+            "HARVEST" in text or "PURCHASE" in text
+        ) and has_outward:
             blocks_row = r
-        if qty_row is None and "QUANTITY" in text and "EFF. RATE" in text and "VALUE" in text:
+        if qty_row is None and "QUANTITY" in text and ("EFF. RATE" in text or "EFF RATE" in text) and "VALUE" in text:
             qty_row = r
     return {
         "is_new_sales_format": particulars_row is not None and blocks_row is not None and qty_row is not None,
@@ -3919,10 +3958,11 @@ def detect_sales_structure(df_raw: pd.DataFrame) -> Dict[str, Any]:
     }
 
 
-def semantic_map_sales_columns(df_raw: pd.DataFrame, blocks_row: int, qty_row: int, particulars_row: Optional[int]) -> Dict[str, Optional[int]]:
+def semantic_map_sales_columns(df_raw: pd.DataFrame, blocks_row: int, qty_row: int, particulars_row: Optional[int]) -> Dict[str, Any]:
     """
     Semantic Column Mapper for stock-flow sales sheet.
-    Maps block headers to quantity/rate/value columns using merged-cell-resolved rows.
+    Maps block headers to quantity/rate/value columns; tolerates naming variants
+    (Inward Stock, Wastage-Dispatch, Wastage-Farm (Quality Check), Harvest Rejection, Total Outwards).
     """
     top = df_raw.iloc[blocks_row]
     sub = df_raw.iloc[qty_row]
@@ -3931,56 +3971,56 @@ def semantic_map_sales_columns(df_raw: pd.DataFrame, blocks_row: int, qty_row: i
     def norm(v: Any) -> str:
         return str(v).strip().upper() if pd.notna(v) else ""
 
-    block_positions: Dict[str, List[int]] = {
-        "OPENING STOCK": [],
-        "HARVEST": [],
-        "PURCHASE": [],
-        "TOTAL INWARD": [],
-        "SALES": [],
-        "WASTAGE IN DISPATCH": [],
-        "WASTAGE IN FARM": [],
-        "TOTAL OUTWARD": [],
-        "CLOSING STOCK": [],
-    }
-
+    # Forward-fill block labels across merged header cells
+    col_blocks: List[Optional[str]] = []
+    current_block: Optional[str] = None
     for c in range(cols):
-        topv = norm(top.iloc[c])
-        for block in block_positions.keys():
-            if block in topv:
-                block_positions[block].append(c)
+        b = _classify_sales_block_header(str(top.iloc[c]) if pd.notna(top.iloc[c]) else "")
+        if b:
+            current_block = b
+        col_blocks.append(current_block)
 
-    def pick(block: str, sub_header: str) -> Optional[int]:
-        for c in block_positions.get(block, []):
-            if sub_header in norm(sub.iloc[c]):
+    def pick(block_key: str, sub_header: str) -> Optional[int]:
+        want = sub_header.upper().replace(".", "")
+        for c in range(cols):
+            if col_blocks[c] != block_key:
+                continue
+            subv = norm(sub.iloc[c]).replace(".", "")
+            if want in subv or (want == "QUANTITY" and subv in ("QTY", "QUANTITY")):
+                return c
+            if want == "EFF. RATE" and ("EFF" in subv and "RATE" in subv):
+                return c
+            if want == "VALUE" and subv == "VALUE":
                 return c
         return None
 
-    c_particulars = None
+    c_particulars = 0
     if particulars_row is not None:
         prow = df_raw.iloc[particulars_row]
         for c in range(cols):
             if "PARTICULARS" in norm(prow.iloc[c]):
                 c_particulars = c
                 break
-    if c_particulars is None:
-        c_particulars = 0
 
-    return {
+    mapped = {
         "particulars": c_particulars,
-        "open_qty": pick("OPENING STOCK", "QUANTITY"),
-        "harvest_qty": pick("HARVEST", "QUANTITY"),
-        "purchase_qty": pick("PURCHASE", "QUANTITY"),
-        "total_inward_qty": pick("TOTAL INWARD", "QUANTITY"),
-        "purchase_rate": pick("PURCHASE", "EFF. RATE"),
-        "purchase_value": pick("PURCHASE", "VALUE"),
-        "sales_qty": pick("SALES", "QUANTITY"),
-        "sales_rate": pick("SALES", "EFF. RATE"),
-        "sales_value": pick("SALES", "VALUE"),
-        "wd_qty": pick("WASTAGE IN DISPATCH", "QUANTITY"),
-        "wf_qty": pick("WASTAGE IN FARM", "QUANTITY"),
-        "total_outward_qty": pick("TOTAL OUTWARD", "QUANTITY"),
-        "closing_qty": pick("CLOSING STOCK", "QUANTITY"),
+        "open_qty": pick("opening", "QUANTITY"),
+        "harvest_qty": pick("harvest", "QUANTITY"),
+        "purchase_qty": pick("purchase", "QUANTITY"),
+        "total_inward_qty": pick("inward", "QUANTITY"),
+        "purchase_rate": pick("purchase", "EFF. RATE"),
+        "purchase_value": pick("purchase", "VALUE"),
+        "sales_qty": pick("sales", "QUANTITY"),
+        "sales_rate": pick("sales", "EFF. RATE"),
+        "sales_value": pick("sales", "VALUE"),
+        "wd_qty": pick("wd", "QUANTITY"),
+        "wf_qty": pick("wf", "QUANTITY"),
+        "harvest_rejection_qty": pick("harvest_rejection", "QUANTITY"),
+        "total_outward_qty": pick("total_outward", "QUANTITY"),
+        "closing_qty": pick("closing", "QUANTITY"),
     }
+    mapped["column_blocks_detected"] = sorted({b for b in col_blocks if b})
+    return mapped
 
 
 def extract_pl_semantic_totals(df_raw: pd.DataFrame) -> Dict[str, Any]:
@@ -4205,7 +4245,7 @@ def detect_new_sales_stock_format(df_raw: pd.DataFrame) -> bool:
         return False
 
 
-def parse_new_sales_stock_format(df_raw: pd.DataFrame, db: Session, file_name: str) -> Dict[str, Any]:
+def parse_new_sales_stock_format(df_raw: pd.DataFrame, db: Session, file_name: str, month_override: Optional[str] = None) -> Dict[str, Any]:
     """Parse single-file sales format with multi-row headers and stock/wastage columns."""
     print(f"🚀 Parsing new sales stock format from: {file_name}")
     parsed_data = []
@@ -4237,6 +4277,7 @@ def parse_new_sales_stock_format(df_raw: pd.DataFrame, db: Session, file_name: s
     c_sales_value = mapped["sales_value"]
     c_wd_qty = mapped["wd_qty"]
     c_wf_qty = mapped["wf_qty"]
+    c_harvest_rejection_qty = mapped.get("harvest_rejection_qty")
     c_total_outward_qty = mapped["total_outward_qty"]
     c_closing_qty = mapped["closing_qty"]
 
@@ -4247,29 +4288,21 @@ def parse_new_sales_stock_format(df_raw: pd.DataFrame, db: Session, file_name: s
             "products_created": 0,
             "sales_created": 0,
             "parsed_data": [],
-            "errors": ["Sales Quantity column missing"]
+            "errors": ["Sales Quantity column missing"],
+            "column_map": mapped,
         }
 
-    month = "2026-03"
-    month_re = re.compile(r"(\d{1,2})[-_/ ]([A-Za-z]{3})[-_/ ](\d{2,4})")
-    for r in range(max(0, header_row_idx - 8), header_row_idx):
-        for cell in df_raw.iloc[r].tolist():
-            text = str(cell).strip()
-            m = month_re.search(text)
-            if m:
-                day = int(m.group(1))
-                mon = m.group(2).title()
-                year = m.group(3)
-                if len(year) == 2:
-                    year = f"20{year}"
-                try:
-                    dt = datetime.strptime(f"{day}-{mon}-{year}", "%d-%b-%Y")
-                    month = dt.strftime("%Y-%m")
-                    break
-                except Exception:
-                    pass
-        if month != "2026-03":
-            break
+    month = (month_override or "").strip()
+    if not month or not re.match(r"^\d{4}-\d{2}$", month):
+        return {
+            "success": False,
+            "message": "Reporting month is required. Select YYYY-MM on the Data Upload screen before uploading.",
+            "products_created": 0,
+            "sales_created": 0,
+            "parsed_data": [],
+            "errors": ["Missing or invalid month — use the month picker on Data Upload"],
+            "column_map": mapped,
+        }
 
     def parse_cell(row, idx: Optional[int]) -> float:
         if idx is None or idx >= len(row):
@@ -4307,6 +4340,7 @@ def parse_new_sales_stock_format(df_raw: pd.DataFrame, db: Session, file_name: s
         sales_value = parse_cell(row, c_sales_value)
         wd_qty = parse_cell(row, c_wd_qty)
         wf_qty = parse_cell(row, c_wf_qty)
+        harvest_rejection_qty = parse_cell(row, c_harvest_rejection_qty)
         total_outward_qty = parse_cell(row, c_total_outward_qty)
         _closing_qty = parse_cell(row, c_closing_qty)
         purchase_rate = parse_cell(row, c_purchase_rate)
@@ -4314,8 +4348,8 @@ def parse_new_sales_stock_format(df_raw: pd.DataFrame, db: Session, file_name: s
 
         if total_inward_qty <= 0:
             total_inward_qty = max(0.0, open_qty + harvest_qty + purchase_qty)
-        # Strict business rule: Total Outward = Sales + Wastage In Dispatch + Wastage In Farm
-        expected_total_outward = max(0.0, sales_qty + wd_qty + wf_qty)
+        # Total Outward = Sales + Wastage-Dispatch + Wastage-Farm + Harvest Rejection
+        expected_total_outward = max(0.0, sales_qty + wd_qty + wf_qty + harvest_rejection_qty)
         if total_outward_qty <= 0:
             total_outward_qty = expected_total_outward
         if sales_value <= 0 and sales_qty > 0 and sales_rate > 0:
@@ -4331,8 +4365,9 @@ def parse_new_sales_stock_format(df_raw: pd.DataFrame, db: Session, file_name: s
         total_wastage = max(0.0, wd_qty + wf_qty)
         # Sales quantity should come from Sales column, not Total Outward
         revenue_qty = max(0.0, sales_qty)
-        available_before_sales = max(0.0, total_inward_qty - total_wastage)
-        expected_closing = max(0.0, total_inward_qty - total_wastage - revenue_qty)
+        outward_loss = max(0.0, total_wastage + harvest_rejection_qty)
+        available_before_sales = max(0.0, total_inward_qty - outward_loss)
+        expected_closing = max(0.0, total_inward_qty - outward_loss - revenue_qty)
 
         # Optional validation when closing stock is present in sheet
         if _closing_qty > 0:
@@ -4373,6 +4408,7 @@ def parse_new_sales_stock_format(df_raw: pd.DataFrame, db: Session, file_name: s
                 inhouse_product = upsert_product(f"{particulars} (Inhouse)", "inhouse")
                 outsourced_product = upsert_product(f"{particulars} (Outsourced)", "outsourced")
                 out_wastage = round(wd_qty + wf_qty, 4)
+                hr_qty = round(harvest_rejection_qty, 4)
                 db.add(MonthlySale(
                     product_id=inhouse_product.id, month=month,
                     quantity=inhouse_qty_sold,
@@ -4385,6 +4421,7 @@ def parse_new_sales_stock_format(df_raw: pd.DataFrame, db: Session, file_name: s
                     purchase_quantity=0.0,
                     wf_quantity=round(wf_qty, 4),
                     wd_quantity=0.0,
+                    harvest_rejection_qty=hr_qty,
                     wastage=0.0,
                 ))
                 db.add(MonthlySale(
@@ -4399,6 +4436,7 @@ def parse_new_sales_stock_format(df_raw: pd.DataFrame, db: Session, file_name: s
                     purchase_quantity=purchase_qty,
                     wf_quantity=round(wf_qty, 4),
                     wd_quantity=round(wd_qty, 4),
+                    harvest_rejection_qty=0.0,
                     wastage=out_wastage,
                 ))
                 sales_created += 2
@@ -4410,7 +4448,9 @@ def parse_new_sales_stock_format(df_raw: pd.DataFrame, db: Session, file_name: s
                     direct_cost=0.0, inward_quantity=harvest_qty, inward_rate=0.0, inward_value=0.0,
                     inhouse_production=harvest_qty,
                     opening_quantity=open_qty, purchase_quantity=0.0,
-                    wf_quantity=round(wf_qty, 4), wd_quantity=0.0, wastage=0.0,
+                    wf_quantity=round(wf_qty, 4), wd_quantity=0.0,
+                    harvest_rejection_qty=round(harvest_rejection_qty, 4),
+                    wastage=0.0,
                 ))
                 sales_created += 1
                 parsed_data.append(ExcelRowData(month=month, particulars=particulars, type="Inhouse", inward_quantity=total_inward_qty, inward_rate=0.0, inward_value=0.0, outward_quantity=revenue_qty, outward_rate=sales_rate, outward_value=sales_value if sales_value > 0 else (revenue_qty * sales_rate), inhouse_production=harvest_qty, wastage=total_wastage))
@@ -4424,7 +4464,9 @@ def parse_new_sales_stock_format(df_raw: pd.DataFrame, db: Session, file_name: s
                         direct_cost=0.0, inward_quantity=0.0, inward_rate=0.0, inward_value=0.0,
                         inhouse_production=0.0,
                         opening_quantity=open_qty, purchase_quantity=0.0,
-                        wf_quantity=round(wf_qty, 4), wd_quantity=0.0, wastage=0.0,
+                        wf_quantity=round(wf_qty, 4), wd_quantity=0.0,
+                        harvest_rejection_qty=round(harvest_rejection_qty, 4),
+                        wastage=0.0,
                     ))
                     sales_created += 1
                     parsed_data.append(ExcelRowData(month=month, particulars=particulars, type="Inhouse", inward_quantity=0.0, inward_rate=0.0, inward_value=0.0, outward_quantity=revenue_qty, outward_rate=sales_rate, outward_value=sales_value if sales_value > 0 else (revenue_qty * sales_rate), inhouse_production=0.0, wastage=total_wastage))
@@ -4442,6 +4484,7 @@ def parse_new_sales_stock_format(df_raw: pd.DataFrame, db: Session, file_name: s
                         purchase_quantity=purchase_inward,
                         wf_quantity=round(wf_qty, 4),
                         wd_quantity=round(wd_qty, 4),
+                        harvest_rejection_qty=0.0,
                         wastage=round(total_wastage, 4),
                     ))
                     sales_created += 1
@@ -4462,14 +4505,17 @@ def parse_new_sales_stock_format(df_raw: pd.DataFrame, db: Session, file_name: s
 
     return {
         "success": True,
-        "message": f"Processed {rows_processed} rows from new sales format.",
+        "message": f"Processed {rows_processed} rows for {month}.",
+        "month": month,
         "excel_rows_processed": rows_processed,
         "rows_split": 0,
         "products_created": products_created,
         "sales_created": sales_created,
         "parsed_data": [d.model_dump() for d in parsed_data],
         "errors": errors,
-        "validation": validation_rows
+        "validation": validation_rows,
+        "column_map": {k: v for k, v in mapped.items() if k != "column_blocks_detected"},
+        "blocks_detected": mapped.get("column_blocks_detected", []),
     }
 
 def detect_purple_patch_format(df):

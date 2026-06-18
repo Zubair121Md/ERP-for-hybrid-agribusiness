@@ -2515,9 +2515,19 @@ async function handleExcelUpload(event) {
     // Show progress
     showUploadProgress();
     
+    const month = (typeof getSalesUploadMonth === 'function')
+        ? getSalesUploadMonth()
+        : (document.getElementById('sales-upload-month')?.value || document.getElementById('allocation-month')?.value || '');
+    if (!month || month === 'any') {
+        showUploadError('Please select a reporting month on the Data Upload tab before uploading.');
+        event.target.value = '';
+        return;
+    }
+    
     try {
         const formData = new FormData();
         formData.append('file', file);
+        formData.append('month', month);
         
         console.log('📤 Sending request to backend...');
         

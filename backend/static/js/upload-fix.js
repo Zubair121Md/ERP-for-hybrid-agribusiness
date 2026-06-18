@@ -1,107 +1,97 @@
-// SIMPLIFIED UPLOAD FIX - This will definitely work
+// Sales upload helper — month is required from the Data Upload UI
 console.log('🔧 Upload fix script loaded');
 
-// Override the existing upload function with a simple, working version
+function getSalesUploadMonth() {
+    const el = document.getElementById('sales-upload-month');
+    if (el && el.value) return el.value;
+    const alloc = document.getElementById('allocation-month');
+    if (alloc && alloc.value && alloc.value !== 'any') return alloc.value;
+    const now = new Date();
+    return now.getFullYear() + '-' + String(now.getMonth() + 1).padStart(2, '0');
+}
+
 function handleExcelUpload(event) {
     console.log('🚀 SIMPLIFIED UPLOAD STARTING...');
-    
+
     const file = event.target.files[0];
     if (!file) {
         console.log('❌ No file selected');
         return;
     }
-    
-    console.log(`📁 File: ${file.name} (${file.size} bytes)`);
-    
-    // Validate file type
+
+    const month = getSalesUploadMonth();
+    if (!month) {
+        alert('Please select a reporting month before uploading.');
+        event.target.value = '';
+        return;
+    }
+
+    console.log(`📁 File: ${file.name} (${file.size} bytes), month: ${month}`);
+
     if (!file.name.endsWith('.xlsx') && !file.name.endsWith('.xls')) {
         alert('Please select an Excel file (.xlsx or .xls)');
         return;
     }
-    
-    // Show progress
+
     const progressDiv = document.getElementById('upload-progress');
     const resultsDiv = document.getElementById('upload-results');
+    const alertBox = document.getElementById('upload-alert-box');
     if (progressDiv) progressDiv.style.display = 'block';
     if (resultsDiv) resultsDiv.style.display = 'none';
-    
-    // Create form data
+
     const formData = new FormData();
     formData.append('file', file);
-    
-    console.log('📤 Sending to backend...');
-    
-    // Make the request
+    formData.append('month', month);
+
     fetch('/api/upload-excel', {
         method: 'POST',
         body: formData
     })
-    .then(response => {
-        console.log(`📥 Response: ${response.status} ${response.statusText}`);
-        return response.json();
-    })
+    .then(response => response.json())
     .then(data => {
-        console.log('📊 Response data:', data);
-        
-        // Hide progress
         if (progressDiv) progressDiv.style.display = 'none';
-        
-        // Show results
+
         if (resultsDiv) {
             resultsDiv.style.display = 'block';
-            
-            // Update the message
+            if (alertBox) {
+                alertBox.className = 'upload-alert ' + (data.success ? 'upload-alert--success' : 'upload-alert--error');
+            }
+
             const messageDiv = document.getElementById('upload-message');
-            if (messageDiv) {
-                messageDiv.textContent = data.message || 'Upload completed';
-            }
-            
-            // Update products created
+            if (messageDiv) messageDiv.textContent = data.message || 'Upload completed';
+
             const productsDiv = document.getElementById('products-created');
-            if (productsDiv) {
-                productsDiv.textContent = `Products Created: ${data.products_created || 0}`;
-            }
-            
-            // Update sales created
+            if (productsDiv) productsDiv.innerHTML = '<strong>' + (data.products_created || 0) + '</strong> products';
+
             const salesDiv = document.getElementById('sales-created');
-            if (salesDiv) {
-                salesDiv.textContent = `Sales Records: ${data.sales_created || 0}`;
+            if (salesDiv) salesDiv.innerHTML = '<strong>' + (data.sales_created || 0) + '</strong> sales records';
+
+            const monthDiv = document.getElementById('upload-month-display');
+            if (monthDiv && data.month) {
+                monthDiv.style.display = 'inline';
+                monthDiv.innerHTML = 'Month: <strong>' + data.month + '</strong>';
             }
         }
-        
-        // Force refresh dashboard data
-        console.log('🔄 Refreshing dashboard...');
+
         setTimeout(() => {
             if (typeof loadDashboardData === 'function') loadDashboardData();
             if (typeof loadProducts === 'function') loadProducts();
             if (typeof loadSales === 'function') loadSales();
             if (typeof loadCosts === 'function') loadCosts();
             if (typeof updateDataPreview === 'function') updateDataPreview();
-            console.log('✅ Dashboard refreshed');
         }, 1000);
-        
     })
     .catch(error => {
         console.error('💥 Upload error:', error);
-        
-        // Hide progress
         if (progressDiv) progressDiv.style.display = 'none';
-        
-        // Show error
         if (resultsDiv) {
             resultsDiv.style.display = 'block';
-            resultsDiv.className = 'results error';
-            
+            if (alertBox) alertBox.className = 'upload-alert upload-alert--error';
             const messageDiv = document.getElementById('upload-message');
-            if (messageDiv) {
-                messageDiv.textContent = 'Upload failed: ' + error.message;
-            }
+            if (messageDiv) messageDiv.textContent = 'Upload failed: ' + error.message;
         }
     });
 }
 
-// Override the existing function
 window.handleExcelUpload = handleExcelUpload;
-
 console.log('✅ Upload fix applied - handleExcelUpload function overridden');
-
