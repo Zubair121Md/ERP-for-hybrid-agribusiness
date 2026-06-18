@@ -4148,9 +4148,16 @@ def extract_pl_semantic_totals(df_raw: pd.DataFrame) -> Dict[str, Any]:
 
 
 def _looks_like_category_totals_sheet(df: pd.DataFrame) -> bool:
-    """Detect a simple 2-column sheet: Category | Total Amount."""
+    """Detect a simple 2-column sheet: Category | Total Amount (not a full P&L export)."""
     try:
         if df is None or df.empty:
+            return False
+        head = df.head(20).astype(str).apply(lambda s: " ".join(s.tolist()).upper(), axis=1).tolist()
+        full_pl_markers = sum(
+            1 for r in head
+            if 'TOTAL QTY SOLD' in r or 'VARIABLE COST' in r or ('FIXED COST' in r and 'CAT' in r)
+        )
+        if full_pl_markers >= 2:
             return False
         cols = [str(c).strip().lower() for c in df.columns]
         if len(cols) < 2:
@@ -4159,9 +4166,7 @@ def _looks_like_category_totals_sheet(df: pd.DataFrame) -> bool:
         has_amt = any("amount" in c or "total" in c for c in cols[:2])
         if has_cat and has_amt:
             return True
-        # Sometimes headers are unnamed; check first few rows for the words.
-        head = df.head(5).astype(str).apply(lambda s: " ".join(s.tolist()).lower(), axis=1)
-        return any(("fixed cost" in r and "cat" in r) or ("purchase accounts" in r) for r in head.tolist())
+        return any(("purchase accounts" in r) for r in head)
     except Exception:
         return False
 
@@ -4234,11 +4239,15 @@ def parse_category_totals_sheet(file_bytes: bytes) -> Dict[str, Any]:
                     expenses['variable_cost']['subcategories'][sub_key]['total'] = float(amt)
                     break
             continue
+        matched_var = False
         for k, sub_key in var_keys.items():
-            if key == k:
+            if key == k or k in key or key.startswith(k):
                 expenses['variable_cost']['subcategories'].setdefault(sub_key, {'total': 0.0, 'items': []})
                 expenses['variable_cost']['subcategories'][sub_key]['total'] = float(amt)
+                matched_var = True
                 break
+        if matched_var:
+            continue
         if "distribution cost" in key:
             expenses['distribution_cost']['total'] = float(amt)
         elif "marketing" in key:

@@ -10,7 +10,7 @@ Extracts:
 """
 import pandas as pd
 import numpy as np
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 import re
 
 
@@ -44,11 +44,15 @@ def parse_cost_sheet(file_path: str) -> Dict[str, Any]:
         print(f"[PARSER] Period: {period}")
         print(f"[PARSER] Total Qty Sold: {total_qty_sold}")
 
+        label_col, total_col = _detect_pl_columns(df)
+        print(f"[PARSER] Column layout: label_col={label_col}, total_col={total_col}")
+
         # ===================================================================
         # STATE MACHINE: Walk through rows and assign to categories
         # ===================================================================
         current_category = None          # e.g. 'fixed_cost_cat_i'
         current_variable_sub = None      # e.g. 'open_field', 'lettuce'
+        expenses_closed = False
 
         # Category totals
         expenses = {
@@ -66,30 +70,22 @@ def parse_cost_sheet(file_path: str) -> Dict[str, Any]:
 
         total_expenses_from_sheet = 0.0
 
-        # Variable cost subcategory mapping
-        VAR_SUB_MAP = {
-            'OPEN FIELD':   'open_field',
-            'LETTUCE':      'lettuce',
-            'STRAWBERRY':   'strawberry',
-            'RASPBERRY':    'raspberry_blueberry',
-            'BLUBERRY':     'raspberry_blueberry',
-            'BLUEBERRY':    'raspberry_blueberry',
-            'CITRUS':       'citrus',
-            'PACKING':      'packing',
-            'AGGREGATION':  'aggregation',
-        }
-
         for idx in range(len(df)):
             row = df.iloc[idx]
+            label = _str(row, label_col).strip()
+            label_upper = re.sub(r'\s+', ' ', label.upper())
+            amounts = _scan_row_amounts(row, label_col, total_col)
+            c_total = amounts["total_col_val"]
+            line_amt = amounts["line_amt"]
+            max_val = amounts["max_val"]
+            total_val = amounts["total_val"]
+            c2 = amounts.get("legacy_c2", 0.0)
+            c3 = c_total
+            c4 = amounts.get("legacy_c4", 0.0)
+            # Legacy aliases for debug blocks
             c0 = _str(row, 0).strip()
-            c1 = _str(row, 1).strip()
-            c1_upper = c1.upper()
-            c2 = _num(row, 2)  # Column C
-            c3 = _num(row, 3)  # Column D (TOTAL) - this is where totals are in NEED.xlsx format
-            c4 = _num(row, 4)  # Column E (sometimes totals are here)
-            # Check all columns for totals (different Excel formats use different columns)
-            # Prefer c3 (column D) as it's the standard TOTAL column, but check others too
-            total_val = c3 if c3 > 0 else (c4 if c4 > 0 else c2)
+            c1 = label
+            c1_upper = label_upper
             
             # Debug: Log row 80 specifically
             if idx == 79:  # Row 80 (0-indexed)
@@ -97,14 +93,44 @@ def parse_cost_sheet(file_path: str) -> Dict[str, Any]:
                 print(f"[PARSER DEBUG] Row 80: current_category={current_category}")
                 print(f"[PARSER DEBUG] Row 80: Condition check: c0={bool(c0)}, ')' in c0={')' in c0 if c0 else False}, ':' in c1={':' in c1 if c1 else False}")
 
-            # Skip empty rows
-            if not c0 and not c1 and c2 == 0 and c3 == 0:
+            # Skip empty rows (allow subtotal rows with blank label but TOTAL value)
+            if not label and total_val <= 0 and line_amt <= 0:
+                if not c0 and not c1:
+                    continue
+
+            # FC-I / FC-II subtotal rows (blank particulars, total in TOTAL column)
+            if (
+                not label
+                and not expenses_closed
+                and c_total > 0
+                and current_category in ('fixed_cost_cat_i', 'fixed_cost_cat_ii')
+            ):
+                expenses[current_category]['total'] = c_total
+                print(f"[PARSER] Row {idx}: {current_category.upper()} SUBTOTAL = {c_total:,.2f}")
                 continue
 
-            # ---- Detect category headers (col1 has name, col3 has total) ----
+            # Subtotal row: blank label, value in TOTAL column while inside a variable sub
+            if (
+                not label
+                and not expenses_closed
+                and current_category == 'variable_cost'
+                and current_variable_sub
+                and c_total > 0
+            ):
+                sub_key = current_variable_sub
+                expenses['variable_cost']['subcategories'].setdefault(sub_key, {'total': 0.0, 'items': []})
+                old_total = expenses['variable_cost']['subcategories'][sub_key]['total']
+                expenses['variable_cost']['total'] -= old_total
+                expenses['variable_cost']['subcategories'][sub_key]['total'] = c_total
+                expenses['variable_cost']['total'] += c_total
+                print(f"[PARSER] Row {idx}: VARIABLE COST - {sub_key.upper()} SUBTOTAL = {c_total:,.2f}")
+                current_variable_sub = None
+                continue
 
-            # 1) FIXED COST CAT - I
-            if 'FIXED COST CAT' in c1_upper and 'II' not in c1_upper and '-II' not in c1_upper:
+            # ---- Detect category headers ----
+
+            # 1) FIXED COST CAT - I (normalize spaces: "FIXED COST  CAT - I")
+            if label and 'FIXED COST CAT' in label_upper and 'II' not in label_upper and '-II' not in label_upper:
                 current_category = 'fixed_cost_cat_i'
                 current_variable_sub = None
                 # Don't set total here - let it be calculated from line items
@@ -114,7 +140,7 @@ def parse_cost_sheet(file_path: str) -> Dict[str, Any]:
                 continue
 
             # 2) FIXED COST CAT - II
-            if 'FIXED COST CAT' in c1_upper and ('II' in c1_upper or '-2' in c1_upper):
+            if label and 'FIXED COST CAT' in label_upper and ('II' in label_upper or '-2' in label_upper):
                 current_category = 'fixed_cost_cat_ii'
                 current_variable_sub = None
                 if total_val > 0:
@@ -123,104 +149,85 @@ def parse_cost_sheet(file_path: str) -> Dict[str, Any]:
                 continue
 
             # 3) VARIABLE COST (header, no total on this row)
-            if c1_upper == 'VARIABLE COST' or (c0 == '2' and 'VARIABLE COST' in c1_upper):
+            if not expenses_closed and (
+                label_upper == 'VARIABLE COST' or (label_upper.startswith('VARIABLE COST') and len(label_upper) < 30)
+            ):
                 current_category = 'variable_cost'
                 current_variable_sub = None
                 continue
 
-            # Check for variable cost section headers FIRST (even if not in variable_cost category)
-            # This handles cases where category might have changed but we're still in variable cost section
-            # Pattern: column 0 has letter+")" and column 1 has keyword+":"
+            # Variable cost section headers: OPEN FIELD :, LETTUCE:, A) OPEN FIELD:, AGGREGATION, etc.
             is_var_section_header = False
             var_section_sub = None
-            if c0 and ')' in c0 and ':' in c1:
-                for keyword, sub_key in VAR_SUB_MAP.items():
-                    if keyword in c1_upper:
-                        var_section_sub = sub_key
-                        is_var_section_header = True
-                        # Switch back to variable_cost category if we see a section header
-                        current_category = 'variable_cost'
-                        print(f"[PARSER] Row {idx}: Detected variable cost section header: {var_section_sub} (switching category to variable_cost)")
-                        break
+            if not expenses_closed and label:
+                var_section_sub = _detect_var_subcategory(label_upper)
+                if var_section_sub:
+                    is_var_section_header = True
+                    current_category = 'variable_cost'
+                    print(f"[PARSER] Row {idx}: Detected variable cost section header: {var_section_sub}")
 
-            # Variable cost sub-category headers: A) OPEN FIELD, B) LETTUCE, etc.
-            if current_category == 'variable_cost':
+            # Variable cost sub-category processing
+            if not expenses_closed and current_category == 'variable_cost':
                 detected_sub = None
                 is_section_header = False
                 
-                # FIRST: Use the section header we already detected above (if any)
                 if is_var_section_header and var_section_sub:
                     detected_sub = var_section_sub
                     is_section_header = True
-                    print(f"[PARSER] Row {idx}: Using detected section header: {detected_sub}")
-                # OR check if this is a section header row (e.g., "E) PACKING:" with colon)
-                elif c0 and ')' in c0 and ':' in c1:
-                    for keyword, sub_key in VAR_SUB_MAP.items():
-                        if keyword in c1_upper:
-                            detected_sub = sub_key
-                            is_section_header = True
-                            print(f"[PARSER] Row {idx}: Detected section header for {detected_sub}")
-                            break
-                # OR: header-style row with keyword and a total, but without "A) ...:"
-                # e.g. "AGGREGATION    184347.10" (no colon in the label)
-                elif c1_upper in VAR_SUB_MAP and total_val > 0:
-                    detected_sub = VAR_SUB_MAP[c1_upper]
-                    is_section_header = True
-                    print(f"[PARSER] Row {idx}: Detected bare section header for {detected_sub} (total={total_val})")
-                
-                # SECOND: If not a section header, check for keyword in row (line items)
-                # Only use keyword-based detection to START a subcategory when we
-                # are not already inside one. This prevents lines like
-                # "PACKING MATERIALS (OTHERS)" under AGGREGATION from incorrectly
-                # switching the subcategory to PACKING.
-                if not detected_sub and current_variable_sub is None:
-                    for keyword, sub_key in VAR_SUB_MAP.items():
-                        if keyword in c1_upper:
-                            detected_sub = sub_key
-                            break
+                elif label:
+                    bare = re.sub(r'\s*:\s*$', '', label_upper.strip())
+                    if bare in VAR_SUB_MAP and total_val > 0:
+                        detected_sub = VAR_SUB_MAP[bare]
+                        is_section_header = True
+                    elif current_variable_sub is None:
+                        detected_sub = _detect_var_subcategory(label_upper)
 
                 if detected_sub:
                     current_variable_sub = detected_sub
                     if detected_sub not in expenses['variable_cost']['subcategories']:
                         expenses['variable_cost']['subcategories'][detected_sub] = {'total': 0.0, 'items': []}
                     
-                    # Check if this is a TOTAL row
-                    is_total_row = 'TOTAL' in c1_upper or (c0 and 'TOTAL' in c0.upper())
-                    
-                    # Get the maximum value from all columns (c2, c3, c4)
-                    c4_val = _num(row, 4)
-                    max_val = max(c2, c3, c4_val) if c4_val > 0 else max(c2, c3)
-                    
-                    if max_val > 0:
+                    is_total_row = 'TOTAL' in label_upper
+                    if total_val > 0:
                         current_sub_total = expenses['variable_cost']['subcategories'][detected_sub]['total']
-                        
-                        if is_section_header:
-                            # Section header row - use column 3 if available, otherwise use max
-                            # Column 3 in section headers usually has the section total
-                            header_val = c3 if c3 > 0 else max_val
-                            # Always update if it's a section header (it's the official section total)
-                            old_total = current_sub_total
-                            expenses['variable_cost']['total'] -= old_total
+                        if is_section_header or is_total_row:
+                            header_val = total_val
+                        elif total_val > current_sub_total + 0.01:
+                            header_val = total_val
+                        else:
+                            header_val = 0.0
+                        if header_val > 0:
+                            expenses['variable_cost']['total'] -= current_sub_total
                             expenses['variable_cost']['subcategories'][detected_sub]['total'] = header_val
                             expenses['variable_cost']['total'] += header_val
-                            print(f"[PARSER] Row {idx}: VARIABLE COST - {detected_sub.upper()} SECTION HEADER = {header_val:,.2f} (was {old_total:,.2f})")
-                        elif is_total_row:
-                            # TOTAL row - use it as official total
-                            old_total = current_sub_total
-                            expenses['variable_cost']['total'] -= old_total
-                            expenses['variable_cost']['subcategories'][detected_sub]['total'] = max_val
-                            expenses['variable_cost']['total'] += max_val
-                            print(f"[PARSER] Row {idx}: VARIABLE COST - {detected_sub.upper()} TOTAL = {max_val:,.2f}")
-                        elif max_val > current_sub_total * 1.1 or (max_val > 100000 and current_sub_total < 100000):
-                            # Update if:
-                            # 1. Significantly larger (at least 10% larger), OR
-                            # 2. New value is > 100k and current is < 100k (catches large totals vs small line items)
-                            old_total = current_sub_total
-                            expenses['variable_cost']['total'] -= old_total
-                            expenses['variable_cost']['subcategories'][detected_sub]['total'] = max_val
-                            expenses['variable_cost']['total'] += max_val
-                            print(f"[PARSER] Row {idx}: VARIABLE COST - {detected_sub.upper()} = {max_val:,.2f} (updated total, was {old_total:,.2f})")
+                            print(f"[PARSER] Row {idx}: VARIABLE COST - {detected_sub.upper()} = {header_val:,.2f} (was {current_sub_total:,.2f})")
+                    if is_section_header and total_val > 0:
+                        current_variable_sub = None
                     continue
+
+                # Line within current section that carries the section total (TOTAL column on rollup row)
+                if current_variable_sub and label and not _detect_var_subcategory(label_upper):
+                    rollup_val = c_total if c_total > 0 else 0.0
+                    if rollup_val <= 0:
+                        pass
+                    else:
+                        sub_key = current_variable_sub
+                        expenses['variable_cost']['subcategories'].setdefault(sub_key, {'total': 0.0, 'items': []})
+                        current_sub_total = expenses['variable_cost']['subcategories'][sub_key]['total']
+                        if rollup_val > current_sub_total + 0.01:
+                            expenses['variable_cost']['total'] -= current_sub_total
+                            expenses['variable_cost']['subcategories'][sub_key]['total'] = rollup_val
+                            expenses['variable_cost']['total'] += rollup_val
+                            print(f"[PARSER] Row {idx}: VARIABLE COST - {sub_key.upper()} section total = {rollup_val:,.2f}")
+                            current_variable_sub = None
+
+            # FC-I / FC-II running total from TOTAL column on line rows
+            if (
+                not expenses_closed
+                and current_category in ('fixed_cost_cat_i', 'fixed_cost_cat_ii')
+                and c_total > expenses[current_category]['total']
+            ):
+                expenses[current_category]['total'] = c_total
 
             # 4) DISTRIBUTION COST
             # More flexible: check if it's DISTRIBUTION COST, with or without column 0 check
@@ -254,18 +261,18 @@ def parse_cost_sheet(file_path: str) -> Dict[str, Any]:
                     print(f"[PARSER] Row {idx}: VEHICLE RUNNING COST = {total_val}")
                 continue
 
-            # 7) OTHERS
-            # Check for "OTHERS" or "OTHER COSTS" but make sure it's not part of another category name
-            # Don't match "OTHER EXP" or "OTHER" - only match exact "OTHERS" or "OTHER COSTS"
+            # 7) OTHERS — top-level category only (not line items under variable cost sections)
             if c1_upper == 'OTHERS' or c1_upper == 'OTHER COSTS':
-                # Only set if we're not already in another category or if we see a total
-                if current_category != 'others' or total_val > 0:
-                    current_category = 'others'
-                    current_variable_sub = None
-                if total_val > 0:
-                    expenses['others']['total'] = total_val
-                    print(f"[PARSER] Row {idx}: OTHERS = {total_val}")
-                continue
+                if current_category == 'variable_cost' and current_variable_sub:
+                    pass
+                else:
+                    if current_category != 'others' or total_val > 0:
+                        current_category = 'others'
+                        current_variable_sub = None
+                    if total_val > 0:
+                        expenses['others']['total'] = total_val
+                        print(f"[PARSER] Row {idx}: OTHERS = {total_val}")
+                    continue
 
             # 8) WASTAGE & SHORTAGE
             if 'WASTAGE' in c1_upper and 'SHORTAGE' in c1_upper:
@@ -289,44 +296,57 @@ def parse_cost_sheet(file_path: str) -> Dict[str, Any]:
 
             # TOTAL EXPENSES — end of expense section
             if 'TOTAL EXPENSES' in c1_upper:
-                # Check all columns for the total, prefer the one that matches expected format (28,248,507.38)
-                # Column 2 (c2) is usually the correct one
-                potential_total = c2 if c2 > 0 else (c3 if c3 > 0 else 0)
-                # If we find a total that's close to 28,248,507.38, use it (within 1% tolerance)
-                if abs(potential_total - 28248507.38) / 28248507.38 < 0.01:
-                    total_expenses_from_sheet = potential_total
-                    print(f"[PARSER] Row {idx}: TOTAL EXPENSES = {total_expenses_from_sheet:,.2f} (correct value)")
-                elif total_expenses_from_sheet == 0:
-                    # Use first valid total found
+                potential_total = _num(row, label_col + 1) if label_col + 1 < len(row) else 0
+                if potential_total <= 0:
+                    potential_total = total_val if total_val > 0 else c2
+                if potential_total > 0:
                     total_expenses_from_sheet = potential_total
                     print(f"[PARSER] Row {idx}: TOTAL EXPENSES = {total_expenses_from_sheet:,.2f}")
                 current_category = None
                 current_variable_sub = None
+                expenses_closed = True
                 continue
 
             # INCOME section — stop collecting expenses
             if c0.upper() == 'INCOME' or c1_upper == 'INCOME':
                 current_category = None
                 current_variable_sub = None
+                expenses_closed = True
                 continue
 
             # ---- Collect line items under current category ----
-            # Skip if this is a TOTAL row (already processed above)
-            is_total_row = 'TOTAL' in c1_upper or 'TOTAL' in c0.upper()
+            is_total_row = 'TOTAL' in label_upper if label else False
             
-            if current_category and c1 and c2 > 0 and not is_total_row:
-                item = {'name': c1, 'amount': c2}
+            if current_category and label and line_amt > 0 and not is_total_row and not expenses_closed:
+                item = {'name': label, 'amount': line_amt}
 
                 if current_category == 'variable_cost' and current_variable_sub:
                     if current_variable_sub not in expenses['variable_cost']['subcategories']:
                         expenses['variable_cost']['subcategories'][current_variable_sub] = {'total': 0.0, 'items': []}
                     # Only add as line item if it's not the total (smaller than current total)
                     current_sub_total = expenses['variable_cost']['subcategories'][current_variable_sub]['total']
-                    if c2 < current_sub_total * 0.9 or current_sub_total == 0:
-                        # This is a line item (smaller than total) or no total set yet
+                    if line_amt < current_sub_total * 0.9 or current_sub_total == 0:
                         expenses['variable_cost']['subcategories'][current_variable_sub]['items'].append(item)
                 elif current_category in expenses and 'items' in expenses[current_category]:
                     expenses[current_category]['items'].append(item)
+
+        # FC-I subtotal row (blank label, total in TOTAL column)
+        for idx in range(len(df)):
+            row = df.iloc[idx]
+            label = _str(row, label_col).strip()
+            if label:
+                continue
+            amounts = _scan_row_amounts(row, label_col, total_col)
+            if amounts["total_val"] > 0 and expenses['fixed_cost_cat_i']['total'] == 0:
+                if expenses['fixed_cost_cat_i']['items']:
+                    items_sum = sum(i['amount'] for i in expenses['fixed_cost_cat_i']['items'])
+                    if abs(items_sum - amounts["total_val"]) / max(amounts["total_val"], 1) < 0.05:
+                        expenses['fixed_cost_cat_i']['total'] = amounts["total_val"]
+
+        # Recalculate variable_cost total from subcategories
+        expenses['variable_cost']['total'] = sum(
+            v.get('total', 0.0) for v in expenses['variable_cost']['subcategories'].values()
+        )
 
         # ---- Calculate totals from line items if available (more accurate than category totals) ----
         # For FIXED COST CAT - I: Always prefer line items sum if available
@@ -393,6 +413,106 @@ def parse_cost_sheet(file_path: str) -> Dict[str, Any]:
         print(f"[PARSER] ERROR: {e}")
         print(f"[PARSER] {traceback.format_exc()}")
         return {'success': False, 'error': str(e)}
+
+
+def _detect_pl_columns(df: pd.DataFrame) -> tuple:
+    """Detect which column holds particulars labels and which holds section TOTAL."""
+    label_col = 1
+    total_col = 3
+    for idx in range(min(20, len(df))):
+        row = df.iloc[idx]
+        for ci in range(min(8, len(row))):
+            cell = _str(row, ci).strip().upper()
+            if cell == 'PARTICULARS':
+                label_col = ci
+            if cell == 'TOTAL':
+                total_col = ci
+    return label_col, total_col
+
+
+VAR_SUB_MAP = {
+    'OPEN FIELD': 'open_field',
+    'LETTUCE': 'lettuce',
+    'STRAWBERRY': 'strawberry',
+    'RASPBERRY': 'raspberry_blueberry',
+    'BLUBERRY': 'raspberry_blueberry',
+    'BLUEBERRY': 'raspberry_blueberry',
+    'RASPBERRY&BLUBERRY': 'raspberry_blueberry',
+    'RASPBERRY & BLUEBERRY': 'raspberry_blueberry',
+    'CITRUS': 'citrus',
+    'PACKING': 'packing',
+    'AGGREGATION': 'aggregation',
+    'COMMON EXPENSES -FARM': 'common_expenses_farm',
+    'COMMON EXPENSES - FARM': 'common_expenses_farm',
+    'COMMON EXPENSES FARM': 'common_expenses_farm',
+}
+
+
+def _detect_var_subcategory(label_upper: str) -> Optional[str]:
+    """Match section header rows only (OPEN FIELD :, LETTUCE:, AGGREGATION, etc.)."""
+    if not label_upper:
+        return None
+    lu = re.sub(r'\s*:\s*$', '', label_upper.strip())
+    lu = re.sub(r'^[A-Z]\)\s*', '', lu).strip()
+    if not lu:
+        return None
+
+    exact_sections = [
+        ('OPEN FIELD', 'open_field'),
+        ('LETTUCE', 'lettuce'),
+        ('STRAWBERRY', 'strawberry'),
+        ('RASPBERRY&BLUBERRY', 'raspberry_blueberry'),
+        ('RASPBERRY & BLUEBERRY', 'raspberry_blueberry'),
+        ('RASPBERRY AND BLUEBERRY', 'raspberry_blueberry'),
+        ('CITRUS', 'citrus'),
+        ('PACKING', 'packing'),
+        ('AGGREGATION', 'aggregation'),
+        ('COMMON EXPENSES -FARM', 'common_expenses_farm'),
+        ('COMMON EXPENSES - FARM', 'common_expenses_farm'),
+        ('COMMON EXPENSES FARM', 'common_expenses_farm'),
+    ]
+    for pattern, sub_key in exact_sections:
+        if lu == pattern:
+            return sub_key
+        if pattern == 'PACKING' and lu.startswith('PACKING') and lu != 'PACKING':
+            continue
+        if lu.startswith(pattern) and len(lu) <= len(pattern) + 2:
+            return sub_key
+    return None
+
+
+def _scan_row_amounts(row, label_col: int, total_col: int) -> Dict[str, float]:
+    """Collect TOTAL column value, line amount, and max numeric in row."""
+    total_col_val = _num(row, total_col)
+    nums: List[float] = []
+    line_amt = 0.0
+    for ci in range(len(row)):
+        if ci == label_col:
+            continue
+        v = _num(row, ci)
+        if v > 0:
+            nums.append(v)
+    max_val = max(nums) if nums else 0.0
+    total_val = total_col_val if total_col_val > 0 else max_val
+    for ci in range(label_col + 1, len(row)):
+        if ci == total_col:
+            continue
+        v = _num(row, ci)
+        if v > 0:
+            line_amt = v
+            break
+    if line_amt <= 0 and label_col + 1 < len(row) and (label_col + 1) != total_col:
+        line_amt = _num(row, label_col + 1)
+    legacy_c2 = _num(row, 2)
+    legacy_c4 = _num(row, 4)
+    return {
+        "total_col_val": total_col_val,
+        "line_amt": line_amt,
+        "max_val": max_val,
+        "total_val": total_val,
+        "legacy_c2": legacy_c2,
+        "legacy_c4": legacy_c4,
+    }
 
 
 def _str(row, col_idx: int) -> str:
