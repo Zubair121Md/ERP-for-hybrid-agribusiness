@@ -156,7 +156,7 @@ function showTab(tabName) {
         loadCosts();
     } else if (tabName === 'harvest-mapping') {
         loadProductAllowlists();
-        console.log('✅ Mapping tab activated');
+        loadSectionMappings();
     }
 }
 
@@ -177,6 +177,7 @@ async function loadDashboardData() {
         
         // Update charts
         updateCharts(stats);
+        await loadDashboardBucketCharts();
         
     } catch (error) {
         console.error('Error loading dashboard data:', error);
@@ -203,8 +204,9 @@ function displayDashboardStats(stats) {
     }
     const pnlTot = stats.pnl_expenses_total != null ? stats.pnl_expenses_total : 0;
     const econCost = stats.total_costs || 0;
-    const costFootnote = Math.abs(pnlTot - econCost) > 1
-        ? `P&amp;L sheet total ₹${formatNumber(pnlTot)} (reference)`
+    const allocatedCost = stats.allocated_costs_total != null ? stats.allocated_costs_total : econCost;
+    const costFootnote = Math.abs(pnlTot - allocatedCost) > 1 && pnlTot > 0
+        ? `Allocated ₹${formatNumber(allocatedCost)} · P&amp;L sheet ₹${formatNumber(pnlTot)}`
         : 'Direct + allocated costs';
     
     const statsHTML = `
@@ -326,7 +328,14 @@ function displayTopProducts(products) {
 
 // Initialize charts
 function initializeCharts() {
-    // Revenue vs Costs Chart
+    const palette = {
+        purple: 'rgba(139, 92, 246, 0.85)',
+        green: 'rgba(16, 185, 129, 0.85)',
+        red: 'rgba(239, 68, 68, 0.85)',
+        amber: 'rgba(245, 158, 11, 0.85)',
+        blue: 'rgba(59, 130, 246, 0.85)',
+    };
+
     const revenueCtx = document.getElementById('revenueChart').getContext('2d');
     charts.revenue = new Chart(revenueCtx, {
         type: 'bar',
@@ -335,41 +344,26 @@ function initializeCharts() {
             datasets: [{
                 label: 'Amount (₹)',
                 data: [0, 0, 0],
-                backgroundColor: [
-                    'rgba(33, 150, 243, 0.8)',
-                    'rgba(244, 67, 54, 0.8)',
-                    'rgba(76, 175, 80, 0.8)'
-                ],
-                borderColor: [
-                    'rgba(33, 150, 243, 1)',
-                    'rgba(244, 67, 54, 1)',
-                    'rgba(76, 175, 80, 1)'
-                ],
-                borderWidth: 2
+                backgroundColor: [palette.blue, palette.red, palette.green],
+                borderRadius: 8,
+                borderSkipped: false,
             }]
         },
         options: {
             responsive: true,
             maintainAspectRatio: false,
-            plugins: {
-                legend: {
-                    display: false
-                }
-            },
+            plugins: { legend: { display: false } },
             scales: {
                 y: {
                     beginAtZero: true,
-                    ticks: {
-                        callback: function(value) {
-                            return '₹' + formatNumber(value);
-                        }
-                    }
-                }
+                    grid: { color: '#f1f5f9' },
+                    ticks: { callback: (v) => '₹' + formatNumber(v) }
+                },
+                x: { grid: { display: false } }
             }
         }
     });
     
-    // Source Distribution Chart
     const sourceCtx = document.getElementById('sourceChart').getContext('2d');
     charts.source = new Chart(sourceCtx, {
         type: 'doughnut',
@@ -377,27 +371,102 @@ function initializeCharts() {
             labels: ['Inhouse', 'Outsourced'],
             datasets: [{
                 data: [0, 0],
-                backgroundColor: [
-                    'rgba(76, 175, 80, 0.8)',
-                    'rgba(255, 152, 0, 0.8)'
-                ],
-                borderColor: [
-                    'rgba(76, 175, 80, 1)',
-                    'rgba(255, 152, 0, 1)'
-                ],
-                borderWidth: 2
+                backgroundColor: [palette.green, palette.amber],
+                borderWidth: 0,
+                hoverOffset: 6,
             }]
         },
         options: {
             responsive: true,
             maintainAspectRatio: false,
-            plugins: {
-                legend: {
-                    position: 'bottom'
-                }
-            }
+            cutout: '62%',
+            plugins: { legend: { position: 'bottom' } }
         }
     });
+
+    const bucketCtx = document.getElementById('bucketChart');
+    if (bucketCtx) {
+        charts.bucket = new Chart(bucketCtx.getContext('2d'), {
+            type: 'bar',
+            data: {
+                labels: [],
+                datasets: [{
+                    label: 'kg',
+                    data: [],
+                    backgroundColor: [
+                        '#f472b6', '#a78bfa', '#34d399', '#fbbf24', '#94a3b8'
+                    ],
+                    borderRadius: 6,
+                }]
+            },
+            options: {
+                indexAxis: 'y',
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: { legend: { display: false } },
+                scales: {
+                    x: { beginAtZero: true, grid: { color: '#f1f5f9' } },
+                    y: { grid: { display: false } }
+                }
+            }
+        });
+    }
+
+    const bucketPieCtx = document.getElementById('bucketPieChart');
+    if (bucketPieCtx) {
+        charts.bucketPie = new Chart(bucketPieCtx.getContext('2d'), {
+            type: 'doughnut',
+            data: {
+                labels: [],
+                datasets: [{
+                    data: [],
+                    backgroundColor: ['#f472b6', '#a78bfa', '#34d399', '#fbbf24', '#94a3b8'],
+                    borderWidth: 0,
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                cutout: '55%',
+                plugins: { legend: { position: 'right', labels: { boxWidth: 12, font: { size: 11 } } } }
+            }
+        });
+    }
+}
+
+async function loadDashboardBucketCharts() {
+    if (!charts.bucket && !charts.bucketPie) return;
+    try {
+        const month = normalizeMonthKey(document.getElementById('allocation-month')?.value || '');
+        const url = month
+            ? `${API_BASE}/sales-weight-summary?month=${encodeURIComponent(month)}`
+            : `${API_BASE}/sales-weight-summary`;
+        const res = await fetch(url);
+        if (!res.ok) return;
+        const summary = await res.json();
+        const dist = summary.distribution || [];
+        const labels = dist.map(d => d.label);
+        const kgs = dist.map(d => d.kg);
+        const pcts = dist.map(d => d.percent);
+
+        const monthEl = document.getElementById('bucket-chart-month');
+        if (monthEl) {
+            monthEl.textContent = summary.month ? summary.month : (summary.scope === 'all_time' ? 'all months' : 'latest month');
+        }
+
+        if (charts.bucket) {
+            charts.bucket.data.labels = labels;
+            charts.bucket.data.datasets[0].data = kgs;
+            charts.bucket.update();
+        }
+        if (charts.bucketPie) {
+            charts.bucketPie.data.labels = labels;
+            charts.bucketPie.data.datasets[0].data = pcts;
+            charts.bucketPie.update();
+        }
+    } catch (e) {
+        console.warn('Bucket charts:', e);
+    }
 }
 
 // Update charts with data
@@ -1542,43 +1611,84 @@ function formatCategoryLabel(category) {
 }
 
 async function loadProductAllowlists() {
-    const textarea = document.getElementById('lettuce-greens-allowlist');
-    if (!textarea) return;
+    const lettuceEl = document.getElementById('lettuce-greens-allowlist');
+    const openFieldEl = document.getElementById('open-field-allowlist');
+    if (!lettuceEl && !openFieldEl) return;
     try {
         const res = await fetch(`${API_BASE}/product-allowlists`);
         if (!res.ok) return;
         const data = await res.json();
-        const lines = (data.lettuce_greens_products || []).join('\n');
-        textarea.value = lines;
+        if (lettuceEl) lettuceEl.value = (data.lettuce_greens_products || []).join('\n');
+        if (openFieldEl) {
+            const of = data.open_field_products || data.open_field_extra_products || [];
+            openFieldEl.value = of.join('\n');
+        }
     } catch (e) {
         console.error('Failed to load allowlists', e);
     }
 }
 
-async function saveLettuceGreensAllowlist() {
-    const textarea = document.getElementById('lettuce-greens-allowlist');
+async function saveProductAllowlists() {
+    const lettuceEl = document.getElementById('lettuce-greens-allowlist');
+    const openFieldEl = document.getElementById('open-field-allowlist');
     const status = document.getElementById('allowlist-save-status');
-    if (!textarea) return;
-    const names = textarea.value.split('\n').map(s => s.trim()).filter(Boolean);
+    const lettuceNames = lettuceEl ? lettuceEl.value.split('\n').map(s => s.trim()).filter(Boolean) : [];
+    const openFieldNames = openFieldEl ? openFieldEl.value.split('\n').map(s => s.trim()).filter(Boolean) : [];
     try {
         const res = await fetch(`${API_BASE}/product-allowlists`, {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-                lettuce_greens_products: names,
-                open_field_extra_products: ['Iceberg Lettuce'],
+                lettuce_greens_products: lettuceNames,
+                open_field_products: openFieldNames.length ? openFieldNames : undefined,
             }),
         });
         const data = await res.json();
         if (!res.ok) throw new Error(data.detail || 'Save failed');
-        if (status) status.textContent = `Saved ${data.lettuce_greens_count || names.length} products`;
-        showAlert('Lettuce/greens allowlist saved', 'success');
+        if (status) status.textContent = `Saved ${data.lettuce_greens_count || lettuceNames.length} lettuce/greens · ${(data.open_field_products || []).length} open field`;
+        showAlert('Product allowlists saved', 'success');
         loadSales();
+        loadDashboardBucketCharts();
     } catch (e) {
         if (status) status.textContent = 'Save failed';
-        showAlert('Could not save allowlist: ' + e.message, 'error');
+        showAlert('Could not save allowlists: ' + e.message, 'error');
     }
 }
+
+async function saveLettuceGreensAllowlist() {
+    return saveProductAllowlists();
+}
+
+async function loadSectionMappings() {
+    const container = document.getElementById('section-mappings-table');
+    const badge = document.getElementById('mapping-count-badge');
+    if (!container) return;
+    try {
+        const res = await fetch(`${API_BASE}/product-section-mappings`);
+        if (!res.ok) throw new Error('Failed to load mappings');
+        const data = await res.json();
+        if (badge) badge.textContent = data.count ? `(${data.count} products)` : '(none uploaded)';
+        if (!data.count) {
+            container.innerHTML = '<p style="padding:32px;text-align:center;color:#94a3b8;">No mappings yet. Upload an Excel file with Section and Product columns.</p>';
+            return;
+        }
+        let html = '<table class="schema-table"><thead><tr><th>Section</th><th>Products</th><th style="text-align:right;">Count</th></tr></thead><tbody>';
+        for (const [section, products] of Object.entries(data.by_section || {})) {
+            html += `<tr>
+                <td class="col-name">${section}</td>
+                <td class="col-sub" style="font-size:0.82rem;line-height:1.5;">${products.join(', ')}</td>
+                <td style="text-align:right;font-weight:600;">${products.length}</td>
+            </tr>`;
+        }
+        html += '</tbody></table>';
+        container.innerHTML = html;
+    } catch (e) {
+        container.innerHTML = `<p style="padding:24px;text-align:center;color:#ef4444;">${e.message}</p>`;
+    }
+}
+
+window.loadSectionMappings = loadSectionMappings;
+window.saveProductAllowlists = saveProductAllowlists;
 
 // Allocation functions
 async function runAllocation() {
@@ -2432,12 +2542,10 @@ async function resetDatabase() {
                         loadCosts();
                         
                         // Clear any charts
-                        if (charts.revenueChart) {
-                            charts.revenueChart.destroy();
-                        }
-                        if (charts.sourceChart) {
-                            charts.sourceChart.destroy();
-                        }
+                        if (charts.revenue) charts.revenue.destroy();
+                        if (charts.source) charts.source.destroy();
+                        if (charts.bucket) charts.bucket.destroy();
+                        if (charts.bucketPie) charts.bucketPie.destroy();
                         
                     } else {
                         showAlert('Error resetting database', 'error');

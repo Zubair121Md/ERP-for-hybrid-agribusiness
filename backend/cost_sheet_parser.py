@@ -54,7 +54,7 @@ def parse_cost_sheet(file_path: str) -> Dict[str, Any]:
         expenses = {
             'fixed_cost_cat_i':     {'total': 0.0, 'items': []},
             # Defaults match classic 3-way sheet (60/25/15); open_field & % updated when rows say so.
-            'fixed_cost_cat_ii':    {'total': 0.0, 'items': [], 'splits': {'strawberry': 0.60, 'greens': 0.25, 'open_field': 0.0, 'aggregation': 0.15}},
+            'fixed_cost_cat_ii':    {'total': 0.0, 'items': [], 'splits': {'strawberry': 0.60, 'greens': 0.25, 'open_field': 0.10, 'aggregation': 0.15}},
             'variable_cost':        {'total': 0.0, 'subcategories': {}},
             'distribution_cost':    {'total': 0.0, 'items': []},
             'marketing_expenses':   {'total': 0.0, 'items': []},
@@ -74,6 +74,7 @@ def parse_cost_sheet(file_path: str) -> Dict[str, Any]:
             'RASPBERRY':    'raspberry_blueberry',
             'BLUBERRY':     'raspberry_blueberry',
             'BLUEBERRY':    'raspberry_blueberry',
+            'CITRUS':       'citrus',
             'PACKING':      'packing',
             'AGGREGATION':  'aggregation',
         }

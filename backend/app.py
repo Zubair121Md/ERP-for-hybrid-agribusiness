@@ -216,12 +216,20 @@ def load_product_allowlists() -> Dict[str, Any]:
 
 def save_product_allowlists(data: Dict[str, Any]) -> Dict[str, Any]:
     """Persist allowlists and refresh in-memory keys."""
-    of_list = list(data.get("open_field_products") or data.get("open_field_extra_products") or ["Iceberg Lettuce", "Spring Onion"])
+    existing = load_product_allowlists()
+    of_in = data.get("open_field_products")
+    of_extra = data.get("open_field_extra_products")
+    if of_in is not None:
+        of_list = list(of_in)
+    elif of_extra is not None:
+        of_list = list(of_extra)
+    else:
+        of_list = list(existing.get("open_field_products") or ["Iceberg Lettuce", "Spring Onion"])
     clean = {
-        "lettuce_greens_products": list(data.get("lettuce_greens_products") or []),
+        "lettuce_greens_products": list(data.get("lettuce_greens_products") if data.get("lettuce_greens_products") is not None else existing.get("lettuce_greens_products") or []),
         "open_field_products": of_list,
         "open_field_extra_products": of_list,
-        "notes": data.get("notes") or _default_allowlist_data().get("notes", ""),
+        "notes": data.get("notes") or existing.get("notes") or _default_allowlist_data().get("notes", ""),
     }
     ALLOWLIST_PATH.parent.mkdir(parents=True, exist_ok=True)
     with open(ALLOWLIST_PATH, "w", encoding="utf-8") as f:
@@ -1333,8 +1341,9 @@ class DashboardStats(BaseModel):
     indirect_income: float = 0.0
     stock_adjustment: float = 0.0
     total_revenue: float  # same as net_revenue (for charts / legacy)
-    total_costs: float  # economic: direct + allocated (matches net profit)
+    total_costs: float  # P&L sheet basis (matches net profit)
     pnl_expenses_total: float = 0.0  # P&L sheet upload total (reference)
+    allocated_costs_total: float = 0.0  # direct + allocated (when allocation has run)
     total_profit: float
     profit_margin: float  # profit ÷ total_costs (CP %)
     revenue_margin: float = 0.0  # profit ÷ net_revenue (%)
@@ -1618,6 +1627,7 @@ class CostAllocationEngine:
             cost.applies_to = "outsourced"
 
         manual_pool = (getattr(cost, "allocation_pool", None) or "").lower().strip()
+        manual_section_set = False
         
         # FC II: pooled rupee amount for one bucket; split only among that bucket's products by sales kg
         is_fixed_cost_cat_ii = _is_fixed_cost_cat_ii_name(cost.name)
@@ -1634,10 +1644,11 @@ class CostAllocationEngine:
             elif "AGGREGATION" in cost_name_upper:
                 fixed_cost_category = "aggregation"
 
-        # Optional manual pool override from UI
+        # Optional manual pool override from UI (must not be overwritten by name parsing below)
         if manual_pool and manual_pool != "auto":
             if manual_pool in {"strawberry", "lettuce", "open_field", "raspberry_blueberry", "citrus", "packing", "aggregation", "common_expenses_farm"}:
                 is_variable_cost = True
+                manual_section_set = True
                 if manual_pool == "strawberry":
                     cost_section = "Strawberry"
                 elif manual_pool == "lettuce":
@@ -1660,32 +1671,32 @@ class CostAllocationEngine:
                 if manual_pool == "wastage_shortage":
                     cost.applies_to = "outsourced"
                 is_variable_cost = False
+                manual_section_set = True
         
-        # Check if this is a VARIABLE COST that needs section-based filtering
-        is_variable_cost = "VARIABLE COST" in cost_name_upper
+        # Derive section from cost name when no manual pool override
+        is_variable_cost = False
         cost_section = None
-        
-        if is_variable_cost:
-            # Extract section from cost name (e.g., "VARIABLE COST - OPEN FIELD" -> "Open Field")
-            cost_name_upper = cost.name.upper()
-            if "OPEN FIELD" in cost_name_upper:
-                cost_section = "Open Field"
-            elif "LETTUCE" in cost_name_upper:
-                # VARIABLE COST - LETTUCE: Only products with "lettuce" in name
-                cost_section = "Lettuce"  # Special section for lettuce-only matching
-            elif "POLYHOUSE C" in cost_name_upper or "POLYHOUSE" in cost_name_upper:
-                # Match to all Polyhouse sections (C, D, E) - but NOT for LETTUCE costs
-                cost_section = "Polyhouse"  # Will match Polyhouse C, D, E
-            elif "STRAWBERRY" in cost_name_upper:
-                cost_section = "Strawberry"
-            elif "RASPBERRY" in cost_name_upper or "BLUEBERRY" in cost_name_upper or "BLUBERRY" in cost_name_upper:
-                cost_section = "Other Berries"
-            elif "CITRUS" in cost_name_upper:
-                cost_section = "Citrus"
-            elif "PACKING" in cost_name_upper:
-                cost_section = "Packing"
-            elif "AGGREGATION" in cost_name_upper:
-                cost_section = "Aggregation"
+        if not manual_section_set:
+            is_variable_cost = "VARIABLE COST" in cost_name_upper
+            if is_variable_cost:
+                # Extract section from cost name (e.g., "VARIABLE COST - OPEN FIELD" -> "Open Field")
+                cost_name_upper = cost.name.upper()
+                if "OPEN FIELD" in cost_name_upper:
+                    cost_section = "Open Field"
+                elif "LETTUCE" in cost_name_upper:
+                    cost_section = "Lettuce"
+                elif "POLYHOUSE C" in cost_name_upper or "POLYHOUSE" in cost_name_upper:
+                    cost_section = "Polyhouse"
+                elif "STRAWBERRY" in cost_name_upper:
+                    cost_section = "Strawberry"
+                elif "RASPBERRY" in cost_name_upper or "BLUEBERRY" in cost_name_upper or "BLUBERRY" in cost_name_upper:
+                    cost_section = "Other Berries"
+                elif "CITRUS" in cost_name_upper:
+                    cost_section = "Citrus"
+                elif "PACKING" in cost_name_upper:
+                    cost_section = "Packing"
+                elif "AGGREGATION" in cost_name_upper:
+                    cost_section = "Aggregation"
         
         # Load section mappings if needed (for VARIABLE COST sections or FC2 Open Field)
         section_mappings = {}
@@ -1708,9 +1719,10 @@ class CostAllocationEngine:
                     ProductSectionMapping.section.like("Polyhouse%")
                 ).all()
             elif cost_section == "Lettuce":
-                # For LETTUCE costs, we'll use name-based matching only (not section mappings)
-                # This ensures only products with "lettuce" in name get LETTUCE costs
-                mappings = []
+                # Lettuce/greens: allowlist + Polyhouse section mappings (greens grown in polyhouses)
+                mappings = self.db.query(ProductSectionMapping).filter(
+                    ProductSectionMapping.section.like("Polyhouse%")
+                ).all()
             else:
                 mappings = self.db.query(ProductSectionMapping).filter(
                     ProductSectionMapping.section == cost_section
@@ -1850,14 +1862,19 @@ class CostAllocationEngine:
                         if "STRAWBERRY" in product_name_upper:
                             product_mapped = True
                     
-                    # LETTUCE: saved allowlist only (not keyword match)
+                    # LETTUCE: allowlist, with optional Polyhouse mapping confirmation
                     elif cost_section == "Lettuce":
                         if is_lettuce_greens_product_name(product.name):
                             product_mapped = True
+                        elif section_mappings and product_name_upper in section_mappings:
+                            if section_mappings[product_name_upper].startswith("Polyhouse"):
+                                product_mapped = is_lettuce_greens_product_name(product.name)
                     
-                    # POLYHOUSE: match products in Polyhouse sections (for other Polyhouse costs, not LETTUCE)
+                    # POLYHOUSE: section mappings first, then lettuce/greens allowlist
                     elif cost_section == "Polyhouse":
-                        if "LETTUCE" in product_name_upper or "GREEN" in product_name_upper or "SPINACH" in product_name_upper or "ARUGULA" in product_name_upper or "BOK" in product_name_upper or "CELERY" in product_name_upper or "PARSLEY" in product_name_upper or "BASIL" in product_name_upper or "KALE" in product_name_upper or "CHIVES" in product_name_upper or "DILL" in product_name_upper or "OREGANO" in product_name_upper or "SAGE" in product_name_upper or "THYME" in product_name_upper or "TARRAGON" in product_name_upper or "LEEKS" in product_name_upper or "ASPARAGUS" in product_name_upper or "MIXED" in product_name_upper or "SALAD" in product_name_upper or "MICRO" in product_name_upper:
+                        if product_mapped:
+                            pass
+                        elif is_lettuce_greens_product_name(product.name):
                             product_mapped = True
                     
                     # OPEN FIELD: match products typically grown in open field
@@ -2362,6 +2379,7 @@ async def get_dashboard_stats(db: Session = Depends(get_db)):
         total_revenue=net_revenue,
         total_costs=total_costs,
         pnl_expenses_total=float(pnl_total or 0.0),
+        allocated_costs_total=total_full_costs,
         total_profit=total_profit,
         profit_margin=profit_margin,
         revenue_margin=revenue_margin,
@@ -2730,8 +2748,9 @@ async def put_monthly_wastage_override(
 
 
 class ProductAllowlistUpdate(BaseModel):
-    lettuce_greens_products: List[str] = Field(default_factory=list)
-    open_field_extra_products: List[str] = Field(default_factory=lambda: ["Iceberg Lettuce"])
+    lettuce_greens_products: Optional[List[str]] = None
+    open_field_products: Optional[List[str]] = None
+    open_field_extra_products: Optional[List[str]] = None
 
 
 @app.get("/api/product-allowlists")
@@ -2745,7 +2764,8 @@ async def get_product_allowlists():
 
 @app.put("/api/product-allowlists")
 async def put_product_allowlists(body: ProductAllowlistUpdate):
-    data = save_product_allowlists(body.model_dump())
+    payload = {k: v for k, v in body.model_dump().items() if v is not None}
+    data = save_product_allowlists(payload)
     return {
         "message": "Product allowlists saved",
         **data,
@@ -4100,10 +4120,10 @@ def extract_pl_semantic_totals(df_raw: pd.DataFrame) -> Dict[str, Any]:
                 variable_sub = "lettuce"
             elif "STRAWBERRY" in txt and ("C)" in txt or ":" in txt):
                 variable_sub = "strawberry"
+            elif "CITRUS" in txt and ("D)" in txt or ":" in txt or "E)" in txt):
+                variable_sub = "citrus"
             elif ("RASPBERRY" in txt or "BLUBERRY" in txt or "BLUEBERRY" in txt) and ("D)" in txt or ":" in txt):
                 variable_sub = "raspberry_blueberry"
-            elif "CITRUS" in txt and ("D)" in txt or ":" in txt):
-                variable_sub = "citrus"
             elif "PACKING" in txt and ("E)" in txt or ":" in txt):
                 variable_sub = "packing"
             elif "AGGREGATION" in txt and ("F)" in txt or ":" in txt):
@@ -6849,6 +6869,24 @@ async def upload_cost_sheet(file: UploadFile = File(...), db: Session = Depends(
             "message": f"Cost Sheet upload failed: {str(e)}",
             "costs_created": 0
         }
+
+@app.get("/api/product-section-mappings")
+async def get_product_section_mappings(db: Session = Depends(get_db)):
+    """Return all product-section mappings grouped by section."""
+    rows = db.query(ProductSectionMapping).order_by(
+        ProductSectionMapping.section, ProductSectionMapping.product_name
+    ).all()
+    mappings = [{"section": r.section, "product_name": r.product_name} for r in rows]
+    by_section: Dict[str, List[str]] = {}
+    for m in mappings:
+        by_section.setdefault(m["section"], []).append(m["product_name"])
+    return {
+        "count": len(mappings),
+        "mappings": mappings,
+        "by_section": {k: sorted(v) for k, v in sorted(by_section.items())},
+        "sections": sorted(by_section.keys()),
+    }
+
 
 @app.post("/api/upload-harvest-mapping")
 async def upload_harvest_mapping(file: UploadFile = File(...), db: Session = Depends(get_db)):

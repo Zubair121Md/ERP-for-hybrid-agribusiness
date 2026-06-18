@@ -50,17 +50,17 @@
         
         /* Sidebar */
         .sidebar {
-            width: 280px;
-            background: linear-gradient(180deg, #581C87 0%, #4C1D95 50%, #312E81 100%);
+            width: 260px;
+            background: linear-gradient(195deg, #0f0a1a 0%, #1a1033 45%, #12082a 100%);
             color: white;
             padding: 0;
-            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+            box-shadow: 4px 0 24px rgba(15, 10, 26, 0.35);
             position: fixed;
             height: 100vh;
             overflow-y: auto;
             z-index: 1000;
             transition: width 0.3s ease;
-            border-right: 2px solid rgba(139, 92, 246, 0.3);
+            border-right: 1px solid rgba(139, 92, 246, 0.2);
         }
         
         .sidebar.collapsed {
@@ -204,54 +204,53 @@
         }
         
         .sidebar-nav {
-            padding: 20px 0;
+            padding: 12px 10px 24px;
         }
         
         .nav-item {
             display: flex;
             align-items: center;
-            gap: 16px;
-            padding: 20px 28px;
-            color: rgba(255, 255, 255, 0.8);
+            gap: 14px;
+            padding: 12px 16px;
+            color: rgba(255, 255, 255, 0.72);
             text-decoration: none;
-            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-            border-left: 4px solid transparent;
+            transition: all 0.2s ease;
+            border-left: 3px solid transparent;
             position: relative;
             font-weight: 500;
-            font-size: 0.95em;
-            margin: 3px 16px;
-            border-radius: 12px;
-            background: rgba(255, 255, 255, 0.02);
+            font-size: 0.9em;
+            margin: 2px 6px;
+            border-radius: 10px;
         }
         
         .nav-item i {
-            width: 22px;
+            width: 20px;
             text-align: center;
-            font-size: 1.2em;
-            opacity: 0.9;
-            color: #A78BFA;
+            font-size: 1.05em;
+            opacity: 0.85;
+            color: #c4b5fd;
         }
         
         .nav-item:hover {
-            background: linear-gradient(135deg, rgba(139, 92, 246, 0.1) 0%, rgba(139, 92, 246, 0.05) 100%);
-            border-left-color: #A78BFA;
+            background: rgba(139, 92, 246, 0.12);
             color: white;
-            transform: translateX(5px);
-            box-shadow: 0 4px 12px rgba(139, 92, 246, 0.15);
+            transform: translateX(2px);
         }
         
         .nav-item:hover i {
-            opacity: 1;
-            color: #8B5CF6;
+            color: #a78bfa;
         }
         
         .nav-item.active {
-            background: linear-gradient(135deg, rgba(139, 92, 246, 0.25) 0%, rgba(139, 92, 246, 0.1) 100%);
-            border-left-color: #8B5CF6;
+            background: linear-gradient(135deg, rgba(139, 92, 246, 0.28) 0%, rgba(124, 58, 237, 0.12) 100%);
+            border-left-color: #a78bfa;
             color: white;
             font-weight: 600;
-            box-shadow: 0 6px 20px rgba(139, 92, 246, 0.2);
-            transform: translateX(3px);
+            box-shadow: inset 0 1px 0 rgba(255,255,255,0.06);
+        }
+        
+        .nav-item.active i {
+            color: #e9d5ff;
         }
         
         .nav-item.active i {
@@ -431,16 +430,24 @@
         /* Charts Container */
         .charts-container {
             display: grid;
-            grid-template-columns: 2fr 1fr;
-            gap: 25px;
-            margin-bottom: 30px;
+            grid-template-columns: 1.4fr 1fr;
+            gap: 20px;
+            margin-bottom: 20px;
+        }
+
+        .charts-row-secondary {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+            margin-bottom: 28px;
         }
         
         .chart-card {
             background: white;
-            padding: 25px;
-            border-radius: 15px;
-            box-shadow: var(--shadow);
+            padding: 22px 24px;
+            border-radius: 16px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.06), 0 4px 16px rgba(0,0,0,0.04);
+            border: 1px solid #f1f5f9;
         }
         
         .chart-header {
@@ -1012,6 +1019,10 @@
             .charts-container {
                 grid-template-columns: 1fr;
             }
+
+            .charts-row-secondary {
+                grid-template-columns: 1fr;
+            }
             
             .form-row {
                 grid-template-columns: 1fr;
@@ -1102,21 +1113,37 @@
                         <div class="chart-card">
                             <div class="chart-header">
                                 <h3 class="chart-title">Revenue vs Costs</h3>
-                                <select id="chart-period" class="btn btn-secondary">
-                                    <option value="2025-04-24 00:00:00">April 2025</option>
-                                </select>
                             </div>
                             <div class="chart-container">
                                 <canvas id="revenueChart"></canvas>
                             </div>
                         </div>
-                        
                         <div class="chart-card">
                             <div class="chart-header">
-                                <h3 class="chart-title">Source Distribution</h3>
+                                <h3 class="chart-title">Inhouse vs Outsourced</h3>
                             </div>
                             <div class="chart-container">
                                 <canvas id="sourceChart"></canvas>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="charts-row-secondary">
+                        <div class="chart-card">
+                            <div class="chart-header">
+                                <h3 class="chart-title">FC-II Weight Buckets</h3>
+                                <span id="bucket-chart-month" style="font-size:0.8rem;color:#64748b;"></span>
+                            </div>
+                            <div class="chart-container">
+                                <canvas id="bucketChart"></canvas>
+                            </div>
+                        </div>
+                        <div class="chart-card">
+                            <div class="chart-header">
+                                <h3 class="chart-title">Bucket share (%)</h3>
+                            </div>
+                            <div class="chart-container">
+                                <canvas id="bucketPieChart"></canvas>
                             </div>
                         </div>
                     </div>
@@ -1229,70 +1256,92 @@
 
                 <!-- Mapping Data Section -->
                 <div id="harvest-mapping" class="tab-content">
-                    <div class="table-card">
-                        <div class="table-header">
-                            <h3 class="table-title">Product-Section Mapping</h3>
-                            <div class="table-actions" style="display: flex; gap: 10px;">
-                                <button class="btn btn-primary" onclick="document.getElementById('mapping-file-input').click()">
-                                    <i class="fas fa-upload"></i>
-                                    Upload Mapping Excel
-                                </button>
-                                <button class="btn btn-danger" onclick="deleteMappingData()">
-                                    <i class="fas fa-trash"></i>
-                                    Delete Mapping Data
-                                </button>
-                                <input type="file" id="mapping-file-input" accept=".xlsx,.xls" style="display: none;" onchange="handleMappingUpload(event)">
-                            </div>
-                        </div>
-                        <div style="padding: 25px;">
-                            <!-- Mapping Data Instructions -->
-                            <div style="background: #f8fafc; padding: 20px; border-radius: 8px; margin-bottom: 25px; border-left: 4px solid var(--primary-color);">
-                                <h4 style="margin-bottom: 15px; color: var(--primary-color);">
-                                    <i class="fas fa-info-circle"></i>
-                                    Mapping Data Instructions
-                                </h4>
-                                <p style="margin-bottom: 10px; color: var(--light-text);">
-                                    Upload an Excel file with two columns:
-                                </p>
-                                <ul style="margin-left: 20px; color: var(--light-text); line-height: 1.8;">
-                                    <li><strong>Section:</strong> Section name (e.g., "Open Field", "Polyhouse C")</li>
-                                    <li><strong>Product:</strong> Product name (e.g., "Beetroot Leaves", "Arugula(Rocket Lettuce)")</li>
-                                </ul>
-                                <p style="margin-top: 15px; color: var(--light-text); font-size: 14px;">
-                                    <i class="fas fa-lightbulb"></i>
-                                    <strong>Purpose:</strong> This mapping is used to allocate VARIABLE COST subcategories (like "OPEN FIELD", "LETTUCE") to the correct products by section.
-                                </p>
-                            </div>
-
-                            <div class="table-card" style="margin-bottom: 25px; padding: 20px; border: 1px solid #e2e8f0; border-radius: 8px;">
-                                <h4 style="margin-bottom: 10px; color: var(--primary-color);">
-                                    <i class="fas fa-leaf"></i> Lettuce / Greens allowlist
-                                </h4>
-                                <p style="color: var(--light-text); font-size: 14px; margin-bottom: 12px;">
-                                    Only these product names count for <strong>Lettuce / Greens</strong> weight and cost allocation.
-                                    <strong>Iceberg Lettuce</strong> is counted under <strong>Open Field</strong> (not this list).
-                                    One product name per line.
-                                </p>
-                                <textarea id="lettuce-greens-allowlist" rows="14" style="width: 100%; font-family: monospace; font-size: 13px; padding: 10px; border-radius: 6px; border: 1px solid #d1d5db;"></textarea>
-                                <div style="margin-top: 12px; display: flex; gap: 10px; align-items: center;">
-                                    <button type="button" class="btn btn-primary" onclick="saveLettuceGreensAllowlist()">
-                                        <i class="fas fa-save"></i> Save allowlist
+                    <div class="upload-page">
+                        <section class="upload-panel">
+                            <header class="upload-panel__header">
+                                <div>
+                                    <h3><i class="fas fa-sitemap" style="color: var(--primary-color); margin-right: 8px;"></i>Product–Section Mapping</h3>
+                                    <p>Maps products to farm sections for VARIABLE COST and FC-II Open Field attribution.</p>
+                                </div>
+                                <div class="upload-panel__actions">
+                                    <button class="btn btn-primary btn-sm" onclick="document.getElementById('mapping-file-input').click()">
+                                        <i class="fas fa-upload"></i> Upload Excel
                                     </button>
-                                    <span id="allowlist-save-status" style="font-size: 14px; color: #64748b;"></span>
+                                    <button class="btn btn-danger btn-sm" onclick="deleteMappingData()">
+                                        <i class="fas fa-trash"></i> Delete all
+                                    </button>
+                                    <input type="file" id="mapping-file-input" accept=".xlsx,.xls" style="display: none;" onchange="handleMappingUpload(event)">
                                 </div>
-                            </div>
-                            
-                            <!-- Mapping Upload Results -->
-                            <div id="mapping-upload-results" style="display: none; margin-top: 25px;">
-                                <div class="alert" style="padding: 15px; border-radius: 8px;">
-                                    <h4 id="mapping-upload-message" style="margin-bottom: 10px;">
+                            </header>
+                            <div class="upload-panel__body">
+                                <div class="schema-card" style="margin-bottom: 20px;">
+                                    <div class="schema-card__title"><i class="fas fa-info-circle"></i> Excel format</div>
+                                    <div style="padding: 16px 20px; color: var(--light-text); font-size: 0.9rem; line-height: 1.7;">
+                                        Two columns: <strong>Section</strong> (e.g. Open Field, Polyhouse C) and <strong>Product</strong> (exact name as in sales upload).
+                                        Used for <strong>VARIABLE COST – OPEN FIELD</strong>, <strong>Polyhouse</strong>, and <strong>FC-II Open Field</strong> pools.
+                                        <strong>Lettuce / Greens</strong> uses the allowlist below (plus Polyhouse mappings as confirmation).
+                                    </div>
+                                </div>
+
+                                <div id="mapping-upload-results" style="display: none; margin-bottom: 20px;">
+                                    <div id="mapping-alert-box" class="upload-alert upload-alert--success">
                                         <i class="fas fa-check-circle"></i>
-                                        Upload Successful!
-                                    </h4>
-                                    <p id="mapping-stats"></p>
+                                        <div>
+                                            <strong id="mapping-upload-message">Upload complete</strong>
+                                            <p id="mapping-stats" style="margin: 4px 0 0; font-size: 0.9rem;"></p>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div id="section-mappings-panel">
+                                    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;">
+                                        <h4 style="font-weight:600;color:var(--dark-text);margin:0;">
+                                            <i class="fas fa-table"></i> Current mappings
+                                            <span id="mapping-count-badge" style="font-size:0.8rem;font-weight:500;color:#64748b;margin-left:8px;"></span>
+                                        </h4>
+                                        <button type="button" class="btn btn-secondary btn-sm" onclick="loadSectionMappings()">
+                                            <i class="fas fa-sync-alt"></i> Refresh
+                                        </button>
+                                    </div>
+                                    <div id="section-mappings-table" style="max-height: 360px; overflow-y: auto; border: 1px solid var(--border-color); border-radius: 12px; background: #fff;">
+                                        <p style="padding: 24px; text-align: center; color: #94a3b8;">Loading mappings…</p>
+                                    </div>
                                 </div>
                             </div>
-                        </div>
+                        </section>
+
+                        <section class="upload-panel">
+                            <header class="upload-panel__header">
+                                <div>
+                                    <h3><i class="fas fa-leaf" style="color: #10b981; margin-right: 8px;"></i>Product allowlists</h3>
+                                    <p>Control which products count for Lettuce/Greens and Open Field weight &amp; cost pools.</p>
+                                </div>
+                            </header>
+                            <div class="upload-panel__body">
+                                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 24px;">
+                                    <div>
+                                        <h4 style="font-weight: 600; margin-bottom: 8px; color: var(--dark-text);">Lettuce / Greens</h4>
+                                        <p style="color: var(--light-text); font-size: 0.85rem; margin-bottom: 10px;">
+                                            FC-II Greens &amp; VARIABLE COST – LETTUCE. One product name per line.
+                                        </p>
+                                        <textarea id="lettuce-greens-allowlist" rows="14" style="width: 100%; font-family: ui-monospace, monospace; font-size: 12px; padding: 12px; border-radius: 10px; border: 1px solid #e2e8f0; resize: vertical;"></textarea>
+                                    </div>
+                                    <div>
+                                        <h4 style="font-weight: 600; margin-bottom: 8px; color: var(--dark-text);">Open Field</h4>
+                                        <p style="color: var(--light-text); font-size: 0.85rem; margin-bottom: 10px;">
+                                            Inhouse harvest only (e.g. Iceberg Lettuce, Spring Onion). Not the lettuce/greens list.
+                                        </p>
+                                        <textarea id="open-field-allowlist" rows="14" style="width: 100%; font-family: ui-monospace, monospace; font-size: 12px; padding: 12px; border-radius: 10px; border: 1px solid #e2e8f0; resize: vertical;"></textarea>
+                                    </div>
+                                </div>
+                                <div style="margin-top: 16px; display: flex; gap: 12px; align-items: center;">
+                                    <button type="button" class="btn btn-primary" onclick="saveProductAllowlists()">
+                                        <i class="fas fa-save"></i> Save allowlists
+                                    </button>
+                                    <span id="allowlist-save-status" style="font-size: 0.9rem; color: #64748b;"></span>
+                                </div>
+                            </div>
+                        </section>
                     </div>
                 </div>
 
@@ -1760,7 +1809,7 @@
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/chart.js@3.9.1/dist/chart.min.js"></script>
-    <script src="static/js/dashboard.js?v=20260521120000"></script>
+    <script src="static/js/dashboard.js?v=20260521140000"></script>
     <script src="static/js/upload-fix.js?v=20260521120000"></script>
     
     <!-- INLINE UPLOAD FIX - This will definitely work -->
@@ -2176,12 +2225,12 @@
         const resultsDiv = document.getElementById('mapping-upload-results');
         const messageDiv = document.getElementById('mapping-upload-message');
         const statsDiv = document.getElementById('mapping-stats');
+        const alertBox = document.getElementById('mapping-alert-box');
         
         resultsDiv.style.display = 'block';
-        messageDiv.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Uploading...';
-        messageDiv.parentElement.className = 'alert';
-        messageDiv.parentElement.style.background = '#f3f4f6';
-        messageDiv.parentElement.style.color = '#374151';
+        if (messageDiv) messageDiv.textContent = 'Uploading…';
+        if (alertBox) alertBox.className = 'upload-alert';
+        if (statsDiv) statsDiv.textContent = '';
         
         try {
             const formData = new FormData();
@@ -2195,39 +2244,19 @@
             const data = await response.json();
             
             if (data.success) {
-                messageDiv.innerHTML = '<i class="fas fa-check-circle"></i> Upload Successful!';
-                statsDiv.textContent = `Created ${data.mappings_created} product-section mappings${data.rows_skipped > 0 ? ` (${data.rows_skipped} rows skipped)` : ''}`;
-                messageDiv.parentElement.style.background = '#d1fae5';
-                messageDiv.parentElement.style.color = '#065f46';
-                messageDiv.parentElement.style.border = '1px solid #a7f3d0';
-                console.log('✅ Mapping upload successful:', data);
-                
-                // Display parsed mappings
-                if (data.parsed_mappings && data.parsed_mappings.length > 0) {
-                    let parsedHtml = '<div style="margin-top: 15px; padding: 15px; background: white; border-radius: 8px; border: 1px solid #a7f3d0;"><h6 style="margin-bottom: 10px; color: #065f46;">📋 Parsed Mappings:</h6><div style="max-height: 300px; overflow-y: auto;"><table style="width: 100%; border-collapse: collapse; font-size: 13px;"><thead><tr style="background: #d1fae5;"><th style="padding: 8px; text-align: left; border-bottom: 1px solid #a7f3d0;">Section</th><th style="padding: 8px; text-align: left; border-bottom: 1px solid #a7f3d0;">Product</th></tr></thead><tbody>';
-                    
-                    data.parsed_mappings.forEach(mapping => {
-                        parsedHtml += `<tr><td style="padding: 8px; border-bottom: 1px solid #e5e7eb;">${mapping.section}</td><td style="padding: 8px; border-bottom: 1px solid #e5e7eb;">${mapping.product_name}</td></tr>`;
-                    });
-                    
-                    parsedHtml += '</tbody></table></div></div>';
-                    statsDiv.innerHTML = statsDiv.textContent + parsedHtml;
-                }
+                if (messageDiv) messageDiv.textContent = 'Upload successful';
+                if (statsDiv) statsDiv.textContent = `Created ${data.mappings_created} mappings${data.rows_skipped > 0 ? ` (${data.rows_skipped} skipped)` : ''}`;
+                if (alertBox) alertBox.className = 'upload-alert upload-alert--success';
+                if (typeof loadSectionMappings === 'function') loadSectionMappings();
             } else {
-                messageDiv.innerHTML = '<i class="fas fa-times-circle"></i> Upload Failed';
-                statsDiv.textContent = data.message || 'Unknown error';
-                messageDiv.parentElement.style.background = '#fee2e2';
-                messageDiv.parentElement.style.color = '#991b1b';
-                messageDiv.parentElement.style.border = '1px solid #fecaca';
-                console.error('❌ Mapping upload failed:', data);
+                if (messageDiv) messageDiv.textContent = 'Upload failed';
+                if (statsDiv) statsDiv.textContent = data.message || 'Unknown error';
+                if (alertBox) alertBox.className = 'upload-alert upload-alert--error';
             }
         } catch (error) {
-            messageDiv.innerHTML = '<i class="fas fa-times-circle"></i> Upload Failed';
-            statsDiv.textContent = 'Error: ' + error.message;
-            messageDiv.parentElement.style.background = '#fee2e2';
-            messageDiv.parentElement.style.color = '#991b1b';
-            messageDiv.parentElement.style.border = '1px solid #fecaca';
-            console.error('💥 Mapping upload error:', error);
+            if (messageDiv) messageDiv.textContent = 'Upload failed';
+            if (statsDiv) statsDiv.textContent = error.message;
+            if (alertBox) alertBox.className = 'upload-alert upload-alert--error';
         }
         
         // Reset file input
@@ -2242,9 +2271,10 @@
             const res = await fetch('/api/delete-mappings', { method: 'DELETE' });
             const data = await res.json();
             if (!res.ok || !data.success) throw new Error(data.message || 'Delete failed');
-            alert(data.message || 'Mapping data deleted');
             const resultsDiv = document.getElementById('mapping-upload-results');
             if (resultsDiv) resultsDiv.style.display = 'none';
+            if (typeof loadSectionMappings === 'function') loadSectionMappings();
+            alert(data.message || 'Mapping data deleted');
         } catch (error) {
             console.error('Delete mapping data error:', error);
             alert('Failed to delete mapping data: ' + error.message);
