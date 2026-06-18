@@ -26,7 +26,7 @@ getcontext().prec = 28
 # Time Complexity: O(1) per match instead of O(m) where m=pattern length
 REGEX_PATTERNS = {
     'currency': re.compile(r'[₹$€£]'),
-    'indian_number': re.compile(r'[\d,]+\.?\d*'),
+    'indian_number': re.compile(r'-?[\d,]+\.?\d*'),  # Added -? to capture negative numbers
     'month_yyyy_mm': re.compile(r'(\d{4}[-/]\d{2})|([A-Za-z]{3}[-/]\d{4})'),
     'period_date': re.compile(r'\d{1,2}[-/]\w{3}[-/]\d{2,4}'),
     'period_month': re.compile(r'\w{3}[-/]\d{2,4}'),
@@ -4202,26 +4202,98 @@ def _merge_expenses_prefer_higher(primary: Dict[str, Any], secondary: Dict[str, 
 
 
 def _looks_like_category_totals_sheet(df: pd.DataFrame) -> bool:
-    """Detect a simple 2-column sheet: Category | Total Amount (not a full P&L export)."""
+    """
+    Detect a simple summary sheet (Category | Amount format).
+    
+    Summary sheets have:
+    - 2-3 columns typically
+    - Category names like "Fixed Cost Cat-I", "Open Field", "Distribution Cost"
+    - Simple amounts in the second column
+    - NO detailed line items, NO multi-level headers
+    
+    NOT summary if it has:
+    - TOTAL QTY SOLD in early rows (indicates full P&L)
+    - More than 3 significant columns with data
+    - Nested section headers (A) OPEN FIELD:, B) LETTUCE:, etc.)
+    """
     try:
         if df is None or df.empty:
             return False
-        head = df.head(20).astype(str).apply(lambda s: " ".join(s.tolist()).upper(), axis=1).tolist()
-        full_pl_markers = sum(
-            1 for r in head
-            if 'TOTAL QTY SOLD' in r or 'VARIABLE COST' in r or ('FIXED COST' in r and 'CAT' in r)
-        )
-        if full_pl_markers >= 2:
+        
+        # Check column count - summary sheets are typically 2-3 columns
+        non_empty_cols = sum(1 for c in df.columns if not str(c).startswith('Unnamed'))
+        
+        # Scan first 30 rows for patterns
+        head_rows = df.head(30).astype(str).apply(lambda s: " ".join(s.tolist()).upper(), axis=1).tolist()
+        head_text = " ".join(head_rows)
+        
+        # Full P&L markers - if we see these, it's NOT a summary
+        full_pl_markers = [
+            'TOTAL QTY SOLD',
+            'PARTICULARS',
+            'A) OPEN FIELD',
+            'B) LETTUCE',
+            'VARIABLE COST :',  # Section header with colon
+            'SPRAYING MANURING',  # Line item detail
+            'WORKERSWAGES',
+            'WORKERS OVERTIME',
+        ]
+        full_pl_count = sum(1 for marker in full_pl_markers if marker in head_text)
+        if full_pl_count >= 2:
+            print(f"[SUMMARY DETECT] NOT summary - found {full_pl_count} full P&L markers")
             return False
-        cols = [str(c).strip().lower() for c in df.columns]
-        if len(cols) < 2:
-            return False
-        has_cat = any("category" in c or "particular" in c for c in cols[:2])
-        has_amt = any("amount" in c or "total" in c for c in cols[:2])
+        
+        # Summary sheet markers - things we expect to see
+        summary_markers = [
+            'FIXED COST CAT',
+            'DISTRIBUTION COST',
+            'MARKETING',
+            'VEHICLE RUNNING',
+            'WASTAGE',
+            'PURCHASE',
+            'OPEN FIELD',
+            'LETTUCE',
+            'STRAWBERRY',
+            'AGGREGATION',
+        ]
+        summary_count = sum(1 for marker in summary_markers if marker in head_text)
+        
+        # If we see multiple summary markers AND the sheet is simple (2-3 cols), it's a summary
+        if summary_count >= 4:
+            # Additional check: make sure amounts are in column B (index 1)
+            has_amounts = False
+            for _, row in df.head(20).iterrows():
+                try:
+                    val = parse_numeric_robust(row.iloc[1] if len(row) > 1 else 0)
+                    if val and abs(val) > 100:  # Significant amount
+                        has_amounts = True
+                        break
+                except:
+                    pass
+            
+            if has_amounts:
+                print(f"[SUMMARY DETECT] IS summary - found {summary_count} summary markers with amounts")
+                return True
+        
+        # Check for simple "Category | Amount" column headers
+        cols = [str(c).strip().lower() for c in df.columns[:3]]
+        has_cat = any("category" in c or "particular" in c or "cost" in c for c in cols)
+        has_amt = any("amount" in c or "total" in c for c in cols)
         if has_cat and has_amt:
+            print(f"[SUMMARY DETECT] IS summary - has Category/Amount headers")
             return True
-        return any(("purchase accounts" in r) for r in head)
-    except Exception:
+        
+        # Check first column for "COST ANALYSIS" header
+        first_col_text = " ".join(str(df.iloc[i, 0]).upper() for i in range(min(5, len(df))) if pd.notna(df.iloc[i, 0]))
+        if 'COST ANALYSIS' in first_col_text and summary_count >= 3:
+            print(f"[SUMMARY DETECT] IS summary - has COST ANALYSIS header")
+            return True
+        
+        print(f"[SUMMARY DETECT] NOT summary - no clear indicators (summary_count={summary_count})")
+        return False
+        
+    except Exception as e:
+        print(f"[SUMMARY DETECT] Error: {e}")
         return False
 
 
@@ -4230,6 +4302,13 @@ def parse_category_totals_sheet(file_bytes: bytes) -> Dict[str, Any]:
     Parse a summary sheet of the form:
     Category | Total Amount
     and map into the fixed template expense structure.
+    
+    INTELLIGENT MATCHING: Uses keyword detection, not exact strings.
+    Handles variations like:
+    - "Fixed Cost Cat-I" / "Fixed Cost Cat - I" / "Fixed Cost Cat 1"
+    - "Open Field" / "OPEN FIELD" / "open field"
+    - "Raspberry & Blueberry" / "Raspberry Blueberry" / "raspberry and blueberry"
+    - "Purchase Vegetables" / "Purchase Return" (summed into Purchase Accounts)
     """
     df = pd.read_excel(io.BytesIO(file_bytes))
     if df is None or df.empty or len(df.columns) < 2:
@@ -4240,13 +4319,24 @@ def parse_category_totals_sheet(file_bytes: bytes) -> Dict[str, Any]:
     rows = []
     for _, r in df.iterrows():
         cat = str(r.get(c0, "")).strip()
-        if not cat or cat.lower() in {"nan", "none"}:
+        if not cat or cat.lower() in {"nan", "none", ""}:
             continue
         amt = parse_numeric_robust(r.get(c1, 0))
         rows.append((cat, amt))
 
-    def n(s: str) -> str:
+    def normalize(s: str) -> str:
+        """Normalize string for keyword matching: lowercase, collapse spaces/punctuation."""
         return re.sub(r"[^a-z0-9]+", " ", (s or "").lower()).strip()
+
+    def has_keywords(text: str, *keywords) -> bool:
+        """Check if normalized text contains ALL keywords."""
+        norm = normalize(text)
+        return all(kw.lower() in norm for kw in keywords)
+
+    def has_any_keyword(text: str, *keywords) -> bool:
+        """Check if normalized text contains ANY keyword."""
+        norm = normalize(text)
+        return any(kw.lower() in norm for kw in keywords)
 
     expenses = {
         'fixed_cost_cat_i':     {'total': 0.0, 'items': []},
@@ -4260,63 +4350,175 @@ def parse_category_totals_sheet(file_bytes: bytes) -> Dict[str, Any]:
         'purchase_accounts':    {'total': 0.0, 'items': []},
     }
 
-    # Variable subcategories we keep fixed
-    var_keys = {
-        "open field": "open_field",
-        "lettuce": "lettuce",
-        "strawberry": "strawberry",
-        "raspberry blueberry": "raspberry_blueberry",
-        "raspberry & blueberry": "raspberry_blueberry",
-        "citrus": "citrus",
-        "packing": "packing",
-        "aggregation": "aggregation",
-        "common expenses farm": "common_expenses_farm",
-        "common expenses - farm": "common_expenses_farm",
-    }
+    # Track purchase sub-items to sum them
+    purchase_total = 0.0
+    packing_materials_others = 0.0
 
     for cat, amt in rows:
-        key = n(cat)
         if amt is None:
             amt = 0.0
-        if "fixed cost" in key and re.search(r"\bcat\s*-?\s*i\b|\bcat\s*1\b", key):
-            expenses['fixed_cost_cat_i']['total'] = float(amt)
-            continue
-        if "fixed cost" in key and re.search(r"\bcat\s*-?\s*ii\b|\bcat\s*2\b", key):
-            expenses['fixed_cost_cat_ii']['total'] = float(amt)
-            continue
-        if key.startswith("variable cost"):
-            # variable cost - <sub>
-            sub = key.replace("variable cost", "").strip(" -")
-            for k, sub_key in var_keys.items():
-                if k in sub:
-                    expenses['variable_cost']['subcategories'].setdefault(sub_key, {'total': 0.0, 'items': []})
-                    expenses['variable_cost']['subcategories'][sub_key]['total'] = float(amt)
-                    break
-            continue
+        cat_norm = normalize(cat)
+        cat_upper = cat.upper()
+        
+        print(f"[SUMMARY PARSER] Processing: '{cat}' = {amt}")
+
+        # =====================================================================
+        # FIXED COST CAT - I: "fixed cost cat-i", "fixed cost cat 1", "fixed cost cat - i"
+        # Must have "fixed" + "cost" + "cat" + ("i" or "1") but NOT "ii" or "2"
+        # =====================================================================
+        if has_keywords(cat, "fixed", "cost", "cat"):
+            # Check for Cat-II first (to avoid "i" in "ii" matching Cat-I)
+            if re.search(r'\b(ii|2)\b', cat_norm) or 'cat-ii' in cat_norm.replace(' ', '') or 'cat ii' in cat_norm:
+                expenses['fixed_cost_cat_ii']['total'] = float(amt)
+                print(f"   → FIXED COST CAT - II: {amt}")
+                continue
+            # Cat-I: has "i" or "1" but not "ii"
+            if re.search(r'\b(i|1)\b', cat_norm) or 'cat-i' in cat_norm.replace(' ', ''):
+                expenses['fixed_cost_cat_i']['total'] = float(amt)
+                print(f"   → FIXED COST CAT - I: {amt}")
+                continue
+
+        # =====================================================================
+        # VARIABLE COST SUBCATEGORIES - Match by keywords
+        # =====================================================================
         matched_var = False
-        for k, sub_key in var_keys.items():
-            if key == k or k in key or key.startswith(k):
-                expenses['variable_cost']['subcategories'].setdefault(sub_key, {'total': 0.0, 'items': []})
-                expenses['variable_cost']['subcategories'][sub_key]['total'] = float(amt)
-                matched_var = True
-                break
+
+        # Open Field: "open field" (but not "open field - something else")
+        if has_keywords(cat, "open", "field") and not has_any_keyword(cat, "variable cost"):
+            expenses['variable_cost']['subcategories'].setdefault('open_field', {'total': 0.0, 'items': []})
+            expenses['variable_cost']['subcategories']['open_field']['total'] = float(amt)
+            print(f"   → VARIABLE COST - OPEN FIELD: {amt}")
+            matched_var = True
+
+        # Lettuce: "lettuce"
+        elif has_keywords(cat, "lettuce"):
+            expenses['variable_cost']['subcategories'].setdefault('lettuce', {'total': 0.0, 'items': []})
+            expenses['variable_cost']['subcategories']['lettuce']['total'] = float(amt)
+            print(f"   → VARIABLE COST - LETTUCE: {amt}")
+            matched_var = True
+
+        # Strawberry: "strawberry"
+        elif has_keywords(cat, "strawberry"):
+            expenses['variable_cost']['subcategories'].setdefault('strawberry', {'total': 0.0, 'items': []})
+            expenses['variable_cost']['subcategories']['strawberry']['total'] = float(amt)
+            print(f"   → VARIABLE COST - STRAWBERRY: {amt}")
+            matched_var = True
+
+        # Raspberry & Blueberry: "raspberry" or "blueberry" or "bluberry"
+        elif has_any_keyword(cat, "raspberry", "blueberry", "bluberry"):
+            expenses['variable_cost']['subcategories'].setdefault('raspberry_blueberry', {'total': 0.0, 'items': []})
+            expenses['variable_cost']['subcategories']['raspberry_blueberry']['total'] = float(amt)
+            print(f"   → VARIABLE COST - RASPBERRY & BLUEBERRY: {amt}")
+            matched_var = True
+
+        # Citrus: "citrus"
+        elif has_keywords(cat, "citrus"):
+            expenses['variable_cost']['subcategories'].setdefault('citrus', {'total': 0.0, 'items': []})
+            expenses['variable_cost']['subcategories']['citrus']['total'] = float(amt)
+            print(f"   → VARIABLE COST - CITRUS: {amt}")
+            matched_var = True
+
+        # Packing: "packing" but NOT "packing materials (others)" and NOT "purchase packing materials"
+        elif has_keywords(cat, "packing") and not has_keywords(cat, "materials") and not has_keywords(cat, "purchase"):
+            expenses['variable_cost']['subcategories'].setdefault('packing', {'total': 0.0, 'items': []})
+            expenses['variable_cost']['subcategories']['packing']['total'] = float(amt)
+            print(f"   → VARIABLE COST - PACKING: {amt}")
+            matched_var = True
+
+        # Packing Materials (Others): separate variable cost item - NOT purchase packing materials
+        elif has_keywords(cat, "packing", "materials") and has_any_keyword(cat, "other", "others") and not has_keywords(cat, "purchase"):
+            packing_materials_others = float(amt)
+            print(f"   → PACKING MATERIALS (OTHERS): {amt} (tracked separately)")
+            matched_var = True
+
+        # Aggregation: "aggregation"
+        elif has_keywords(cat, "aggregation"):
+            expenses['variable_cost']['subcategories'].setdefault('aggregation', {'total': 0.0, 'items': []})
+            expenses['variable_cost']['subcategories']['aggregation']['total'] = float(amt)
+            print(f"   → VARIABLE COST - AGGREGATION: {amt}")
+            matched_var = True
+
+        # Common Expenses - Farm: "common expenses" + "farm"
+        elif has_keywords(cat, "common", "expenses", "farm") or has_keywords(cat, "common", "farm"):
+            expenses['variable_cost']['subcategories'].setdefault('common_expenses_farm', {'total': 0.0, 'items': []})
+            expenses['variable_cost']['subcategories']['common_expenses_farm']['total'] = float(amt)
+            print(f"   → VARIABLE COST - COMMON EXPENSES - FARM: {amt}")
+            matched_var = True
+
         if matched_var:
             continue
-        if "distribution cost" in key:
+
+        # =====================================================================
+        # OTHER COST CATEGORIES
+        # =====================================================================
+
+        # Distribution Cost: "distribution" + "cost"
+        if has_keywords(cat, "distribution", "cost") or has_keywords(cat, "distribution"):
             expenses['distribution_cost']['total'] = float(amt)
-        elif "marketing" in key:
+            print(f"   → DISTRIBUTION COST: {amt}")
+            continue
+
+        # Marketing Expenses: "marketing"
+        if has_keywords(cat, "marketing"):
             expenses['marketing_expenses']['total'] = float(amt)
-        elif "vehicle running" in key:
+            print(f"   → MARKETING EXPENSES: {amt}")
+            continue
+
+        # Vehicle Running Cost: "vehicle" + "running" or "vehicle" + "cost"
+        if has_keywords(cat, "vehicle", "running") or has_keywords(cat, "vehicle", "cost"):
             expenses['vehicle_running_cost']['total'] = float(amt)
-        elif key == "others" or "other" in key and "expense" in key:
+            print(f"   → VEHICLE RUNNING COST: {amt}")
+            continue
+
+        # Others: exactly "others" or "other expenses"
+        if cat_norm == "others" or has_keywords(cat, "other", "expense"):
             expenses['others']['total'] = float(amt)
-        elif "wastage" in key and "shortage" in key:
+            print(f"   → OTHERS: {amt}")
+            continue
+
+        # Wastage & Shortage: "wastage" + "shortage"
+        if has_keywords(cat, "wastage", "shortage") or has_keywords(cat, "wastage") and has_keywords(cat, "short"):
             expenses['wastage_shortage']['total'] = float(amt)
-        elif "purchase accounts" in key:
-            expenses['purchase_accounts']['total'] = float(amt)
+            print(f"   → WASTAGE & SHORTAGE: {amt}")
+            continue
+
+        # =====================================================================
+        # PURCHASE ACCOUNTS: Sum all purchase sub-items
+        # "purchase vegetables", "purchase return", "purchase chemicals", etc.
+        # =====================================================================
+        if has_keywords(cat, "purchase"):
+            # This is a purchase sub-item - add to running total
+            purchase_total += float(amt)
+            print(f"   → PURCHASE SUB-ITEM: {amt} (running total: {purchase_total})")
+            continue
+
+        print(f"   → UNMATCHED: '{cat}'")
+
+    # Set purchase accounts total from summed sub-items
+    if purchase_total != 0:
+        expenses['purchase_accounts']['total'] = purchase_total
+        print(f"[SUMMARY PARSER] PURCHASE ACCOUNTS TOTAL: {purchase_total}")
+
+    # Add packing materials (others) to variable cost if present
+    if packing_materials_others > 0:
+        expenses['variable_cost']['subcategories'].setdefault('packing_materials_others', {'total': 0.0, 'items': []})
+        expenses['variable_cost']['subcategories']['packing_materials_others']['total'] = packing_materials_others
 
     # Variable total is sum of subcategories
     expenses['variable_cost']['total'] = sum(v.get('total', 0.0) for v in expenses['variable_cost']['subcategories'].values())
+
+    print(f"[SUMMARY PARSER] === FINAL TOTALS ===")
+    print(f"   FIXED COST CAT - I: {expenses['fixed_cost_cat_i']['total']}")
+    print(f"   FIXED COST CAT - II: {expenses['fixed_cost_cat_ii']['total']}")
+    print(f"   VARIABLE COST TOTAL: {expenses['variable_cost']['total']}")
+    for sub, data in expenses['variable_cost']['subcategories'].items():
+        print(f"      {sub}: {data['total']}")
+    print(f"   DISTRIBUTION COST: {expenses['distribution_cost']['total']}")
+    print(f"   MARKETING EXPENSES: {expenses['marketing_expenses']['total']}")
+    print(f"   VEHICLE RUNNING COST: {expenses['vehicle_running_cost']['total']}")
+    print(f"   OTHERS: {expenses['others']['total']}")
+    print(f"   WASTAGE & SHORTAGE: {expenses['wastage_shortage']['total']}")
+    print(f"   PURCHASE ACCOUNTS: {expenses['purchase_accounts']['total']}")
 
     return {"success": True, "expenses": expenses}
 
