@@ -1280,7 +1280,7 @@ class CostCreate(BaseModel):
     )
     allocation_pool: Optional[str] = Field(
         None,
-        pattern="^(auto|strawberry|lettuce|open_field|raspberry_blueberry|citrus|packing|aggregation|common_expenses_farm|distribution_cost|marketing_expenses|vehicle_running_cost|others|wastage_shortage|purchase_accounts)$"
+        pattern="^(auto|strawberry|lettuce|open_field|raspberry_blueberry|citrus|packing|aggregation|common_expenses_farm|packing_materials_others|distribution_cost|marketing_expenses|vehicle_running_cost|others|wastage_shortage|purchase_accounts)$"
     )
 
 class CostUpdate(BaseModel):
@@ -1294,7 +1294,7 @@ class CostUpdate(BaseModel):
     allocation_denominator_kg: Optional[float] = None
     allocation_pool: Optional[str] = Field(
         None,
-        pattern="^(auto|strawberry|lettuce|open_field|raspberry_blueberry|citrus|packing|aggregation|common_expenses_farm|distribution_cost|marketing_expenses|vehicle_running_cost|others|wastage_shortage|purchase_accounts)$"
+        pattern="^(auto|strawberry|lettuce|open_field|raspberry_blueberry|citrus|packing|aggregation|common_expenses_farm|packing_materials_others|distribution_cost|marketing_expenses|vehicle_running_cost|others|wastage_shortage|purchase_accounts)$"
     )
 
 class CostResponse(BaseModel):
@@ -2914,7 +2914,9 @@ async def get_cost_by_id(cost_id: int, db: Session = Depends(get_db)):
 
 
 class CostBulkUpdateItem(BaseModel):
-    id: int
+    id: Optional[int] = None
+    template_key: Optional[str] = None
+    month: Optional[str] = None
     amount: Optional[float] = None
     applies_to: Optional[str] = None
 
@@ -2923,43 +2925,222 @@ class CostBulkUpdateRequest(BaseModel):
     updates: List[CostBulkUpdateItem]
 
 
+TEMPLATE_COST_META: Dict[str, Dict[str, Any]] = {
+    "fixed_cost_cat_i": {
+        "name": "FIXED COST CAT - I",
+        "category": "fixed_cost_cat_i",
+        "basis": "sales_kg",
+        "is_fixed": "fixed",
+        "pl_classification": "B",
+        "allocation_pool": "auto",
+    },
+    "fixed_cost_cat_ii": {
+        "name": "FIXED COST CAT - II",
+        "category": "fixed_cost_cat_ii",
+        "basis": "sales_kg",
+        "is_fixed": "fixed",
+        "pl_classification": "B",
+        "allocation_pool": "auto",
+    },
+    "open_field": {
+        "name": "VARIABLE COST - OPEN FIELD",
+        "category": "variable_cost",
+        "basis": "sales_kg",
+        "is_fixed": "variable",
+        "pl_classification": "I",
+        "allocation_pool": "open_field",
+    },
+    "lettuce": {
+        "name": "VARIABLE COST - LETTUCE",
+        "category": "variable_cost",
+        "basis": "sales_kg",
+        "is_fixed": "variable",
+        "pl_classification": "I",
+        "allocation_pool": "lettuce",
+    },
+    "strawberry": {
+        "name": "VARIABLE COST - STRAWBERRY",
+        "category": "variable_cost",
+        "basis": "sales_kg",
+        "is_fixed": "variable",
+        "pl_classification": "I",
+        "allocation_pool": "strawberry",
+    },
+    "raspberry_blueberry": {
+        "name": "VARIABLE COST - RASPBERRY & BLUEBERRY",
+        "category": "variable_cost",
+        "basis": "sales_kg",
+        "is_fixed": "variable",
+        "pl_classification": "I",
+        "allocation_pool": "raspberry_blueberry",
+    },
+    "citrus": {
+        "name": "VARIABLE COST - CITRUS",
+        "category": "variable_cost",
+        "basis": "sales_kg",
+        "is_fixed": "variable",
+        "pl_classification": "I",
+        "allocation_pool": "citrus",
+    },
+    "packing": {
+        "name": "VARIABLE COST - PACKING",
+        "category": "variable_cost",
+        "basis": "sales_kg",
+        "is_fixed": "variable",
+        "pl_classification": "I",
+        "allocation_pool": "packing",
+    },
+    "aggregation": {
+        "name": "VARIABLE COST - AGGREGATION",
+        "category": "variable_cost",
+        "basis": "sales_kg",
+        "is_fixed": "variable",
+        "pl_classification": "I",
+        "allocation_pool": "aggregation",
+    },
+    "common_expenses_farm": {
+        "name": "VARIABLE COST - COMMON EXPENSES - FARM",
+        "category": "variable_cost",
+        "basis": "sales_kg",
+        "is_fixed": "variable",
+        "pl_classification": "I",
+        "allocation_pool": "common_expenses_farm",
+    },
+    "packing_materials_others": {
+        "name": "VARIABLE COST - PACKING MATERIALS (OTHERS)",
+        "category": "variable_cost",
+        "basis": "sales_kg",
+        "is_fixed": "variable",
+        "pl_classification": "I",
+        "allocation_pool": "packing_materials_others",
+    },
+    "distribution_cost": {
+        "name": "DISTRIBUTION COST",
+        "category": "distribution_cost",
+        "basis": "sales_kg",
+        "is_fixed": "variable",
+        "pl_classification": "B",
+        "allocation_pool": "distribution_cost",
+    },
+    "marketing_expenses": {
+        "name": "MARKETING EXPENSES",
+        "category": "marketing_expenses",
+        "basis": "sales_kg",
+        "is_fixed": "variable",
+        "pl_classification": "B",
+        "allocation_pool": "marketing_expenses",
+    },
+    "vehicle_running_cost": {
+        "name": "VEHICLE RUNNING COST",
+        "category": "vehicle_running_cost",
+        "basis": "sales_kg",
+        "is_fixed": "variable",
+        "pl_classification": "B",
+        "allocation_pool": "vehicle_running_cost",
+    },
+    "others": {
+        "name": "OTHERS",
+        "category": "others",
+        "basis": "sales_kg",
+        "is_fixed": "variable",
+        "pl_classification": "B",
+        "allocation_pool": "others",
+    },
+    "wastage_shortage": {
+        "name": "WASTAGE & SHORTAGE",
+        "category": "wastage_shortage",
+        "basis": "sales_kg",
+        "is_fixed": "variable",
+        "pl_classification": "B",
+        "allocation_pool": "wastage_shortage",
+    },
+    "purchase_accounts": {
+        "name": "PURCHASE ACCOUNTS",
+        "category": "purchase_accounts",
+        "basis": "direct_cost",
+        "is_fixed": "variable",
+        "pl_classification": "O",
+        "allocation_pool": "purchase_accounts",
+    },
+}
+
+
+def _cost_type_for_applies(applies_to: str, category: str) -> str:
+    if category == "purchase_accounts":
+        return "purchase-only"
+    if applies_to == "inhouse":
+        return "inhouse-only"
+    return "common"
+
+
 @app.put("/api/costs/bulk-update")
 async def bulk_update_costs(payload: CostBulkUpdateRequest, db: Session = Depends(get_db)):
     """
-    Bulk update cost amounts and applies_to settings.
+    Bulk update or create cost rows from the fixed template.
     Must be registered before /api/costs/{cost_id} so 'bulk-update' is not parsed as an id.
     """
     updates = payload.updates
     if not updates:
-        return {"success": False, "message": "No updates provided", "updated": 0}
+        return {"success": False, "message": "No updates provided", "updated": 0, "created": 0}
 
     updated_count = 0
+    created_count = 0
     try:
         for update in updates:
-            cost = db.query(Cost).filter(Cost.id == update.id).first()
-            if not cost:
-                continue
+            applies_to = (update.applies_to or "both").strip().lower()
+            if applies_to not in ("inhouse", "outsourced", "both"):
+                applies_to = "both"
+
+            if update.id:
+                cost = db.query(Cost).filter(Cost.id == update.id).first()
+                if not cost:
+                    continue
+            else:
+                template_key = (update.template_key or "").strip()
+                month = (update.month or "").strip()
+                meta = TEMPLATE_COST_META.get(template_key)
+                if not meta or not month:
+                    continue
+                cost = db.query(Cost).filter(
+                    Cost.name == meta["name"],
+                    Cost.month == month,
+                ).first()
+                if not cost:
+                    cost = Cost(
+                        name=meta["name"],
+                        month=month,
+                        amount=0.0,
+                        original_amount=0.0,
+                        applies_to=applies_to,
+                        cost_type=_cost_type_for_applies(applies_to, meta["category"]),
+                        basis=meta["basis"],
+                        is_fixed=meta["is_fixed"],
+                        category=meta["category"],
+                        pl_classification=meta.get("pl_classification"),
+                        source_file="manual",
+                        allocation_pool=meta.get("allocation_pool"),
+                        allocation_denominator_kg=_lookup_allocation_denominator_kg(meta["name"]),
+                    )
+                    db.add(cost)
+                    db.flush()
+                    created_count += 1
 
             if update.amount is not None:
                 cost.amount = float(update.amount)
                 cost.original_amount = float(update.amount)
 
-            if update.applies_to is not None:
-                applies_to = update.applies_to.strip().lower()
-                if applies_to in ("inhouse", "outsourced", "both"):
-                    cost.applies_to = applies_to
-                    if applies_to == "inhouse":
-                        cost.cost_type = "inhouse-only"
-                    elif applies_to == "outsourced":
-                        cost.cost_type = "outsourced-only"
-                    else:
-                        cost.cost_type = "common"
-
+            cost.applies_to = applies_to
+            cost.cost_type = _cost_type_for_applies(applies_to, cost.category or "")
             cost.updated_at = datetime.utcnow()
             updated_count += 1
 
         db.commit()
-        return {"success": True, "message": f"Updated {updated_count} costs", "updated": updated_count}
+        return {
+            "success": True,
+            "message": f"Saved {updated_count} costs ({created_count} new)",
+            "updated": updated_count,
+            "created": created_count,
+        }
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=str(e))

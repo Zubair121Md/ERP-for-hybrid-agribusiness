@@ -5,6 +5,66 @@ let charts = {};
 let currentData = {};
 let cachedSalesMonths = [];
 let cachedCostMonths = [];
+let cachedCosts = [];
+
+// Fixed cost template — names/keys used for display and manual entry
+const COST_TEMPLATE = [
+    { key: 'fixed_cost_cat_i', label: '1. FIXED COST CAT - I', level: 0, defaultAppliesTo: 'both' },
+    { key: 'fixed_cost_cat_ii', label: '2. FIXED COST CAT - II', level: 0, defaultAppliesTo: 'inhouse' },
+    { key: 'variable_cost', label: '3. VARIABLE COST', level: 0, isParent: true },
+    { key: 'open_field', label: 'A) OPEN FIELD', level: 1, parent: 'variable_cost', defaultAppliesTo: 'inhouse' },
+    { key: 'lettuce', label: 'B) LETTUCE', level: 1, parent: 'variable_cost', defaultAppliesTo: 'inhouse' },
+    { key: 'strawberry', label: 'C) STRAWBERRY', level: 1, parent: 'variable_cost', defaultAppliesTo: 'inhouse' },
+    { key: 'raspberry_blueberry', label: 'D) RASPBERRY & BLUEBERRY', level: 1, parent: 'variable_cost', defaultAppliesTo: 'inhouse' },
+    { key: 'citrus', label: 'E) CITRUS', level: 1, parent: 'variable_cost', defaultAppliesTo: 'inhouse' },
+    { key: 'packing', label: 'F) PACKING', level: 1, parent: 'variable_cost', defaultAppliesTo: 'both' },
+    { key: 'aggregation', label: 'G) AGGREGATION', level: 1, parent: 'variable_cost', defaultAppliesTo: 'outsourced' },
+    { key: 'common_expenses_farm', label: 'H) COMMON EXPENSES - FARM', level: 1, parent: 'variable_cost', defaultAppliesTo: 'inhouse' },
+    { key: 'packing_materials_others', label: 'I) PACKING MATERIALS (OTHERS)', level: 1, parent: 'variable_cost', defaultAppliesTo: 'both' },
+    { key: 'distribution_cost', label: '4. DISTRIBUTION COST', level: 0, defaultAppliesTo: 'both' },
+    { key: 'marketing_expenses', label: '5. MARKETING EXPENSES', level: 0, defaultAppliesTo: 'both' },
+    { key: 'vehicle_running_cost', label: '6. VEHICLE RUNNING COST', level: 0, defaultAppliesTo: 'both' },
+    { key: 'others', label: '7. OTHERS', level: 0, defaultAppliesTo: 'both' },
+    { key: 'wastage_shortage', label: '8. WASTAGE & SHORTAGE', level: 0, defaultAppliesTo: 'outsourced' },
+    { key: 'purchase_accounts', label: '9. PURCHASE ACCOUNTS', level: 0, defaultAppliesTo: 'outsourced' },
+];
+
+function getActiveCostMonth(costs) {
+    const sel = normalizeMonthKey(document.getElementById('allocation-month')?.value || '');
+    if (sel) return sel;
+    const months = [...new Set((costs || []).map(c => normalizeMonthKey(c.month)).filter(Boolean))].sort();
+    if (months.length) return months[months.length - 1];
+    const now = new Date();
+    return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+}
+
+function resolveTemplateKey(cost) {
+    const nameUpper = (cost.name || '').toUpperCase();
+    const cat = (cost.category || '').toLowerCase();
+    if (cat === 'fixed_cost_cat_i' || (nameUpper.includes('FIXED COST CAT') && nameUpper.includes('I') && !nameUpper.includes('II'))) {
+        return 'fixed_cost_cat_i';
+    }
+    if (nameUpper === 'FIXED COST CAT - II' || (cat === 'fixed_cost_cat_ii' && nameUpper === 'FIXED COST CAT - II')) {
+        return 'fixed_cost_cat_ii';
+    }
+    if (nameUpper.includes('OPEN FIELD')) return 'open_field';
+    if (nameUpper.includes('LETTUCE')) return 'lettuce';
+    if (nameUpper.includes('STRAWBERRY') && nameUpper.includes('FIXED COST CAT - II')) return null;
+    if (nameUpper.includes('STRAWBERRY')) return 'strawberry';
+    if (nameUpper.includes('RASPBERRY') || nameUpper.includes('BLUEBERRY')) return 'raspberry_blueberry';
+    if (nameUpper.includes('CITRUS')) return 'citrus';
+    if (nameUpper.includes('PACKING MATERIALS') && nameUpper.includes('OTHER')) return 'packing_materials_others';
+    if (nameUpper.includes('PACKING')) return 'packing';
+    if (nameUpper.includes('AGGREGATION') && !nameUpper.includes('FIXED COST')) return 'aggregation';
+    if (nameUpper.includes('COMMON EXPENSES') && nameUpper.includes('FARM')) return 'common_expenses_farm';
+    if (cat === 'distribution_cost' || nameUpper.includes('DISTRIBUTION')) return 'distribution_cost';
+    if (cat === 'marketing_expenses' || nameUpper.includes('MARKETING')) return 'marketing_expenses';
+    if (cat === 'vehicle_running_cost' || nameUpper.includes('VEHICLE')) return 'vehicle_running_cost';
+    if (cat === 'others' || nameUpper === 'OTHERS') return 'others';
+    if (cat === 'wastage_shortage' || nameUpper.includes('WASTAGE')) return 'wastage_shortage';
+    if (cat === 'purchase_accounts' || nameUpper === 'PURCHASE ACCOUNTS') return 'purchase_accounts';
+    return null;
+}
 let pendingDashboardStats = null;
 
 function normalizeMonthKey(value) {
@@ -964,10 +1024,11 @@ async function loadCosts() {
         
         const response = await fetch(`${API_BASE}/costs`);
         const costs = await response.json();
-        cachedCostMonths = [...new Set((costs || []).map(c => normalizeMonthKey(c.month)).filter(Boolean))];
+        cachedCosts = costs || [];
+        cachedCostMonths = [...new Set(cachedCosts.map(c => normalizeMonthKey(c.month)).filter(Boolean))];
         refreshAllocationMonthOptionsFromCache();
         
-        displayCosts(costs);
+        displayCosts(cachedCosts);
         
     } catch (error) {
         console.error('Error loading costs:', error);
@@ -980,88 +1041,27 @@ async function loadCosts() {
 // Display costs with FIXED TEMPLATE FORMAT and inline editing
 function displayCosts(costs) {
     const container = document.getElementById('costs-table');
-    
-    if (costs.length === 0) {
-        container.innerHTML = '<p>No costs found. Upload a cost sheet Excel file to add costs.</p>';
-        return;
-    }
-    
-    // FIXED TEMPLATE FORMAT - 8 main categories with Variable Cost subcategories
-    const COST_TEMPLATE = [
-        { key: 'fixed_cost_cat_i', label: '1. FIXED COST CAT - I', level: 0, defaultAppliesTo: 'both' },
-        { key: 'fixed_cost_cat_ii', label: '2. FIXED COST CAT - II', level: 0, defaultAppliesTo: 'inhouse', hasSubSplits: true },
-        { key: 'variable_cost', label: '3. VARIABLE COST', level: 0, isParent: true },
-        { key: 'open_field', label: 'A) OPEN FIELD', level: 1, parent: 'variable_cost', defaultAppliesTo: 'inhouse' },
-        { key: 'lettuce', label: 'B) LETTUCE', level: 1, parent: 'variable_cost', defaultAppliesTo: 'inhouse' },
-        { key: 'strawberry', label: 'C) STRAWBERRY', level: 1, parent: 'variable_cost', defaultAppliesTo: 'inhouse' },
-        { key: 'raspberry_blueberry', label: 'D) RASPBERRY & BLUEBERRY', level: 1, parent: 'variable_cost', defaultAppliesTo: 'inhouse' },
-        { key: 'citrus', label: 'E) CITRUS', level: 1, parent: 'variable_cost', defaultAppliesTo: 'inhouse' },
-        { key: 'packing', label: 'F) PACKING', level: 1, parent: 'variable_cost', defaultAppliesTo: 'both' },
-        { key: 'aggregation', label: 'G) AGGREGATION', level: 1, parent: 'variable_cost', defaultAppliesTo: 'outsourced' },
-        { key: 'common_expenses_farm', label: 'H) COMMON EXPENSES - FARM', level: 1, parent: 'variable_cost', defaultAppliesTo: 'inhouse' },
-        { key: 'packing_materials_others', label: 'I) PACKING MATERIALS (OTHERS)', level: 1, parent: 'variable_cost', defaultAppliesTo: 'both' },
-        { key: 'distribution_cost', label: '4. DISTRIBUTION COST', level: 0, defaultAppliesTo: 'both' },
-        { key: 'marketing_expenses', label: '5. MARKETING EXPENSES', level: 0, defaultAppliesTo: 'both' },
-        { key: 'vehicle_running_cost', label: '6. VEHICLE RUNNING COST', level: 0, defaultAppliesTo: 'both' },
-        { key: 'others', label: '7. OTHERS', level: 0, defaultAppliesTo: 'both' },
-        { key: 'wastage_shortage', label: '8. WASTAGE & SHORTAGE', level: 0, defaultAppliesTo: 'outsourced' },
-        { key: 'purchase_accounts', label: '9. PURCHASE ACCOUNTS', level: 0, defaultAppliesTo: 'outsourced' },
-    ];
+    costs = costs || [];
+    const activeMonth = getActiveCostMonth(costs);
 
-    // Map costs to template keys
     const costMap = {};
     costs.forEach(cost => {
-        const nameUpper = (cost.name || '').toUpperCase();
-        const cat = (cost.category || '').toLowerCase();
-        
-        // Match to template key
-        let templateKey = null;
-        if (cat === 'fixed_cost_cat_i' || nameUpper.includes('FIXED COST CAT') && nameUpper.includes('I') && !nameUpper.includes('II')) {
-            templateKey = 'fixed_cost_cat_i';
-        } else if (cat === 'fixed_cost_cat_ii' || nameUpper.includes('FIXED COST CAT') && nameUpper.includes('II')) {
-            templateKey = 'fixed_cost_cat_ii';
-        } else if (nameUpper.includes('OPEN FIELD') || cat.includes('open_field')) {
-            templateKey = 'open_field';
-        } else if (nameUpper.includes('LETTUCE') || cat.includes('lettuce')) {
-            templateKey = 'lettuce';
-        } else if (nameUpper.includes('STRAWBERRY') || cat.includes('strawberry')) {
-            templateKey = 'strawberry';
-        } else if (nameUpper.includes('RASPBERRY') || nameUpper.includes('BLUEBERRY') || cat.includes('raspberry')) {
-            templateKey = 'raspberry_blueberry';
-        } else if (nameUpper.includes('CITRUS') || cat.includes('citrus')) {
-            templateKey = 'citrus';
-        } else if (nameUpper.includes('PACKING MATERIALS') && nameUpper.includes('OTHER')) {
-            templateKey = 'packing_materials_others';
-        } else if (nameUpper.includes('PACKING') && !nameUpper.includes('MATERIALS') || cat.includes('packing') && !cat.includes('materials')) {
-            templateKey = 'packing';
-        } else if (nameUpper.includes('AGGREGATION') || cat.includes('aggregation')) {
-            templateKey = 'aggregation';
-        } else if (nameUpper.includes('COMMON EXPENSES') && nameUpper.includes('FARM') || cat.includes('common_expenses_farm')) {
-            templateKey = 'common_expenses_farm';
-        } else if (cat === 'distribution_cost' || nameUpper.includes('DISTRIBUTION')) {
-            templateKey = 'distribution_cost';
-        } else if (cat === 'marketing_expenses' || nameUpper.includes('MARKETING')) {
-            templateKey = 'marketing_expenses';
-        } else if (cat === 'vehicle_running_cost' || nameUpper.includes('VEHICLE')) {
-            templateKey = 'vehicle_running_cost';
-        } else if (cat === 'others' || nameUpper === 'OTHERS') {
-            templateKey = 'others';
-        } else if (cat === 'wastage_shortage' || nameUpper.includes('WASTAGE')) {
-            templateKey = 'wastage_shortage';
-        } else if (cat === 'purchase_accounts' || nameUpper.includes('PURCHASE')) {
-            templateKey = 'purchase_accounts';
-        }
-        
-        if (templateKey) {
-            if (!costMap[templateKey]) costMap[templateKey] = [];
-            costMap[templateKey].push(cost);
+        const templateKey = resolveTemplateKey(cost);
+        if (!templateKey) return;
+        const month = normalizeMonthKey(cost.month);
+        if (month && month !== activeMonth) return;
+        if (!costMap[templateKey]) costMap[templateKey] = cost;
+        else if ((cost.amount || 0) > (costMap[templateKey].amount || 0)) {
+            costMap[templateKey] = cost;
         }
     });
 
-    // Build HTML with inline editing
     let html = `
-        <div style="margin-bottom: 15px; display: flex; justify-content: space-between; align-items: center;">
-            <h4 style="margin: 0;">Cost Allocation Template</h4>
+        <div style="margin-bottom: 15px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
+            <div>
+                <h4 style="margin: 0;">Cost Allocation Template</h4>
+                <span style="font-size: 12px; color: #6b7280;">Month: <strong>${activeMonth}</strong> — enter amounts manually or upload P&L</span>
+            </div>
             <button class="btn btn-success btn-sm" onclick="saveAllCostChanges()">
                 <i class="fas fa-save"></i> Save All Changes
             </button>
@@ -1079,8 +1079,7 @@ function displayCosts(costs) {
     `;
 
     COST_TEMPLATE.forEach(template => {
-        const costList = costMap[template.key] || [];
-        const cost = costList[0]; // Primary cost for this category
+        const cost = costMap[template.key];
         const amount = cost ? cost.amount : 0;
         const appliesTo = cost ? cost.applies_to : template.defaultAppliesTo;
         const costId = cost ? cost.id : null;
@@ -1102,7 +1101,7 @@ function displayCosts(costs) {
         }
         
         html += `
-            <tr data-cost-id="${costId || ''}" data-template-key="${template.key}" style="${bgColor}">
+            <tr data-cost-id="${costId || ''}" data-template-key="${template.key}" data-month="${activeMonth}" style="${bgColor}">
                 <td style="${indent} ${fontWeight}">${template.label}</td>
                 <td>
                     <input type="number" class="form-control cost-amount-input" 
@@ -1138,7 +1137,7 @@ function displayCosts(costs) {
                             <i class="fas fa-trash"></i>
                         </button>
                     ` : `
-                        <span style="color: #9ca3af; font-size: 11px;">Not uploaded</span>
+                        <span style="color: #9ca3af; font-size: 11px;">Manual entry</span>
                     `}
                 </td>
             </tr>
@@ -1178,15 +1177,15 @@ function displayCosts(costs) {
     container.innerHTML = html;
 }
 
-// Save all cost changes (amounts and applies_to)
+// Save all cost changes (amounts and applies_to) — updates existing or creates new rows
 async function saveAllCostChanges() {
-    const rows = document.querySelectorAll('tr[data-cost-id]');
+    const rows = document.querySelectorAll('tr[data-template-key]');
     const updates = [];
     
     rows.forEach(row => {
         const costId = row.dataset.costId;
         const templateKey = row.dataset.templateKey;
-        if (!costId) return; // Skip rows without existing cost
+        const month = row.dataset.month || getActiveCostMonth(cachedCosts);
         
         const amountInput = row.querySelector('.cost-amount-input');
         const inhouseCheckbox = row.querySelector('.applies-to-checkbox[data-type="inhouse"]');
@@ -1200,8 +1199,18 @@ async function saveAllCostChanges() {
         if (inhouse && !outsourced) appliesTo = 'inhouse';
         else if (!inhouse && outsourced) appliesTo = 'outsourced';
         else if (inhouse && outsourced) appliesTo = 'both';
+        else if (!inhouse && !outsourced) appliesTo = 'both';
         
-        updates.push({ id: parseInt(costId), amount, applies_to: appliesTo });
+        const hasId = costId && costId !== '';
+        if (!hasId && amount <= 0) return;
+        
+        updates.push({
+            id: hasId ? parseInt(costId, 10) : null,
+            template_key: templateKey,
+            month,
+            amount,
+            applies_to: appliesTo
+        });
     });
     
     if (updates.length === 0) {
