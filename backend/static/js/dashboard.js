@@ -5,6 +5,7 @@ let charts = {};
 let currentData = {};
 let cachedSalesMonths = [];
 let cachedCostMonths = [];
+let pendingDashboardStats = null;
 
 function normalizeMonthKey(value) {
     if (value === undefined || value === null) return '';
@@ -148,6 +149,8 @@ function showTab(tabName) {
     // Load data for specific tabs
     if (tabName === 'dashboard') {
         loadDashboardData();
+        // Charts need a visible canvas — refresh after tab is shown
+        requestAnimationFrame(() => refreshDashboardCharts(pendingDashboardStats));
     } else if (tabName === 'products') {
         loadProducts();
     } else if (tabName === 'sales') {
@@ -170,14 +173,15 @@ async function loadDashboardData() {
         const stats = await statsResponse.json();
         
         displayDashboardStats(stats);
-        // P&L adjustment UI disabled for now (use fixed P&L numbers from upload)
+        pendingDashboardStats = stats;
         
         // Load top products
         await loadTopProducts();
         
-        // Update charts
-        updateCharts(stats);
-        await loadDashboardBucketCharts();
+        // Only paint charts when dashboard tab is visible (Chart.js breaks on hidden canvas)
+        if (currentTab === 'dashboard') {
+            refreshDashboardCharts(stats);
+        }
         
     } catch (error) {
         console.error('Error loading dashboard data:', error);
@@ -327,6 +331,60 @@ function displayTopProducts(products) {
 }
 
 // Initialize charts
+function destroyAllCharts() {
+    ['revenue', 'source', 'bucket', 'bucketPie'].forEach((key) => {
+        if (charts[key]) {
+            try { charts[key].destroy(); } catch (_) { /* already destroyed */ }
+            charts[key] = null;
+        }
+    });
+}
+
+function isDashboardTabVisible() {
+    const el = document.getElementById('dashboard');
+    return el && el.classList.contains('active');
+}
+
+function getCanvas(id) {
+    const el = document.getElementById(id);
+    return el && el.isConnected ? el : null;
+}
+
+function ensureChartsInitialized() {
+    const revenueCanvas = getCanvas('revenueChart');
+    const sourceCanvas = getCanvas('sourceChart');
+    if (!revenueCanvas || !sourceCanvas) return false;
+    if (charts.revenue?.canvas !== revenueCanvas || charts.source?.canvas !== sourceCanvas) {
+        destroyAllCharts();
+        initializeCharts();
+    }
+    return Boolean(charts.revenue && charts.source);
+}
+
+function safeChartUpdate(chart, fn) {
+    if (!chart || !chart.canvas || !chart.canvas.isConnected) return;
+    try {
+        fn();
+        chart.update('none');
+    } catch (e) {
+        console.warn('Chart update skipped:', e);
+    }
+}
+
+function refreshDashboardCharts(stats) {
+    if (!isDashboardTabVisible()) return;
+    if (!ensureChartsInitialized()) return;
+    if (stats) updateCharts(stats);
+    loadDashboardBucketCharts();
+    requestAnimationFrame(() => {
+        ['revenue', 'source', 'bucket', 'bucketPie'].forEach((key) => {
+            if (charts[key]?.resize) {
+                try { charts[key].resize(); } catch (_) { /* ignore */ }
+            }
+        });
+    });
+}
+
 function initializeCharts() {
     const palette = {
         purple: 'rgba(139, 92, 246, 0.85)',
@@ -336,8 +394,11 @@ function initializeCharts() {
         blue: 'rgba(59, 130, 246, 0.85)',
     };
 
-    const revenueCtx = document.getElementById('revenueChart').getContext('2d');
-    charts.revenue = new Chart(revenueCtx, {
+    const revenueCanvas = getCanvas('revenueChart');
+    const sourceCanvas = getCanvas('sourceChart');
+    if (!revenueCanvas || !sourceCanvas) return;
+
+    charts.revenue = new Chart(revenueCanvas.getContext('2d'), {
         type: 'bar',
         data: {
             labels: ['Revenue', 'Costs', 'Profit'],
@@ -364,8 +425,9 @@ function initializeCharts() {
         }
     });
     
-    const sourceCtx = document.getElementById('sourceChart').getContext('2d');
-    charts.source = new Chart(sourceCtx, {
+    const sourceCanvas2 = getCanvas('sourceChart');
+    if (!sourceCanvas2) return;
+    charts.source = new Chart(sourceCanvas2.getContext('2d'), {
         type: 'doughnut',
         data: {
             labels: ['Inhouse', 'Outsourced'],
@@ -384,9 +446,9 @@ function initializeCharts() {
         }
     });
 
-    const bucketCtx = document.getElementById('bucketChart');
-    if (bucketCtx) {
-        charts.bucket = new Chart(bucketCtx.getContext('2d'), {
+    const bucketCanvas = getCanvas('bucketChart');
+    if (bucketCanvas) {
+        charts.bucket = new Chart(bucketCanvas.getContext('2d'), {
             type: 'bar',
             data: {
                 labels: [],
@@ -412,9 +474,9 @@ function initializeCharts() {
         });
     }
 
-    const bucketPieCtx = document.getElementById('bucketPieChart');
-    if (bucketPieCtx) {
-        charts.bucketPie = new Chart(bucketPieCtx.getContext('2d'), {
+    const bucketPieCanvas = getCanvas('bucketPieChart');
+    if (bucketPieCanvas) {
+        charts.bucketPie = new Chart(bucketPieCanvas.getContext('2d'), {
             type: 'doughnut',
             data: {
                 labels: [],
@@ -435,6 +497,8 @@ function initializeCharts() {
 }
 
 async function loadDashboardBucketCharts() {
+    if (!isDashboardTabVisible()) return;
+    if (!ensureChartsInitialized()) return;
     if (!charts.bucket && !charts.bucketPie) return;
     try {
         const month = normalizeMonthKey(document.getElementById('allocation-month')?.value || '');
@@ -457,12 +521,12 @@ async function loadDashboardBucketCharts() {
         if (charts.bucket) {
             charts.bucket.data.labels = labels;
             charts.bucket.data.datasets[0].data = kgs;
-            charts.bucket.update();
+            safeChartUpdate(charts.bucket, () => {});
         }
         if (charts.bucketPie) {
             charts.bucketPie.data.labels = labels;
             charts.bucketPie.data.datasets[0].data = pcts;
-            charts.bucketPie.update();
+            safeChartUpdate(charts.bucketPie, () => {});
         }
     } catch (e) {
         console.warn('Bucket charts:', e);
@@ -471,20 +535,20 @@ async function loadDashboardBucketCharts() {
 
 // Update charts with data
 function updateCharts(stats) {
-    // Update revenue chart
-    charts.revenue.data.datasets[0].data = [
-        stats.total_revenue,
-        stats.total_costs,
-        stats.total_profit
-    ];
-    charts.revenue.update();
-    
-    // Update source chart
-    charts.source.data.datasets[0].data = [
-        stats.inhouse_revenue,
-        stats.outsourced_revenue
-    ];
-    charts.source.update();
+    if (!charts.revenue || !charts.source) return;
+    safeChartUpdate(charts.revenue, () => {
+        charts.revenue.data.datasets[0].data = [
+            stats.total_revenue,
+            stats.total_costs,
+            stats.total_profit
+        ];
+    });
+    safeChartUpdate(charts.source, () => {
+        charts.source.data.datasets[0].data = [
+            stats.inhouse_revenue,
+            stats.outsourced_revenue
+        ];
+    });
 }
 
 // Load products
@@ -2542,10 +2606,9 @@ async function resetDatabase() {
                         loadCosts();
                         
                         // Clear any charts
-                        if (charts.revenue) charts.revenue.destroy();
-                        if (charts.source) charts.source.destroy();
-                        if (charts.bucket) charts.bucket.destroy();
-                        if (charts.bucketPie) charts.bucketPie.destroy();
+                        destroyAllCharts();
+                        initializeCharts();
+                        if (pendingDashboardStats) refreshDashboardCharts(pendingDashboardStats);
                         
                     } else {
                         showAlert('Error resetting database', 'error');
