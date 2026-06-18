@@ -58,9 +58,12 @@
             position: fixed;
             height: 100vh;
             overflow-y: auto;
+            overflow-x: hidden;
             z-index: 1000;
             transition: width 0.3s ease;
             border-right: 1px solid rgba(139, 92, 246, 0.2);
+            display: flex;
+            flex-direction: column;
         }
         
         .sidebar.collapsed {
@@ -93,29 +96,28 @@
         }
         
         .sidebar-toggle {
-            position: absolute;
-            bottom: 20px;
-            right: -15px;
-            width: 30px;
-            height: 30px;
-            background: #6B21A8;
-            border: 3px solid white;
-            border-radius: 50%;
-            color: white;
+            width: 100%;
+            height: 40px;
+            margin: 0;
+            background: rgba(255, 255, 255, 0.08);
+            border: 1px solid rgba(255, 255, 255, 0.12);
+            border-radius: 10px;
+            color: #e9d5ff;
             cursor: pointer;
             display: flex;
             align-items: center;
             justify-content: center;
-            box-shadow: 0 4px 12px rgba(0,0,0,0.25);
-            transition: all 0.3s ease;
-            z-index: 1001;
-            font-size: 12px;
+            gap: 8px;
+            transition: all 0.2s ease;
+            font-size: 13px;
+            font-weight: 500;
+            font-family: inherit;
         }
         
         .sidebar-toggle:hover {
-            background: #7C3AED;
-            transform: scale(1.15);
-            box-shadow: 0 6px 16px rgba(0,0,0,0.3);
+            background: rgba(139, 92, 246, 0.35);
+            border-color: rgba(167, 139, 250, 0.5);
+            color: white;
         }
         
         .sidebar-toggle i {
@@ -123,12 +125,25 @@
             font-size: 12px;
         }
         
+        .sidebar.collapsed .sidebar-toggle span {
+            display: none;
+        }
+        
         .sidebar.collapsed .sidebar-toggle {
-            right: -15px;
+            width: 44px;
+            margin: 0 auto;
+            border-radius: 10px;
         }
         
         .sidebar.collapsed .sidebar-toggle i {
             transform: rotate(180deg);
+        }
+        
+        .sidebar-footer {
+            margin-top: auto;
+            padding: 16px;
+            border-top: 1px solid rgba(255, 255, 255, 0.08);
+            flex-shrink: 0;
         }
         
         .sidebar-header {
@@ -204,7 +219,9 @@
         }
         
         .sidebar-nav {
-            padding: 12px 10px 24px;
+            flex: 1;
+            padding: 12px 10px 8px;
+            overflow-y: auto;
         }
         
         .nav-item {
@@ -274,7 +291,7 @@
         /* Main Content */
         .main-content {
             flex: 1;
-            margin-left: 280px;
+            margin-left: 260px;
             background: var(--light-bg);
             min-height: 100vh;
             transition: margin-left 0.3s ease;
@@ -350,19 +367,19 @@
         }
         
         .stat-card {
-            background: white;
-            padding: 32px 24px;
-            border-radius: 16px;
-            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1), 0 1px 2px rgba(0, 0, 0, 0.06);
-            transition: all 0.3s ease;
+            background: #ffffff;
+            padding: 28px 24px;
+            border-radius: 18px;
+            box-shadow: 0 1px 2px rgba(15, 23, 42, 0.06), 0 8px 24px rgba(15, 23, 42, 0.06);
+            transition: transform 0.25s ease, box-shadow 0.25s ease;
             position: relative;
             overflow: hidden;
-            border: 1px solid #f1f5f9;
+            border: 1px solid rgba(226, 232, 240, 0.9);
         }
         
         .stat-card:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 10px 25px rgba(0, 0, 0, 0.1), 0 4px 6px rgba(0, 0, 0, 0.05);
+            transform: translateY(-3px);
+            box-shadow: 0 12px 32px rgba(15, 23, 42, 0.1);
         }
         
         .stat-card::before {
@@ -371,37 +388,50 @@
             top: 0;
             left: 0;
             right: 0;
-            height: 4px;
+            height: 3px;
             background: linear-gradient(90deg, #8B5CF6, #10B981);
         }
         
-        .stat-card.revenue::before { background: linear-gradient(90deg, #3B82F6, #1E40AF); }
-        .stat-card.costs::before { background: linear-gradient(90deg, #EF4444, #B91C1C); }
-        .stat-card.profit::before { background: linear-gradient(90deg, #10B981, #047857); }
-        .stat-card.products::before { background: linear-gradient(90deg, #F59E0B, #D97706); }
+        .stat-card.revenue::before { background: linear-gradient(90deg, #3B82F6, #6366F1); }
+        .stat-card.costs::before { background: linear-gradient(90deg, #F43F5E, #EF4444); }
+        .stat-card.profit::before { background: linear-gradient(90deg, #10B981, #059669); }
+        .stat-card.products::before { background: linear-gradient(90deg, #F59E0B, #EA580C); }
         
         .stat-header {
             display: flex;
             justify-content: space-between;
-            align-items: center;
-            margin-bottom: 15px;
+            align-items: flex-start;
+            margin-bottom: 18px;
         }
         
         .stat-title {
-            font-size: 0.9em;
-            color: var(--light-text);
+            font-size: 0.8rem;
+            color: #64748b;
             font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
         }
+        
+        .stat-icon-wrap {
+            width: 44px;
+            height: 44px;
+            border-radius: 12px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.1rem;
+            flex-shrink: 0;
+        }
+        
+        .stat-card.revenue .stat-icon-wrap { background: #eff6ff; color: #2563eb; }
+        .stat-card.costs .stat-icon-wrap { background: #fff1f2; color: #e11d48; }
+        .stat-card.profit .stat-icon-wrap { background: #ecfdf5; color: #059669; }
+        .stat-card.products .stat-icon-wrap { background: #fffbeb; color: #d97706; }
         
         .stat-icon {
-            font-size: 1.5em;
-            opacity: 0.8;
+            font-size: 1.1em;
+            opacity: 1;
         }
-        
-        .stat-card.revenue .stat-icon { color: #3B82F6; }
-        .stat-card.costs .stat-icon { color: #EF4444; }
-        .stat-card.profit .stat-icon { color: #10B981; }
-        .stat-card.products .stat-icon { color: #F59E0B; }
         
         .stat-value {
             font-size: 2.4em;
@@ -551,9 +581,9 @@
 
         .upload-panel {
             background: white;
-            border-radius: 16px;
-            box-shadow: var(--shadow);
-            border: 1px solid var(--border-color);
+            border-radius: 18px;
+            box-shadow: 0 1px 2px rgba(15, 23, 42, 0.05), 0 8px 24px rgba(15, 23, 42, 0.06);
+            border: 1px solid rgba(226, 232, 240, 0.95);
             overflow: hidden;
         }
 
@@ -564,7 +594,7 @@
             gap: 20px;
             padding: 24px 28px;
             border-bottom: 1px solid var(--border-color);
-            background: linear-gradient(135deg, #faf5ff 0%, #f8fafc 100%);
+            background: linear-gradient(135deg, #faf5ff 0%, #f8fafc 55%, #ffffff 100%);
         }
 
         .upload-panel__header h3 {
@@ -666,8 +696,8 @@
 
         .schema-card {
             background: #f8fafc;
-            border-radius: 12px;
-            border: 1px solid var(--border-color);
+            border: 1px solid #e2e8f0;
+            border-radius: 14px;
             overflow: hidden;
             margin-bottom: 24px;
         }
@@ -1047,9 +1077,6 @@
                         <div class="company-tagline">FARMS</div>
                     </div>
                 </div>
-                <button class="sidebar-toggle" onclick="toggleSidebar()">
-                    <i class="fas fa-chevron-left"></i>
-                </button>
             </div>
             <div class="sidebar-nav">
                 <a href="#" class="nav-item active" data-tab="dashboard">
@@ -1084,6 +1111,12 @@
                     <i class="fas fa-sliders-h"></i>
                     <span>Settings</span>
                 </a>
+            </div>
+            <div class="sidebar-footer">
+                <button class="sidebar-toggle" onclick="toggleSidebar()" title="Collapse sidebar">
+                    <i class="fas fa-chevron-left"></i>
+                    <span>Collapse menu</span>
+                </button>
             </div>
         </nav>
 
@@ -1261,7 +1294,7 @@
                             <header class="upload-panel__header">
                                 <div>
                                     <h3><i class="fas fa-sitemap" style="color: var(--primary-color); margin-right: 8px;"></i>Product–Section Mapping</h3>
-                                    <p>Maps products to farm sections for VARIABLE COST and FC-II Open Field attribution.</p>
+                                    <p>Maps products to farm sections for <strong>all VARIABLE COST pools</strong> (Lettuce, Strawberry, Citrus, Open Field, Berries) and FC-II Open Field.</p>
                                 </div>
                                 <div class="upload-panel__actions">
                                     <button class="btn btn-primary btn-sm" onclick="document.getElementById('mapping-file-input').click()">
@@ -1277,9 +1310,8 @@
                                 <div class="schema-card" style="margin-bottom: 20px;">
                                     <div class="schema-card__title"><i class="fas fa-info-circle"></i> Excel format</div>
                                     <div style="padding: 16px 20px; color: var(--light-text); font-size: 0.9rem; line-height: 1.7;">
-                                        Two columns: <strong>Section</strong> (e.g. Open Field, Polyhouse C) and <strong>Product</strong> (exact name as in sales upload).
-                                        Used for <strong>VARIABLE COST – OPEN FIELD</strong>, <strong>Polyhouse</strong>, and <strong>FC-II Open Field</strong> pools.
-                                        <strong>Lettuce / Greens</strong> uses the allowlist below (plus Polyhouse mappings as confirmation).
+                                        Two columns: <strong>Section</strong> (e.g. Open Field, Polyhouse C, Strawberry, Citrus, Lettuce, Greens) and <strong>Product</strong> (exact name as in sales upload).
+                                        Mappings are <strong>saved to the database</strong> and used when you run allocation. Re-run allocation after uploading or changing mappings.
                                     </div>
                                 </div>
 
@@ -1299,9 +1331,14 @@
                                             <i class="fas fa-table"></i> Current mappings
                                             <span id="mapping-count-badge" style="font-size:0.8rem;font-weight:500;color:#64748b;margin-left:8px;"></span>
                                         </h4>
-                                        <button type="button" class="btn btn-secondary btn-sm" onclick="loadSectionMappings()">
-                                            <i class="fas fa-sync-alt"></i> Refresh
-                                        </button>
+                                        <div style="display:flex;gap:8px;">
+                                            <button type="button" class="btn btn-info btn-sm" onclick="showAllocationDiagnostics()" title="Show allocation pool status">
+                                                <i class="fas fa-stethoscope"></i> Diagnostics
+                                            </button>
+                                            <button type="button" class="btn btn-secondary btn-sm" onclick="loadSectionMappings()">
+                                                <i class="fas fa-sync-alt"></i> Refresh
+                                            </button>
+                                        </div>
                                     </div>
                                     <div id="section-mappings-table" style="max-height: 360px; overflow-y: auto; border: 1px solid var(--border-color); border-radius: 12px; background: #fff;">
                                         <p style="padding: 24px; text-align: center; color: #94a3b8;">Loading mappings…</p>
@@ -1809,7 +1846,7 @@
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/chart.js@3.9.1/dist/chart.min.js"></script>
-    <script src="static/js/dashboard.js?v=20260618190000"></script>
+    <script src="static/js/dashboard.js?v=20260618210000"></script>
     <script src="static/js/upload-fix.js?v=20260521120000"></script>
     
     <!-- INLINE UPLOAD FIX - This will definitely work -->
@@ -2244,10 +2281,14 @@
             const data = await response.json();
             
             if (data.success) {
-                if (messageDiv) messageDiv.textContent = 'Upload successful';
-                if (statsDiv) statsDiv.textContent = `Created ${data.mappings_created} mappings${data.rows_skipped > 0 ? ` (${data.rows_skipped} skipped)` : ''}`;
+                if (messageDiv) messageDiv.textContent = 'Upload successful — mappings saved';
+                const allowlistNote = (data.lettuce_greens_count || data.open_field_count)
+                    ? ` · Allowlists synced (${data.lettuce_greens_count || 0} greens, ${data.open_field_count || 0} open field)`
+                    : '';
+                if (statsDiv) statsDiv.textContent = `Saved ${data.mappings_created} mappings${data.rows_skipped > 0 ? ` (${data.rows_skipped} skipped)` : ''}${allowlistNote}. Re-run allocation to apply.`;
                 if (alertBox) alertBox.className = 'upload-alert upload-alert--success';
                 if (typeof loadSectionMappings === 'function') loadSectionMappings();
+                if (typeof loadProductAllowlists === 'function') loadProductAllowlists();
             } else {
                 if (messageDiv) messageDiv.textContent = 'Upload failed';
                 if (statsDiv) statsDiv.textContent = data.message || 'Unknown error';

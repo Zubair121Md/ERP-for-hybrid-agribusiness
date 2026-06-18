@@ -233,6 +233,9 @@ function formatQtyDisplay(productName, unit, quantity) {
 // Initialize dashboard
 document.addEventListener('DOMContentLoaded', function() {
     initializeSidebar();
+    if (typeof loadSectionMappings === 'function') {
+        loadSectionMappings();
+    }
     initializeDashboard();
     loadDashboardData();
     setupEventListeners();
@@ -386,34 +389,34 @@ function displayDashboardStats(stats) {
         <div class="stat-card products">
             <div class="stat-header">
                 <span class="stat-title">Total Products</span>
-                <i class="fas fa-apple-alt stat-icon"></i>
+                <div class="stat-icon-wrap"><i class="fas fa-apple-alt stat-icon"></i></div>
             </div>
             <div class="stat-value">${stats.total_products}</div>
             <div class="stat-change positive">
-                <i class="fas fa-arrow-up"></i>
+                <i class="fas fa-check-circle"></i>
                 ${stats.active_products} active
             </div>
         </div>
         
         <div class="stat-card revenue">
             <div class="stat-header">
-                <span class="stat-title">Net revenue</span>
-                <i class="fas fa-chart-line stat-icon"></i>
+                <span class="stat-title">Net Revenue</span>
+                <div class="stat-icon-wrap"><i class="fas fa-chart-line stat-icon"></i></div>
             </div>
             <div class="stat-value">₹${formatNumber(netRev)}</div>
             <div class="stat-change positive">
                 <i class="fas fa-percent"></i>
                 ${(stats.revenue_margin || 0).toFixed(1)}% on sales
             </div>
-            <div class="stat-change" style="font-size: 0.8rem; margin-top: 6px; line-height: 1.35;">
+            <div class="stat-change" style="font-size: 0.78rem; margin-top: 8px; line-height: 1.4; color: #94a3b8;">
                 ${revDetail}
             </div>
         </div>
         
         <div class="stat-card costs">
             <div class="stat-header">
-                <span class="stat-title">Total costs</span>
-                <i class="fas fa-dollar-sign stat-icon"></i>
+                <span class="stat-title">Total Costs</span>
+                <div class="stat-icon-wrap"><i class="fas fa-coins stat-icon"></i></div>
             </div>
             <div class="stat-value">₹${formatNumber(econCost)}</div>
             <div class="stat-change">
@@ -424,8 +427,8 @@ function displayDashboardStats(stats) {
         
         <div class="stat-card profit">
             <div class="stat-header">
-                <span class="stat-title">Net profit</span>
-                <i class="fas fa-trophy stat-icon"></i>
+                <span class="stat-title">Net Profit</span>
+                <div class="stat-icon-wrap"><i class="fas fa-trophy stat-icon"></i></div>
             </div>
             <div class="stat-value">₹${formatNumber(stats.total_profit || 0)}</div>
             <div class="stat-change ${(stats.total_profit || 0) >= 0 ? 'positive' : 'negative'}">
@@ -1154,11 +1157,24 @@ function displayCosts(costs) {
     const activeMonth = getActiveCostMonth(costs);
 
     const costMap = {};
+    const unmappedCosts = [];
     costs.forEach(cost => {
-        const templateKey = resolveTemplateKey(cost);
-        if (!templateKey) return;
         const month = normalizeMonthKey(cost.month);
         if (month && month !== activeMonth) return;
+        
+        // Skip FC-II bucket rows (they're shown under FC-II total)
+        const nameUpper = (cost.name || '').toUpperCase();
+        if (nameUpper.startsWith('FIXED COST CAT - II -')) return;
+        
+        // Skip variable cost item details (they're line items under parent)
+        if ((cost.category || '').toLowerCase() === 'variable_cost_item') return;
+        
+        const templateKey = resolveTemplateKey(cost);
+        if (!templateKey) {
+            // Track costs that don't match template for display
+            unmappedCosts.push(cost);
+            return;
+        }
         if (!costMap[templateKey]) costMap[templateKey] = cost;
         else if ((cost.amount || 0) > (costMap[templateKey].amount || 0)) {
             costMap[templateKey] = cost;
@@ -1267,16 +1283,48 @@ function displayCosts(costs) {
 
     html += '</tbody></table>';
     
-    // Add totals summary
+    // Add totals summary - only include costs that match the template
     let totalCosts = 0;
     let inhouseCosts = 0;
     let outsourcedCosts = 0;
-    costs.forEach(c => {
+    Object.values(costMap).forEach(c => {
         totalCosts += c.amount || 0;
         if (c.applies_to === 'inhouse') inhouseCosts += c.amount || 0;
         else if (c.applies_to === 'outsourced') outsourcedCosts += c.amount || 0;
         else { inhouseCosts += (c.amount || 0) / 2; outsourcedCosts += (c.amount || 0) / 2; }
     });
+    
+    // Add unmapped costs section if any exist
+    if (unmappedCosts.length > 0) {
+        let unmappedTotal = 0;
+        unmappedCosts.forEach(c => { unmappedTotal += c.amount || 0; });
+        
+        html += `
+            <tr style="background: #fef2f2;">
+                <td colspan="4" style="padding: 12px; font-size: 14px; border-top: 2px solid #f87171;">
+                    <strong style="color: #b91c1c;">⚠️ Unrecognized Costs (${unmappedCosts.length})</strong>
+                    <span style="font-size: 11px; color: #991b1b; margin-left: 8px;">These costs don't match standard template categories</span>
+                </td>
+            </tr>
+        `;
+        unmappedCosts.forEach(cost => {
+            html += `
+                <tr style="background: #fef2f2;">
+                    <td style="padding-left: 40px; color: #b91c1c;">${cost.name}</td>
+                    <td style="text-align: right; color: #b91c1c;">₹${formatNumber(cost.amount || 0)}</td>
+                    <td style="color: #6b7280; font-size: 11px;">${cost.applies_to || 'both'}</td>
+                    <td>
+                        ${cost.id ? `
+                            <button class="btn btn-sm btn-danger" onclick="deleteCost(${cost.id})" title="Delete">
+                                <i class="fas fa-trash"></i>
+                            </button>
+                        ` : ''}
+                    </td>
+                </tr>
+            `;
+        });
+        totalCosts += unmappedTotal;
+    }
     
     html += `
         <div style="margin-top: 20px; padding: 15px; background: #f9fafb; border-radius: 8px; display: flex; gap: 30px;">
@@ -1908,6 +1956,45 @@ async function loadSectionMappings() {
 
 window.loadSectionMappings = loadSectionMappings;
 window.saveProductAllowlists = saveProductAllowlists;
+
+async function showAllocationDiagnostics() {
+    try {
+        const res = await fetch(`${API_BASE}/allocation-pool-diagnostics`);
+        if (!res.ok) throw new Error('Failed to load diagnostics');
+        const data = await res.json();
+        
+        let html = '<h4 style="margin:0 0 16px;">Allocation Pool Diagnostics</h4>';
+        html += `<p style="font-size:13px;color:#6b7280;margin-bottom:16px;">
+            DB Mappings: <strong>${data._db_mapping_count || 0}</strong> |
+            Lettuce Allowlist: <strong>${data._allowlists?.lettuce_greens_count || 0}</strong> |
+            Open Field Allowlist: <strong>${data._allowlists?.open_field_count || 0}</strong>
+        </p>`;
+        
+        html += '<table class="table" style="font-size:13px;"><thead><tr><th>Pool</th><th>Has DB Mappings</th><th>Mapped Products</th></tr></thead><tbody>';
+        
+        const pools = ['lettuce', 'strawberry', 'citrus', 'open_field', 'raspberry_blueberry', 'common_expenses_farm'];
+        for (const pool of pools) {
+            const info = data[pool] || {};
+            const hasMap = info.has_db_mappings ? '✅ Yes' : '❌ No (using fallback)';
+            const products = info.mapped_products?.slice(0, 5).join(', ') || 'None';
+            const more = info.mapped_product_count > 5 ? `... +${info.mapped_product_count - 5} more` : '';
+            
+            html += `<tr>
+                <td><strong>${pool.replace(/_/g, ' ').toUpperCase()}</strong></td>
+                <td>${hasMap}</td>
+                <td style="font-size:11px;color:#6b7280;">${products} ${more}</td>
+            </tr>`;
+        }
+        html += '</tbody></table>';
+        
+        html += '<p style="font-size:12px;color:#94a3b8;margin-top:16px;">If "Has DB Mappings" is No, the system uses allowlist/name-based matching as fallback.</p>';
+        
+        showAlert(html, 'info', 15000);
+    } catch (e) {
+        showAlert('Error loading diagnostics: ' + e.message, 'error');
+    }
+}
+window.showAllocationDiagnostics = showAllocationDiagnostics;
 
 // Allocation functions
 async function runAllocation() {

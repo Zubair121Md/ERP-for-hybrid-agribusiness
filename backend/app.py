@@ -1443,6 +1443,159 @@ def get_db():
     finally:
         db.close()
 
+VARIABLE_COST_POOLS = frozenset({
+    "open_field", "lettuce", "strawberry", "raspberry_blueberry", "citrus",
+    "packing", "aggregation", "common_expenses_farm", "packing_materials_others",
+})
+
+
+def _normalize_mapping_section(section: Optional[str]) -> str:
+    raw = (section or "").strip()
+    if not raw:
+        return ""
+    low = raw.lower()
+    known = {
+        "open field": "Open Field",
+        "strawberry": "Strawberry",
+        "citrus": "Citrus",
+        "lettuce": "Lettuce",
+        "greens": "Greens",
+        "aggregation": "Aggregation",
+        "packing": "Packing",
+    }
+    if low in known:
+        return known[low]
+    if low.startswith("polyhouse"):
+        return " ".join(part.capitalize() for part in raw.split())
+    return " ".join(part.capitalize() for part in raw.split())
+
+
+def _section_matches_pool(section: str, pool: str) -> bool:
+    sl = (section or "").strip().lower()
+    if pool in ("open_field", "common_expenses_farm"):
+        return sl == "open field"
+    if pool == "lettuce":
+        return sl.startswith("polyhouse") or sl in ("lettuce", "greens")
+    if pool == "strawberry":
+        return sl == "strawberry"
+    if pool == "citrus":
+        return sl == "citrus"
+    if pool == "raspberry_blueberry":
+        return "berry" in sl or sl in ("raspberry", "blueberry", "other berries")
+    if pool in ("packing", "packing_materials_others"):
+        return sl == "packing"
+    if pool == "aggregation":
+        return sl == "aggregation"
+    return False
+
+
+def _infer_variable_pool_from_cost(cost) -> Optional[str]:
+    pool = (getattr(cost, "allocation_pool", None) or "").strip().lower()
+    if pool and pool != "auto" and pool in VARIABLE_COST_POOLS:
+        return pool
+    name = (cost.name or "").upper()
+    cat = (cost.category or "").lower()
+    if "VARIABLE COST" not in name and cat not in ("variable_cost", "variable_cost_item"):
+        return None
+    # Order matters - check more specific patterns first
+    if "PACKING MATERIALS" in name:
+        return "packing_materials_others"
+    if "COMMON EXPENSES" in name:
+        return "common_expenses_farm"
+    if "OPEN FIELD" in name:
+        return "open_field"
+    if "LETTUCE" in name:
+        return "lettuce"
+    if "STRAWBERRY" in name:
+        return "strawberry"
+    if "RASPBERRY" in name or "BLUEBERRY" in name or "BLUBERRY" in name:
+        return "raspberry_blueberry"
+    if "CITRUS" in name:
+        return "citrus"
+    if "PACKING" in name:
+        return "packing"
+    if "AGGREGATION" in name:
+        return "aggregation"
+    return None
+
+
+def _load_pool_product_keys(db: Session, pool: str) -> set:
+    keys: set = set()
+    for m in db.query(ProductSectionMapping).all():
+        if _section_matches_pool(m.section, pool):
+            key = _canonical_product_key(m.product_name)
+            if key:
+                keys.add(key)
+    return keys
+
+
+def _build_pool_mapping_cache(db: Session) -> Dict[str, tuple]:
+    cache: Dict[str, tuple] = {}
+    # Include ALL variable cost pools that need section-based mapping
+    for pool in ("open_field", "lettuce", "strawberry", "citrus", "raspberry_blueberry", "common_expenses_farm"):
+        keys = _load_pool_product_keys(db, pool)
+        cache[pool] = (keys, len(keys) > 0)
+    return cache
+
+
+def _product_matches_variable_pool(
+    product_name: str,
+    pool: str,
+    pool_mapped_keys: set,
+    db_has_pool_mappings: bool,
+) -> bool:
+    """
+    Check if a product matches a variable cost pool.
+    
+    If mappings exist for this pool (db_has_pool_mappings=True), ONLY use mappings.
+    Otherwise, fall back to allowlist (for open_field, lettuce) or name-based matching.
+    """
+    base = _base_product_display_name(product_name)
+    key = _canonical_product_key(base)
+    name_upper = _normalize_product_name_upper(base)
+
+    # If mappings exist for this pool, strictly use them
+    if db_has_pool_mappings:
+        return bool(key) and key in pool_mapped_keys
+
+    # No mappings - use fallback logic
+    if pool in ("open_field", "common_expenses_farm"):
+        return is_open_field_product_name(product_name)
+    if pool == "lettuce":
+        return is_lettuce_greens_product_name(product_name)
+    if pool == "strawberry":
+        return "STRAWBERRY" in name_upper
+    if pool == "citrus":
+        citrus_keywords = ("CITRUS", "ORANGE", "MOSAMBI", "LEMON", "LIME", "MANDARIN", "KINNOW")
+        return any(kw in name_upper for kw in citrus_keywords)
+    if pool == "raspberry_blueberry":
+        return any(kw in name_upper for kw in ("RASPBERRY", "BLUEBERRY", "BLUBERRY"))
+    return False
+
+
+def _sync_allowlists_from_section_mappings(db: Session) -> Dict[str, Any]:
+    lettuce_products: List[str] = []
+    open_field_products: List[str] = []
+    for m in db.query(ProductSectionMapping).all():
+        sec = (m.section or "").strip().lower()
+        name = (m.product_name or "").strip()
+        if not name:
+            continue
+        if sec.startswith("polyhouse") or sec in ("lettuce", "greens"):
+            lettuce_products.append(name)
+        elif sec == "open field":
+            open_field_products.append(name)
+    existing = load_product_allowlists()
+    payload: Dict[str, Any] = {}
+    if lettuce_products:
+        payload["lettuce_greens_products"] = sorted(set(lettuce_products))
+    if open_field_products:
+        payload["open_field_products"] = open_field_products
+    if not payload:
+        return existing
+    return save_product_allowlists(payload)
+
+
 # Enhanced Cost Allocation Engine
 class CostAllocationEngine:
     def __init__(self, db: Session, purchase_cost_mode: str = "direct"):
@@ -1518,7 +1671,7 @@ class CostAllocationEngine:
             # No overhead cap - let real P&L costs flow through to show true profitability
             allocated_so_far: Dict[int, float] = {pid: 0.0 for pid in product_map.keys()}
             cap_by_product: Dict[int, float] = {}
-            # No cap applied - removed artificial limit to show real cost allocation
+            self._pool_mapping_cache = _build_pool_mapping_cache(self.db)
 
             # Process each cost
             for cost in costs:
@@ -1622,19 +1775,16 @@ class CostAllocationEngine:
                     applicable[product_id] = product
             return applicable
 
-        # WASTAGE & SHORTAGE: physical wastage on purchased stock → outsourced only
         if "WASTAGE" in cost_name_upper and "SHORTAGE" in cost_name_upper:
             cost.applies_to = "outsourced"
 
         manual_pool = (getattr(cost, "allocation_pool", None) or "").lower().strip()
-        manual_section_set = False
-        
-        # FC II: pooled rupee amount for one bucket; split only among that bucket's products by sales kg
+        if manual_pool == "wastage_shortage":
+            cost.applies_to = "outsourced"
+
         is_fixed_cost_cat_ii = _is_fixed_cost_cat_ii_name(cost.name)
         fixed_cost_category = None
-        
         if is_fixed_cost_cat_ii:
-            # Extract category from cost name based on keywords (no hardcoded percentages)
             if "STRAWBERRY" in cost_name_upper:
                 fixed_cost_category = "strawberry"
             elif "GREENS" in cost_name_upper:
@@ -1644,261 +1794,76 @@ class CostAllocationEngine:
             elif "AGGREGATION" in cost_name_upper:
                 fixed_cost_category = "aggregation"
 
-        # Optional manual pool override from UI (must not be overwritten by name parsing below)
-        if manual_pool and manual_pool != "auto":
-            if manual_pool in {"strawberry", "lettuce", "open_field", "raspberry_blueberry", "citrus", "packing", "aggregation", "common_expenses_farm"}:
-                is_variable_cost = True
-                manual_section_set = True
-                if manual_pool == "strawberry":
-                    cost_section = "Strawberry"
-                elif manual_pool == "lettuce":
-                    cost_section = "Lettuce"
-                elif manual_pool == "open_field":
-                    cost_section = "Open Field"
-                elif manual_pool == "raspberry_blueberry":
-                    cost_section = "Other Berries"
-                elif manual_pool == "citrus":
-                    cost_section = "Citrus"
-                elif manual_pool == "packing":
-                    cost_section = "Packing"
-                elif manual_pool == "aggregation":
-                    cost_section = "Aggregation"
-                elif manual_pool == "common_expenses_farm":
-                    cost_section = "Open Field"
-            elif manual_pool in {"distribution_cost", "marketing_expenses", "vehicle_running_cost", "others", "wastage_shortage", "purchase_accounts"}:
-                # These are global category pools; keep applies_to filtering only.
-                # WASTAGE & SHORTAGE: always outsourced only (physical wastage is on purchased stock).
-                if manual_pool == "wastage_shortage":
-                    cost.applies_to = "outsourced"
-                is_variable_cost = False
-                manual_section_set = True
+        variable_pool = _infer_variable_pool_from_cost(cost)
+        pool_cache = getattr(self, "_pool_mapping_cache", None) or {}
         
-        # Derive section from cost name when no manual pool override
-        is_variable_cost = False
-        cost_section = None
-        if not manual_section_set:
-            is_variable_cost = "VARIABLE COST" in cost_name_upper
-            if is_variable_cost:
-                # Extract section from cost name (e.g., "VARIABLE COST - OPEN FIELD" -> "Open Field")
-                cost_name_upper = cost.name.upper()
-                if "OPEN FIELD" in cost_name_upper:
-                    cost_section = "Open Field"
-                elif "LETTUCE" in cost_name_upper:
-                    cost_section = "Lettuce"
-                elif "POLYHOUSE C" in cost_name_upper or "POLYHOUSE" in cost_name_upper:
-                    cost_section = "Polyhouse"
-                elif "STRAWBERRY" in cost_name_upper:
-                    cost_section = "Strawberry"
-                elif "RASPBERRY" in cost_name_upper or "BLUEBERRY" in cost_name_upper or "BLUBERRY" in cost_name_upper:
-                    cost_section = "Other Berries"
-                elif "CITRUS" in cost_name_upper:
-                    cost_section = "Citrus"
-                elif "PACKING" in cost_name_upper:
-                    cost_section = "Packing"
-                elif "AGGREGATION" in cost_name_upper:
-                    cost_section = "Aggregation"
-        
-        # Load section mappings if needed (for VARIABLE COST sections or FC2 Open Field)
-        section_mappings = {}
-        product_name_normalized_map = {}  # For flexible matching
-        if fixed_cost_category == "open_field":
-            # Load Open Field section mappings for FC2 Open Field allocation
-            mappings = self.db.query(ProductSectionMapping).filter(
-                ProductSectionMapping.section == "Open Field"
-            ).all()
-            for m in mappings:
-                product_name_upper = m.product_name.upper().strip()
-                section_mappings[product_name_upper] = m.section
-                normalized = re.sub(r'[^A-Z0-9]', '', product_name_upper)
-                product_name_normalized_map[normalized] = m.section
-        if cost_section:
-            # Query mappings - handle Polyhouse sections specially
-            if cost_section == "Polyhouse":
-                # Match any Polyhouse section (C, D, E)
-                mappings = self.db.query(ProductSectionMapping).filter(
-                    ProductSectionMapping.section.like("Polyhouse%")
-                ).all()
-            elif cost_section == "Lettuce":
-                # Lettuce/greens: allowlist + Polyhouse section mappings (greens grown in polyhouses)
-                mappings = self.db.query(ProductSectionMapping).filter(
-                    ProductSectionMapping.section.like("Polyhouse%")
-                ).all()
-            else:
-                mappings = self.db.query(ProductSectionMapping).filter(
-                    ProductSectionMapping.section == cost_section
-                ).all()
-            
-            # Create lookup maps:
-            # 1. Exact match (uppercase, stripped)
-            # 2. Normalized match (remove spaces, special chars for flexible matching)
-            for m in mappings:
-                product_name_upper = m.product_name.upper().strip()
-                section_mappings[product_name_upper] = m.section
-                # Normalized: remove spaces, special chars, convert to lowercase for flexible matching
-                normalized = re.sub(r'[^A-Z0-9]', '', product_name_upper)
-                product_name_normalized_map[normalized] = m.section
-        
+        # Debug logging for variable cost allocation
+        if variable_pool:
+            keys, has_map = pool_cache.get(variable_pool, (set(), False))
+            print(f"   🔍 Cost '{cost.name}' → pool='{variable_pool}', has_mappings={has_map}, mapped_keys_count={len(keys)}")
+
+        def _pool_info(pool_key: str) -> tuple:
+            return pool_cache.get(pool_key, (set(), False))
+
         for product_id, product in product_map.items():
             if product_id not in sales_map:
                 continue
 
             eff_applies = _allocation_forced_applies_to(cost.name) or cost.applies_to
-            # Standard applies_to filtering (forced scope for pooled sheet/P&L categories)
-            matches_applies_to = False
-            if eff_applies == "all":
-                matches_applies_to = True
-            elif eff_applies == "inhouse" and product.source == "inhouse":
-                matches_applies_to = True
-            elif eff_applies == "outsourced" and product.source == "outsourced":
-                matches_applies_to = True
-            elif eff_applies == "both" and product.source in ["inhouse", "outsourced"]:
-                matches_applies_to = True
-            
+            matches_applies_to = (
+                eff_applies == "all"
+                or (eff_applies == "inhouse" and product.source == "inhouse")
+                or (eff_applies == "outsourced" and product.source == "outsourced")
+                or (eff_applies == "both" and product.source in ("inhouse", "outsourced"))
+            )
             if not matches_applies_to:
                 continue
-            
-            # Category-based filtering for FIXED COST CAT - II
+
             if fixed_cost_category:
-                product_name_upper_raw = (product.name or "").upper().strip()
-                # Strip source suffixes like "(INHOUSE)" / "(OUTSOURCED)" for matching
-                product_name_upper = re.sub(r"\s*\((INHOUSE|OUTSOURCED)\)\s*$", "", product_name_upper_raw)
-                
                 if fixed_cost_category == "strawberry":
-                    # FIXED COST CAT - II (Strawberry): Only apply to strawberry products (inhouse)
-                    if product.source != "inhouse" or "STRAWBERRY" not in product_name_upper:
+                    keys, has_map = _pool_info("strawberry")
+                    if product.source != "inhouse":
                         continue
-                
+                    if not _product_matches_variable_pool(product.name, "strawberry", keys, has_map):
+                        continue
                 elif fixed_cost_category == "greens":
-                    # FIXED COST CAT - II (Greens): inhouse products on saved lettuce/greens allowlist only
+                    keys, has_map = _pool_info("lettuce")
                     if product.source != "inhouse":
                         continue
-                    if not is_lettuce_greens_product_name(product.name):
+                    if not _product_matches_variable_pool(product.name, "lettuce", keys, has_map):
                         continue
-                
                 elif fixed_cost_category == "open_field":
-                    # FIXED COST CAT - II (Open Field): Only apply to inhouse Open Field section products
+                    keys, has_map = _pool_info("open_field")
                     if product.source != "inhouse":
                         continue
-                    product_mapped = False
-                    if section_mappings:
-                        if product_name_upper in section_mappings:
-                            product_mapped = True
-                        if not product_mapped:
-                            product_normalized = re.sub(r'[^A-Z0-9]', '', product_name_upper)
-                            if product_normalized in product_name_normalized_map:
-                                product_mapped = True
-                    if not product_mapped:
-                        if is_open_field_product_name(product.name):
-                            product_mapped = True
-                    if not product_mapped:
+                    if not _product_matches_variable_pool(product.name, "open_field", keys, has_map):
                         continue
-                
                 elif fixed_cost_category == "aggregation":
-                    # FIXED COST CAT - II (Aggregation): Only apply to outsourced products
                     if product.source != "outsourced":
                         continue
-            
-            # Section-based filtering for VARIABLE COST
-            # IMPORTANT: Section-based filtering ONLY applies to inhouse products
-            # Special cases:
-            # - VARIABLE COST - PACKING: applies to ALL products (no section filtering)
-            # - VARIABLE COST - AGGREGATION: applies to outsourced only (no section filtering)
-            # - Other VARIABLE COST: section-based filtering for inhouse products only
-            
-            if cost_section:
-                # PACKING applies to ALL products - no section filtering needed
-                if cost_section == "Packing":
+
+            if variable_pool:
+                if variable_pool in ("packing", "packing_materials_others"):
                     applicable[product_id] = product
                     continue
-                
-                # AGGREGATION applies to outsourced only - no section filtering needed
-                if cost_section == "Aggregation":
+                if variable_pool == "aggregation":
                     if product.source == "outsourced":
                         applicable[product_id] = product
                     continue
-                
-                # For other VARIABLE COST categories (OPEN FIELD, LETTUCE, STRAWBERRY, etc.)
-                # Only apply section filtering to inhouse products
                 if product.source != "inhouse":
-                    # Skip non-inhouse products for section-based VARIABLE COST
                     continue
-                
-                # Apply section-based filtering
-                product_name_upper_raw = (product.name or "").upper().strip()
-                # Strip source suffixes like "(INHOUSE)" / "(OUTSOURCED)" for matching
-                product_name_upper = re.sub(r"\s*\((INHOUSE|OUTSOURCED)\)\s*$", "", product_name_upper_raw)
-                product_mapped = False
-                
-                # First, try section mappings if available
-                if section_mappings:
-                    # Try exact match first
-                    if product_name_upper in section_mappings:
-                        mapped_section = section_mappings[product_name_upper]
-                        # For Polyhouse, verify it's a Polyhouse section
-                        if cost_section == "Polyhouse":
-                            if mapped_section.startswith("Polyhouse"):
-                                product_mapped = True
-                        else:
-                            if mapped_section == cost_section:
-                                product_mapped = True
-                    
-                    # Try normalized match for flexible matching (e.g., "Watercress lettuce" vs "Water crass")
-                    if not product_mapped:
-                        product_normalized = re.sub(r'[^A-Z0-9]', '', product_name_upper)
-                        if product_normalized in product_name_normalized_map:
-                            mapped_section = product_name_normalized_map[product_normalized]
-                            # For Polyhouse, verify it's a Polyhouse section
-                            if cost_section == "Polyhouse":
-                                if mapped_section.startswith("Polyhouse"):
-                                    product_mapped = True
-                            else:
-                                if mapped_section == cost_section:
-                                    product_mapped = True
-                
-                # If no section mappings or not matched, try name-based matching as fallback
-                if not product_mapped:
-                    # STRAWBERRY: match products with "strawberry" in name
-                    if cost_section == "Strawberry":
-                        if "STRAWBERRY" in product_name_upper:
-                            product_mapped = True
-                    
-                    # LETTUCE: allowlist, with optional Polyhouse mapping confirmation
-                    elif cost_section == "Lettuce":
-                        if is_lettuce_greens_product_name(product.name):
-                            product_mapped = True
-                        elif section_mappings and product_name_upper in section_mappings:
-                            if section_mappings[product_name_upper].startswith("Polyhouse"):
-                                product_mapped = is_lettuce_greens_product_name(product.name)
-                    
-                    # POLYHOUSE: section mappings first, then lettuce/greens allowlist
-                    elif cost_section == "Polyhouse":
-                        if product_mapped:
-                            pass
-                        elif is_lettuce_greens_product_name(product.name):
-                            product_mapped = True
-                    
-                    # OPEN FIELD: match products typically grown in open field
-                    elif cost_section == "Open Field":
-                        if is_open_field_product_name(product.name):
-                            product_mapped = True
-                    
-                    # RASPBERRY & BLUEBERRY: match products with "raspberry" or "blueberry" in name
-                    elif cost_section == "Other Berries":
-                        if "RASPBERRY" in product_name_upper or "BLUEBERRY" in product_name_upper or "BLUBERRY" in product_name_upper:
-                            product_mapped = True
-                    
-                    # CITRUS
-                    elif cost_section == "Citrus":
-                        citrus_keywords = ["CITRUS", "ORANGE", "MOSAMBI", "LEMON", "LIME", "MANDARIN", "KINNOW"]
-                        if any(keyword in product_name_upper for keyword in citrus_keywords):
-                            product_mapped = True
-                
-                # If product doesn't match this section, skip it
-                if not product_mapped:
-                    continue
-            
-            # Add product to applicable list
+                keys, has_map = _pool_info(variable_pool)
+                matches = _product_matches_variable_pool(product.name, variable_pool, keys, has_map)
+                if matches:
+                    applicable[product_id] = product
+                continue
+
             applicable[product_id] = product
+        
+        # Debug: log applicable products for variable costs
+        if variable_pool and variable_pool not in ("packing", "packing_materials_others", "aggregation"):
+            product_names = [p.name for p in applicable.values()][:5]
+            print(f"   📦 '{cost.name}' (pool={variable_pool}) → {len(applicable)} products: {product_names}{'...' if len(applicable) > 5 else ''}")
         
         return applicable
     
@@ -3124,6 +3089,15 @@ async def bulk_update_costs(payload: CostBulkUpdateRequest, db: Session = Depend
                     db.add(cost)
                     db.flush()
                     created_count += 1
+
+            template_key = (update.template_key or "").strip()
+            meta = TEMPLATE_COST_META.get(template_key) if template_key else None
+            if meta and meta.get("allocation_pool") and not (cost.allocation_pool or "").strip():
+                cost.allocation_pool = meta.get("allocation_pool")
+            else:
+                inferred_pool = _infer_variable_pool_from_cost(cost)
+                if inferred_pool and (not cost.allocation_pool or cost.allocation_pool == "auto"):
+                    cost.allocation_pool = inferred_pool
 
             if update.amount is not None:
                 cost.amount = float(update.amount)
@@ -7393,6 +7367,38 @@ async def get_product_section_mappings(db: Session = Depends(get_db)):
     }
 
 
+@app.get("/api/allocation-pool-diagnostics")
+async def get_allocation_pool_diagnostics(db: Session = Depends(get_db)):
+    """
+    Diagnostic endpoint to check allocation pool status.
+    Shows which products would be allocated to each variable cost pool.
+    """
+    cache = _build_pool_mapping_cache(db)
+    
+    diagnostics = {}
+    for pool in ("open_field", "lettuce", "strawberry", "citrus", "raspberry_blueberry", "common_expenses_farm"):
+        keys, has_map = cache.get(pool, (set(), False))
+        diagnostics[pool] = {
+            "has_db_mappings": has_map,
+            "mapped_product_count": len(keys),
+            "mapped_products": sorted(list(keys))[:20],  # Limit to 20 for readability
+        }
+    
+    # Also include allowlist info
+    diagnostics["_allowlists"] = {
+        "lettuce_greens_count": len(_lettuce_greens_keys),
+        "lettuce_greens_sample": sorted(list(_lettuce_greens_keys))[:10],
+        "open_field_count": len(_open_field_keys),
+        "open_field_sample": sorted(list(_open_field_keys)),
+    }
+    
+    # Count actual mappings in DB
+    mapping_count = db.query(ProductSectionMapping).count()
+    diagnostics["_db_mapping_count"] = mapping_count
+    
+    return diagnostics
+
+
 @app.post("/api/upload-harvest-mapping")
 async def upload_harvest_mapping(file: UploadFile = File(...), db: Session = Depends(get_db)):
     """
@@ -7451,7 +7457,7 @@ async def upload_harvest_mapping(file: UploadFile = File(...), db: Session = Dep
             skipped = 0
             
             for idx, row in df.iterrows():
-                section = str(row[section_col]).strip()
+                section = _normalize_mapping_section(str(row[section_col]).strip())
                 product = str(row[product_col]).strip()
                 
                 # Skip empty rows or invalid data
@@ -7468,6 +7474,7 @@ async def upload_harvest_mapping(file: UploadFile = File(...), db: Session = Dep
                 mappings_created += 1
             
             db.commit()
+            allowlist_data = _sync_allowlists_from_section_mappings(db)
             
             print(f"✅ Harvest Mapping upload completed!")
             print(f"   💰 Mappings created: {mappings_created}")
@@ -7487,7 +7494,10 @@ async def upload_harvest_mapping(file: UploadFile = File(...), db: Session = Dep
                 "message": f"Successfully uploaded {mappings_created} product-section mappings",
                 "mappings_created": mappings_created,
                 "rows_skipped": skipped,
-                "parsed_mappings": parsed_mappings  # Detailed list of all mappings
+                "parsed_mappings": parsed_mappings,
+                "allowlists_synced": True,
+                "lettuce_greens_count": len(allowlist_data.get("lettuce_greens_products") or []),
+                "open_field_count": len(allowlist_data.get("open_field_products") or []),
             }
         
         finally:
