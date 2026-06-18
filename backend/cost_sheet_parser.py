@@ -44,8 +44,8 @@ def parse_cost_sheet(file_path: str) -> Dict[str, Any]:
         print(f"[PARSER] Period: {period}")
         print(f"[PARSER] Total Qty Sold: {total_qty_sold}")
 
-        label_col, total_col = _detect_pl_columns(df)
-        print(f"[PARSER] Column layout: label_col={label_col}, total_col={total_col}")
+        label_col, total_col, amount_only_layout = _detect_pl_columns(df)
+        print(f"[PARSER] Column layout: label_col={label_col}, total_col={total_col}, amount_only={amount_only_layout}")
 
         # ===================================================================
         # STATE MACHINE: Walk through rows and assign to categories
@@ -69,6 +69,24 @@ def parse_cost_sheet(file_path: str) -> Dict[str, Any]:
         }
 
         total_expenses_from_sheet = 0.0
+        section_peak = 0.0
+
+        def _commit_variable_sub(sub_key: str, amount: float, row_idx: int, reason: str) -> None:
+            if not sub_key or amount <= 0:
+                return
+            expenses['variable_cost']['subcategories'].setdefault(sub_key, {'total': 0.0, 'items': []})
+            current_sub_total = expenses['variable_cost']['subcategories'][sub_key]['total']
+            if amount > current_sub_total + 0.01:
+                expenses['variable_cost']['total'] -= current_sub_total
+                expenses['variable_cost']['subcategories'][sub_key]['total'] = amount
+                expenses['variable_cost']['total'] += amount
+                print(f"[PARSER] Row {row_idx}: VARIABLE COST - {sub_key.upper()} {reason} = {amount:,.2f}")
+
+        def _finalize_variable_sub(row_idx: int) -> None:
+            nonlocal section_peak, current_variable_sub
+            if current_category == 'variable_cost' and current_variable_sub and section_peak > 0:
+                _commit_variable_sub(current_variable_sub, section_peak, row_idx, "section total")
+            section_peak = 0.0
 
         for idx in range(len(df)):
             row = df.iloc[idx]
@@ -105,8 +123,11 @@ def parse_cost_sheet(file_path: str) -> Dict[str, Any]:
                 and c_total > 0
                 and current_category in ('fixed_cost_cat_i', 'fixed_cost_cat_ii')
             ):
-                expenses[current_category]['total'] = c_total
-                print(f"[PARSER] Row {idx}: {current_category.upper()} SUBTOTAL = {c_total:,.2f}")
+                if current_category == 'fixed_cost_cat_ii' and c_total < 50000:
+                    pass
+                else:
+                    expenses[current_category]['total'] = c_total
+                    print(f"[PARSER] Row {idx}: {current_category.upper()} SUBTOTAL = {c_total:,.2f}")
                 continue
 
             # Subtotal row: blank label, value in TOTAL column while inside a variable sub
@@ -125,6 +146,7 @@ def parse_cost_sheet(file_path: str) -> Dict[str, Any]:
                 expenses['variable_cost']['total'] += c_total
                 print(f"[PARSER] Row {idx}: VARIABLE COST - {sub_key.upper()} SUBTOTAL = {c_total:,.2f}")
                 current_variable_sub = None
+                section_peak = 0.0
                 continue
 
             # ---- Detect category headers ----
@@ -172,6 +194,7 @@ def parse_cost_sheet(file_path: str) -> Dict[str, Any]:
                 is_section_header = False
                 
                 if is_var_section_header and var_section_sub:
+                    _finalize_variable_sub(idx)
                     detected_sub = var_section_sub
                     is_section_header = True
                 elif label:
@@ -184,6 +207,7 @@ def parse_cost_sheet(file_path: str) -> Dict[str, Any]:
 
                 if detected_sub:
                     current_variable_sub = detected_sub
+                    section_peak = 0.0
                     if detected_sub not in expenses['variable_cost']['subcategories']:
                         expenses['variable_cost']['subcategories'][detected_sub] = {'total': 0.0, 'items': []}
                     
@@ -205,21 +229,12 @@ def parse_cost_sheet(file_path: str) -> Dict[str, Any]:
                         current_variable_sub = None
                     continue
 
-                # Line within current section that carries the section total (TOTAL column on rollup row)
+                # Line within current section that carries the section total
                 if current_variable_sub and label and not _detect_var_subcategory(label_upper):
-                    rollup_val = c_total if c_total > 0 else 0.0
-                    if rollup_val <= 0:
-                        pass
-                    else:
-                        sub_key = current_variable_sub
-                        expenses['variable_cost']['subcategories'].setdefault(sub_key, {'total': 0.0, 'items': []})
-                        current_sub_total = expenses['variable_cost']['subcategories'][sub_key]['total']
-                        if rollup_val > current_sub_total + 0.01:
-                            expenses['variable_cost']['total'] -= current_sub_total
-                            expenses['variable_cost']['subcategories'][sub_key]['total'] = rollup_val
-                            expenses['variable_cost']['total'] += rollup_val
-                            print(f"[PARSER] Row {idx}: VARIABLE COST - {sub_key.upper()} section total = {rollup_val:,.2f}")
-                            current_variable_sub = None
+                    if amount_only_layout:
+                        section_peak = max(section_peak, max_val, line_amt)
+                    elif c_total > 0:
+                        _commit_variable_sub(current_variable_sub, c_total, idx, "section total")
 
             # FC-I / FC-II running total from TOTAL column on line rows
             if (
@@ -232,6 +247,7 @@ def parse_cost_sheet(file_path: str) -> Dict[str, Any]:
             # 4) DISTRIBUTION COST
             # More flexible: check if it's DISTRIBUTION COST, with or without column 0 check
             if 'DISTRIBUTION COST' in c1_upper:
+                _finalize_variable_sub(idx)
                 # Only set category if we haven't seen it yet OR if total_val > 0 (likely the header row)
                 if current_category != 'distribution_cost' or total_val > 0:
                     current_category = 'distribution_cost'
@@ -416,18 +432,41 @@ def parse_cost_sheet(file_path: str) -> Dict[str, Any]:
 
 
 def _detect_pl_columns(df: pd.DataFrame) -> tuple:
-    """Detect which column holds particulars labels and which holds section TOTAL."""
+    """Detect which column holds particulars labels and which holds section TOTAL / Amount."""
     label_col = 1
     total_col = 3
-    for idx in range(min(20, len(df))):
+    found_total = False
+    found_amount = False
+    ncols = len(df.columns) if len(df.columns) > 0 else 1
+
+    for idx in range(min(30, len(df))):
         row = df.iloc[idx]
-        for ci in range(min(8, len(row))):
-            cell = _str(row, ci).strip().upper()
-            if cell == 'PARTICULARS':
+        for ci in range(min(10, len(row))):
+            cell = re.sub(r'\s+', ' ', _str(row, ci).strip().upper())
+            if cell in ('PARTICULARS', 'PARTICULAR'):
                 label_col = ci
-            if cell == 'TOTAL':
+            elif cell == 'TOTAL':
                 total_col = ci
-    return label_col, total_col
+                found_total = True
+            elif cell == 'AMOUNT':
+                total_col = ci
+                found_amount = True
+
+    # Two-column export: Particulars | Amount (no separate TOTAL column)
+    if ncols <= 2:
+        total_col = min(label_col + 1, ncols - 1)
+    elif found_amount and not found_total:
+        pass  # total_col already set to AMOUNT column
+    elif label_col == 0 and not found_total and not found_amount and ncols >= 3:
+        # Tally layout: labels in A, totals in C when header row is sparse
+        total_col = 2
+
+    if total_col >= ncols:
+        total_col = max(label_col + 1, ncols - 1)
+
+    amount_only_layout = (ncols <= 2) or (found_amount and not found_total)
+
+    return label_col, total_col, amount_only_layout
 
 
 VAR_SUB_MAP = {
@@ -501,8 +540,10 @@ def _scan_row_amounts(row, label_col: int, total_col: int) -> Dict[str, float]:
         if v > 0:
             line_amt = v
             break
-    if line_amt <= 0 and label_col + 1 < len(row) and (label_col + 1) != total_col:
+    if line_amt <= 0 and label_col + 1 < len(row):
         line_amt = _num(row, label_col + 1)
+    if line_amt <= 0 and total_col_val > 0 and total_col != label_col:
+        line_amt = total_col_val
     legacy_c2 = _num(row, 2)
     legacy_c4 = _num(row, 4)
     return {

@@ -4112,23 +4112,24 @@ def extract_pl_semantic_totals(df_raw: pd.DataFrame) -> Dict[str, Any]:
             section = None
             variable_sub = None
 
-        # Variable sub section headers
+        # Variable sub section headers (Tally: OPEN FIELD :, LETTUCE:, AGGREGATION, etc.)
         if section == "variable":
-            if "OPEN FIELD" in txt and ("A)" in txt or ":" in txt):
+            bare = re.sub(r'\s*:\s*$', '', txt.strip())
+            if bare == "OPEN FIELD" or bare.startswith("OPEN FIELD"):
                 variable_sub = "open_field"
-            elif "LETTUCE" in txt and ("B)" in txt or ":" in txt):
+            elif bare == "LETTUCE" or (bare.startswith("LETTUCE") and len(bare) <= 10):
                 variable_sub = "lettuce"
-            elif "STRAWBERRY" in txt and ("C)" in txt or ":" in txt):
+            elif bare == "STRAWBERRY" or (bare.startswith("STRAWBERRY") and len(bare) <= 12):
                 variable_sub = "strawberry"
-            elif "CITRUS" in txt and ("D)" in txt or ":" in txt or "E)" in txt):
+            elif bare == "CITRUS" or (bare.startswith("CITRUS") and len(bare) <= 8):
                 variable_sub = "citrus"
-            elif ("RASPBERRY" in txt or "BLUBERRY" in txt or "BLUEBERRY" in txt) and ("D)" in txt or ":" in txt):
+            elif "RASPBERRY" in bare or "BLUBERRY" in bare or "BLUEBERRY" in bare:
                 variable_sub = "raspberry_blueberry"
-            elif "PACKING" in txt and ("E)" in txt or ":" in txt):
+            elif bare == "PACKING" or (bare.startswith("PACKING") and len(bare) <= 10):
                 variable_sub = "packing"
-            elif "AGGREGATION" in txt and ("F)" in txt or ":" in txt):
+            elif bare == "AGGREGATION" or (bare.startswith("AGGREGATION") and len(bare) <= 14):
                 variable_sub = "aggregation"
-            elif "COMMON EXPENSES" in txt and "FARM" in txt:
+            elif "COMMON EXPENSES" in bare and "FARM" in bare:
                 variable_sub = "common_expenses_farm"
 
         nums = [parse_numeric_robust(v) for v in row.tolist() if pd.notna(v)]
@@ -4145,6 +4146,59 @@ def extract_pl_semantic_totals(df_raw: pd.DataFrame) -> Dict[str, Any]:
                 totals["variable_subcategories"][variable_sub] = row_max
 
     return totals
+
+
+def _variable_cost_subtotal(expenses: Dict[str, Any]) -> float:
+    subs = (expenses.get("variable_cost") or {}).get("subcategories") or {}
+    return sum(float((v or {}).get("total", 0.0) or 0.0) for v in subs.values())
+
+
+def _score_parse_expenses(expenses: Dict[str, Any]) -> float:
+    """Higher score = more complete P&L extraction."""
+    if not expenses:
+        return 0.0
+    score = _variable_cost_subtotal(expenses)
+    for key in (
+        "fixed_cost_cat_i", "fixed_cost_cat_ii", "distribution_cost",
+        "marketing_expenses", "vehicle_running_cost", "others",
+        "wastage_shortage", "purchase_accounts",
+    ):
+        score += float((expenses.get(key) or {}).get("total", 0.0) or 0.0)
+    return score
+
+
+def _merge_expenses_prefer_higher(primary: Dict[str, Any], secondary: Dict[str, Any]) -> Dict[str, Any]:
+    """Merge two expense dicts, keeping the larger total per category/subcategory."""
+    merged = {}
+    all_keys = set(primary.keys()) | set(secondary.keys())
+    for key in all_keys:
+        p = primary.get(key) or {}
+        s = secondary.get(key) or {}
+        if key == "variable_cost":
+            psubs = (p.get("subcategories") or {}).copy()
+            ssubs = s.get("subcategories") or {}
+            for sk, sv in ssubs.items():
+                pt = float((psubs.get(sk) or {}).get("total", 0.0) or 0.0)
+                st = float((sv or {}).get("total", 0.0) or 0.0)
+                if sk not in psubs:
+                    psubs[sk] = sv
+                elif st > pt:
+                    psubs[sk] = {**psubs.get(sk, {}), "total": st}
+            merged[key] = {
+                "total": max(float(p.get("total", 0.0) or 0.0), float(s.get("total", 0.0) or 0.0)),
+                "subcategories": psubs,
+            }
+            merged[key]["total"] = sum(
+                float((v or {}).get("total", 0.0) or 0.0) for v in psubs.values()
+            )
+        elif isinstance(p, dict) and "total" in p:
+            pt = float(p.get("total", 0.0) or 0.0)
+            st = float(s.get("total", 0.0) or 0.0)
+            winner = p if pt >= st else s
+            merged[key] = {**winner, "total": max(pt, st)}
+        else:
+            merged[key] = p or s
+    return merged
 
 
 def _looks_like_category_totals_sheet(df: pd.DataFrame) -> bool:
@@ -6415,8 +6469,7 @@ async def upload_cost_sheet(file: UploadFile = File(...), db: Session = Depends(
                         "costs_created": 0
                     }
 
-            # Always retry with merged-cell-resolved layout to avoid sparse/merged mis-binding
-            # (even if the first parse succeeded).
+            # Always retry with merged-cell-resolved layout; keep whichever parse is more complete.
             try:
                 normalized_layout = read_excel_layout_with_openpyxl(content)
                 normalized_df = pd.DataFrame(normalized_layout["matrix"])
@@ -6424,10 +6477,16 @@ async def upload_cost_sheet(file: UploadFile = File(...), db: Session = Depends(
                     normalized_path = normalized_tmp.name
                 with pd.ExcelWriter(normalized_path, engine="xlsxwriter") as writer:
                     normalized_df.to_excel(writer, index=False, header=False)
-                normalized_result = parse_cost_sheet(normalized_path) if not summary_mode else None
-                if normalized_result.get('success', False):
-                    print("✅ Using merged-cell-resolved P&L parse (authoritative)")
-                    parse_result = normalized_result
+                if not summary_mode:
+                    normalized_result = parse_cost_sheet(normalized_path)
+                    if normalized_result.get('success', False):
+                        direct_score = _score_parse_expenses(parse_result.get('expenses', {}))
+                        norm_score = _score_parse_expenses(normalized_result.get('expenses', {}))
+                        if norm_score > direct_score:
+                            print(f"✅ Using merged-cell-resolved P&L parse (score {norm_score:,.0f} > {direct_score:,.0f})")
+                            parse_result = normalized_result
+                        else:
+                            print(f"✅ Keeping direct P&L parse (score {direct_score:,.0f} >= {norm_score:,.0f})")
             except Exception as _norm_e:
                 print(f"⚠️ Merged-cell resolved re-parse skipped: {_norm_e}")
             finally:
@@ -6441,32 +6500,30 @@ async def upload_cost_sheet(file: UploadFile = File(...), db: Session = Depends(
             header_info = parse_result.get('header_info', {})
             expenses = parse_result.get('expenses', {})
 
-            # Semantic fallback only if the merged-cell resolved parse still seems empty.
+            # Semantic fallback: fill gaps when variable sections or purchase total are missing.
             try:
                 var_subs = expenses.get('variable_cost', {}).get('subcategories', {}) or {}
                 expected_var_keys = ['open_field', 'lettuce', 'strawberry', 'raspberry_blueberry', 'citrus', 'packing', 'aggregation', 'common_expenses_farm']
-                critical_zero = True
-                for k in expected_var_keys:
-                    if (var_subs.get(k, {}).get('total', 0.0) or 0.0) > 0:
-                        critical_zero = False
-                        break
-                critical_zero = critical_zero or (expenses.get('purchase_accounts', {}).get('total', 0.0) or 0.0) <= 0
-                if critical_zero:
+                var_total = sum(float((var_subs.get(k, {}) or {}).get('total', 0.0) or 0.0) for k in expected_var_keys)
+                needs_fallback = var_total <= 0 or (expenses.get('purchase_accounts', {}).get('total', 0.0) or 0.0) <= 0
+                if needs_fallback:
                     semantic_layout = read_excel_layout_with_openpyxl(content)
                     semantic_totals = extract_pl_semantic_totals(semantic_layout["df_raw"])
-                    for k in ['fixed_cost_cat_i', 'fixed_cost_cat_ii', 'distribution_cost', 'marketing_expenses', 'vehicle_running_cost', 'others', 'wastage_shortage', 'purchase_accounts']:
-                        sv = semantic_totals.get(k, 0.0)
-                        if sv > 0:
-                            expenses.setdefault(k, {})['total'] = sv
-                    if 'variable_cost' not in expenses:
-                        expenses['variable_cost'] = {'total': 0.0, 'subcategories': {}}
-                    if 'subcategories' not in expenses['variable_cost']:
-                        expenses['variable_cost']['subcategories'] = {}
-                    for sk, sv in semantic_totals.get("variable_subcategories", {}).items():
-                        if sk not in expenses['variable_cost']['subcategories']:
-                            expenses['variable_cost']['subcategories'][sk] = {'total': 0.0, 'items': []}
-                        if sv > 0:
-                            expenses['variable_cost']['subcategories'][sk]['total'] = sv
+                    semantic_expenses = {
+                        'fixed_cost_cat_i': {'total': semantic_totals.get('fixed_cost_cat_i', 0.0), 'items': []},
+                        'fixed_cost_cat_ii': {'total': semantic_totals.get('fixed_cost_cat_ii', 0.0), 'items': [], 'splits': expenses.get('fixed_cost_cat_ii', {}).get('splits', {})},
+                        'variable_cost': {'total': 0.0, 'subcategories': {
+                            k: {'total': v, 'items': []} for k, v in semantic_totals.get('variable_subcategories', {}).items()
+                        }},
+                        'distribution_cost': {'total': semantic_totals.get('distribution_cost', 0.0), 'items': []},
+                        'marketing_expenses': {'total': semantic_totals.get('marketing_expenses', 0.0), 'items': []},
+                        'vehicle_running_cost': {'total': semantic_totals.get('vehicle_running_cost', 0.0), 'items': []},
+                        'others': {'total': semantic_totals.get('others', 0.0), 'items': []},
+                        'wastage_shortage': {'total': semantic_totals.get('wastage_shortage', 0.0), 'items': []},
+                        'purchase_accounts': {'total': semantic_totals.get('purchase_accounts', 0.0), 'items': []},
+                    }
+                    expenses = _merge_expenses_prefer_higher(expenses, semantic_expenses)
+                    print(f"   ℹ️  Applied semantic P&L fallback (variable total now ₹{_variable_cost_subtotal(expenses):,.2f})")
             except Exception as _sem_e:
                 print(f"⚠️ Semantic P&L fallback skipped: {_sem_e}")
             
