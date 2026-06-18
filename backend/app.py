@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Depends, status, UploadFile, File, Form, Query
+from fastapi import FastAPI, HTTPException, Depends, status, UploadFile, File, Form, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, StreamingResponse
@@ -2936,6 +2936,59 @@ async def delete_cost(cost_id: int, db: Session = Depends(get_db)):
     db.delete(cost)
     db.commit()
     return {"message": "Cost deleted successfully"}
+
+
+@app.put("/api/costs/bulk-update")
+async def bulk_update_costs(request: Request, db: Session = Depends(get_db)):
+    """
+    Bulk update cost amounts and applies_to settings.
+    Expects JSON: { "updates": [{ "id": 123, "amount": 5000.00, "applies_to": "inhouse" }, ...] }
+    """
+    try:
+        data = await request.json()
+        updates = data.get("updates", [])
+        
+        if not updates:
+            return {"success": False, "message": "No updates provided", "updated": 0}
+        
+        updated_count = 0
+        for update in updates:
+            cost_id = update.get("id")
+            if not cost_id:
+                continue
+            
+            cost = db.query(Cost).filter(Cost.id == cost_id).first()
+            if not cost:
+                continue
+            
+            # Update amount if provided
+            if "amount" in update:
+                cost.amount = float(update["amount"])
+                cost.original_amount = float(update["amount"])
+            
+            # Update applies_to if provided
+            if "applies_to" in update:
+                applies_to = update["applies_to"]
+                if applies_to in ("inhouse", "outsourced", "both"):
+                    cost.applies_to = applies_to
+                    # Also update cost_type for consistency
+                    if applies_to == "inhouse":
+                        cost.cost_type = "inhouse-only"
+                    elif applies_to == "outsourced":
+                        cost.cost_type = "outsourced-only"
+                    else:
+                        cost.cost_type = "common"
+            
+            cost.updated_at = datetime.utcnow()
+            updated_count += 1
+        
+        db.commit()
+        return {"success": True, "message": f"Updated {updated_count} costs", "updated": updated_count}
+    
+    except Exception as e:
+        db.rollback()
+        return {"success": False, "message": str(e), "updated": 0}
+
 
 # Initialize Cost Items endpoint removed - use /api/upload-cost-sheet instead
 
@@ -6886,14 +6939,15 @@ async def upload_cost_sheet(file: UploadFile = File(...), db: Session = Depends(
             
             # Mapping: subcategory → (applies_to, cost_type, basis)
             var_rules = {
-                'open_field':          ("inhouse", "inhouse-only", "sales_kg"),
-                'lettuce':             ("inhouse", "inhouse-only", "sales_kg"),
-                'strawberry':          ("inhouse", "inhouse-only", "sales_kg"),
-                'raspberry_blueberry': ("inhouse", "inhouse-only", "sales_kg"),
-                'citrus':              ("inhouse", "inhouse-only", "sales_kg"),
-                'packing':             ("both", "common", "sales_kg"),
-                'aggregation':         ("outsourced", "common", "sales_kg"),
-                'common_expenses_farm':("inhouse", "inhouse-only", "sales_kg"),
+                'open_field':              ("inhouse", "inhouse-only", "sales_kg"),
+                'lettuce':                 ("inhouse", "inhouse-only", "sales_kg"),
+                'strawberry':              ("inhouse", "inhouse-only", "sales_kg"),
+                'raspberry_blueberry':     ("inhouse", "inhouse-only", "sales_kg"),
+                'citrus':                  ("inhouse", "inhouse-only", "sales_kg"),
+                'packing':                 ("both", "common", "sales_kg"),
+                'aggregation':             ("outsourced", "common", "sales_kg"),
+                'common_expenses_farm':    ("inhouse", "inhouse-only", "sales_kg"),
+                'packing_materials_others':("both", "common", "sales_kg"),
             }
             
             var_display = {
@@ -6905,10 +6959,11 @@ async def upload_cost_sheet(file: UploadFile = File(...), db: Session = Depends(
                 'packing': 'PACKING',
                 'aggregation': 'AGGREGATION',
                 'common_expenses_farm': 'COMMON EXPENSES - FARM',
+                'packing_materials_others': 'PACKING MATERIALS (OTHERS)',
             }
             
             variable_total = 0.0
-            expected_var_keys = ['open_field', 'lettuce', 'strawberry', 'raspberry_blueberry', 'citrus', 'packing', 'aggregation', 'common_expenses_farm']
+            expected_var_keys = ['open_field', 'lettuce', 'strawberry', 'raspberry_blueberry', 'citrus', 'packing', 'aggregation', 'common_expenses_farm', 'packing_materials_others']
             for sub_key in expected_var_keys:
                 sub_data = var_subs.get(sub_key, {})
                 sub_total = sub_data.get('total', 0.0) if isinstance(sub_data, dict) else 0.0

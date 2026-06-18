@@ -977,7 +977,7 @@ async function loadCosts() {
 
 // Initialize Cost Items function removed - use cost sheet upload instead
 
-// Display costs
+// Display costs with FIXED TEMPLATE FORMAT and inline editing
 function displayCosts(costs) {
     const container = document.getElementById('costs-table');
     
@@ -986,178 +986,247 @@ function displayCosts(costs) {
         return;
     }
     
-    // Organize costs by category (like MD file structure)
-    const categoryHeadings = {
-        'fixed_cost_cat_i': '1. FIXED COST CAT - I',
-        'fixed_cost_cat_ii': 'FIXED COST CAT - II',
-        'variable_cost': '2. VARIABLE COST',
-        'variable_cost_item': '2. VARIABLE COST - LINE ITEMS',
-        'variable_cost_open_field': 'A) OPEN FIELD',
-        'variable_cost_lettuce': 'B) LETTUCE',
-        'variable_cost_strawberry': 'C) STRAWBERRY',
-        'variable_cost_raspberry': 'D) RASPBERRY & BLUEBERRY',
-        'variable_cost_packing': 'E) PACKING',
-        'variable_cost_aggregation': 'F) AGGREGATION',
-        'distribution_cost': '3. DISTRIBUTION COST',
-        'marketing_expenses': '4. MARKETING EXPENSES',
-        'vehicle_running_cost': '5. VEHICLE RUNNING COST',
-        'others': '6. OTHERS',
-        'wastage': '7. WASTAGE & SHORTAGE',
-        'purchase_accounts': '8. PURCHASE ACCOUNTS',
-        'pl_import': 'P&L Imported Costs'
-    };
-    
-    // Group costs by category
-    const costsByCategory = {};
+    // FIXED TEMPLATE FORMAT - 8 main categories with Variable Cost subcategories
+    const COST_TEMPLATE = [
+        { key: 'fixed_cost_cat_i', label: '1. FIXED COST CAT - I', level: 0, defaultAppliesTo: 'both' },
+        { key: 'fixed_cost_cat_ii', label: '2. FIXED COST CAT - II', level: 0, defaultAppliesTo: 'inhouse', hasSubSplits: true },
+        { key: 'variable_cost', label: '3. VARIABLE COST', level: 0, isParent: true },
+        { key: 'open_field', label: 'A) OPEN FIELD', level: 1, parent: 'variable_cost', defaultAppliesTo: 'inhouse' },
+        { key: 'lettuce', label: 'B) LETTUCE', level: 1, parent: 'variable_cost', defaultAppliesTo: 'inhouse' },
+        { key: 'strawberry', label: 'C) STRAWBERRY', level: 1, parent: 'variable_cost', defaultAppliesTo: 'inhouse' },
+        { key: 'raspberry_blueberry', label: 'D) RASPBERRY & BLUEBERRY', level: 1, parent: 'variable_cost', defaultAppliesTo: 'inhouse' },
+        { key: 'citrus', label: 'E) CITRUS', level: 1, parent: 'variable_cost', defaultAppliesTo: 'inhouse' },
+        { key: 'packing', label: 'F) PACKING', level: 1, parent: 'variable_cost', defaultAppliesTo: 'both' },
+        { key: 'aggregation', label: 'G) AGGREGATION', level: 1, parent: 'variable_cost', defaultAppliesTo: 'outsourced' },
+        { key: 'common_expenses_farm', label: 'H) COMMON EXPENSES - FARM', level: 1, parent: 'variable_cost', defaultAppliesTo: 'inhouse' },
+        { key: 'packing_materials_others', label: 'I) PACKING MATERIALS (OTHERS)', level: 1, parent: 'variable_cost', defaultAppliesTo: 'both' },
+        { key: 'distribution_cost', label: '4. DISTRIBUTION COST', level: 0, defaultAppliesTo: 'both' },
+        { key: 'marketing_expenses', label: '5. MARKETING EXPENSES', level: 0, defaultAppliesTo: 'both' },
+        { key: 'vehicle_running_cost', label: '6. VEHICLE RUNNING COST', level: 0, defaultAppliesTo: 'both' },
+        { key: 'others', label: '7. OTHERS', level: 0, defaultAppliesTo: 'both' },
+        { key: 'wastage_shortage', label: '8. WASTAGE & SHORTAGE', level: 0, defaultAppliesTo: 'outsourced' },
+        { key: 'purchase_accounts', label: '9. PURCHASE ACCOUNTS', level: 0, defaultAppliesTo: 'outsourced' },
+    ];
+
+    // Map costs to template keys
+    const costMap = {};
     costs.forEach(cost => {
-        const category = cost.category || 'other';
-        if (!costsByCategory[category]) {
-            costsByCategory[category] = [];
+        const nameUpper = (cost.name || '').toUpperCase();
+        const cat = (cost.category || '').toLowerCase();
+        
+        // Match to template key
+        let templateKey = null;
+        if (cat === 'fixed_cost_cat_i' || nameUpper.includes('FIXED COST CAT') && nameUpper.includes('I') && !nameUpper.includes('II')) {
+            templateKey = 'fixed_cost_cat_i';
+        } else if (cat === 'fixed_cost_cat_ii' || nameUpper.includes('FIXED COST CAT') && nameUpper.includes('II')) {
+            templateKey = 'fixed_cost_cat_ii';
+        } else if (nameUpper.includes('OPEN FIELD') || cat.includes('open_field')) {
+            templateKey = 'open_field';
+        } else if (nameUpper.includes('LETTUCE') || cat.includes('lettuce')) {
+            templateKey = 'lettuce';
+        } else if (nameUpper.includes('STRAWBERRY') || cat.includes('strawberry')) {
+            templateKey = 'strawberry';
+        } else if (nameUpper.includes('RASPBERRY') || nameUpper.includes('BLUEBERRY') || cat.includes('raspberry')) {
+            templateKey = 'raspberry_blueberry';
+        } else if (nameUpper.includes('CITRUS') || cat.includes('citrus')) {
+            templateKey = 'citrus';
+        } else if (nameUpper.includes('PACKING MATERIALS') && nameUpper.includes('OTHER')) {
+            templateKey = 'packing_materials_others';
+        } else if (nameUpper.includes('PACKING') && !nameUpper.includes('MATERIALS') || cat.includes('packing') && !cat.includes('materials')) {
+            templateKey = 'packing';
+        } else if (nameUpper.includes('AGGREGATION') || cat.includes('aggregation')) {
+            templateKey = 'aggregation';
+        } else if (nameUpper.includes('COMMON EXPENSES') && nameUpper.includes('FARM') || cat.includes('common_expenses_farm')) {
+            templateKey = 'common_expenses_farm';
+        } else if (cat === 'distribution_cost' || nameUpper.includes('DISTRIBUTION')) {
+            templateKey = 'distribution_cost';
+        } else if (cat === 'marketing_expenses' || nameUpper.includes('MARKETING')) {
+            templateKey = 'marketing_expenses';
+        } else if (cat === 'vehicle_running_cost' || nameUpper.includes('VEHICLE')) {
+            templateKey = 'vehicle_running_cost';
+        } else if (cat === 'others' || nameUpper === 'OTHERS') {
+            templateKey = 'others';
+        } else if (cat === 'wastage_shortage' || nameUpper.includes('WASTAGE')) {
+            templateKey = 'wastage_shortage';
+        } else if (cat === 'purchase_accounts' || nameUpper.includes('PURCHASE')) {
+            templateKey = 'purchase_accounts';
         }
-        costsByCategory[category].push(cost);
+        
+        if (templateKey) {
+            if (!costMap[templateKey]) costMap[templateKey] = [];
+            costMap[templateKey].push(cost);
+        }
     });
-    
-    let tableHTML = `
-        <table class="table">
+
+    // Build HTML with inline editing
+    let html = `
+        <div style="margin-bottom: 15px; display: flex; justify-content: space-between; align-items: center;">
+            <h4 style="margin: 0;">Cost Allocation Template</h4>
+            <button class="btn btn-success btn-sm" onclick="saveAllCostChanges()">
+                <i class="fas fa-save"></i> Save All Changes
+            </button>
+        </div>
+        <table class="table" style="width: 100%;">
             <thead>
-                <tr>
-                    <th>Name</th>
-                    <th>Amount</th>
-                    <th>Applies To</th>
-                    <th>Type</th>
-                    <th>Basis</th>
-                    <th>Category</th>
-                    <th>Actions</th>
+                <tr style="background: #1f2937; color: white;">
+                    <th style="width: 35%;">Cost Category</th>
+                    <th style="width: 20%;">Amount (₹)</th>
+                    <th style="width: 25%;">Applies To</th>
+                    <th style="width: 20%;">Actions</th>
                 </tr>
             </thead>
             <tbody>
     `;
-    
-    // Display costs organized by category headings
-    Object.keys(categoryHeadings).forEach(categoryKey => {
-        if (costsByCategory[categoryKey] && costsByCategory[categoryKey].length > 0) {
-            const heading = categoryHeadings[categoryKey];
-            tableHTML += `
-                <tr style="background-color: #f0f0f0; font-weight: bold;">
-                    <td colspan="7" style="padding: 10px; font-size: 14px;">${heading}</td>
+
+    COST_TEMPLATE.forEach(template => {
+        const costList = costMap[template.key] || [];
+        const cost = costList[0]; // Primary cost for this category
+        const amount = cost ? cost.amount : 0;
+        const appliesTo = cost ? cost.applies_to : template.defaultAppliesTo;
+        const costId = cost ? cost.id : null;
+        
+        const indent = template.level === 1 ? 'padding-left: 40px;' : '';
+        const bgColor = template.level === 0 ? 'background: #f3f4f6;' : '';
+        const fontWeight = template.level === 0 ? 'font-weight: 600;' : '';
+        
+        // Skip parent category row (Variable Cost header)
+        if (template.isParent) {
+            html += `
+                <tr style="${bgColor} ${fontWeight}">
+                    <td colspan="4" style="padding: 12px; font-size: 14px; border-bottom: 2px solid #d1d5db;">
+                        <strong>${template.label}</strong>
+                    </td>
                 </tr>
             `;
-
-            // Special configuration row for FIXED COST CAT - II
-            if (categoryKey === 'fixed_cost_cat_ii') {
-                const fixedCosts = costsByCategory[categoryKey];
-                const totalFc2 = fixedCosts.reduce((sum, c) => sum + (c.amount || 0), 0);
-
-                const strawberryCost = fixedCosts.find(c => c.name.toLowerCase().includes('strawberry'));
-                const greensCost = fixedCosts.find(c => c.name.toLowerCase().includes('greens'));
-                const openFieldCost = fixedCosts.find(c => c.name.toLowerCase().includes('open field'));
-                const aggregationCost = fixedCosts.find(c => c.name.toLowerCase().includes('aggregation'));
-
-                const pct = (cost) => totalFc2 > 0 && cost ? ((cost.amount / totalFc2) * 100).toFixed(1) : '';
-
-                tableHTML += `
-                    <tr>
-                        <td colspan="7" style="padding: 12px 20px; background-color: #f9fafb;">
-                            <div style="display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-end;">
-                                <div style="font-weight: 600; margin-right: 8px;">Fixed Cost II Split (% of total):</div>
-                                <div style="display: flex; flex-wrap: wrap; gap: 8px;">
-                                    <label style="font-size: 12px;">
-                                        Strawberry
-                                        <input id="fc2-strawberry-pct" type="number" min="0" max="100" step="0.1"
-                                           value="${pct(strawberryCost)}"
-                                           style="width: 70px; margin-left: 4px;">
-                                    </label>
-                                    <label style="font-size: 12px;">
-                                        Greens
-                                        <input id="fc2-greens-pct" type="number" min="0" max="100" step="0.1"
-                                           value="${pct(greensCost)}"
-                                           style="width: 70px; margin-left: 4px;">
-                                    </label>
-                                    <label style="font-size: 12px;">
-                                        Open Field
-                                        <input id="fc2-openfield-pct" type="number" min="0" max="100" step="0.1"
-                                           value="${pct(openFieldCost)}"
-                                           style="width: 70px; margin-left: 4px;">
-                                    </label>
-                                    <label style="font-size: 12px;">
-                                        Aggregation
-                                        <input id="fc2-aggregation-pct" type="number" min="0" max="100" step="0.1"
-                                           value="${pct(aggregationCost)}"
-                                           style="width: 70px; margin-left: 4px;">
-                                    </label>
-                                </div>
-                                <div style="margin-left: auto; display: flex; align-items: center; gap: 8px;">
-                                    <span id="fc2-total-label" style="font-size: 12px; color: #6b7280;">
-                                        Total Fixed Cost II: ₹${formatNumber(totalFc2)}
-                                    </span>
-                                    <button type="button" class="btn btn-sm btn-primary"
-                                        onclick='applyFixedCostIISplits(${JSON.stringify(fixedCosts)})'>
-                                        Apply Split
-                                    </button>
-                                </div>
-                            </div>
-                        </td>
-                    </tr>
-                `;
-            }
-
-            costsByCategory[categoryKey].forEach(cost => {
-                tableHTML += `
-                    <tr>
-                        <td style="padding-left: 20px;">${cost.name}</td>
-                        <td>₹${formatNumber(cost.amount)}</td>
-                        <td><span class="badge badge-info">${cost.applies_to}</span></td>
-                        <td>${cost.cost_type}</td>
-                        <td>${cost.basis}</td>
-                        <td><span class="badge badge-secondary">${cost.category}</span></td>
-                        <td>
-                            <button class="btn btn-sm btn-secondary" onclick="editCost(${cost.id})">
-                                <i class="fas fa-edit"></i>
-                            </button>
-                            <button class="btn btn-sm btn-danger" onclick="deleteCost(${cost.id})">
-                                <i class="fas fa-trash"></i>
-                            </button>
-                        </td>
-                    </tr>
-                `;
-            });
+            return;
         }
+        
+        html += `
+            <tr data-cost-id="${costId || ''}" data-template-key="${template.key}" style="${bgColor}">
+                <td style="${indent} ${fontWeight}">${template.label}</td>
+                <td>
+                    <input type="number" class="form-control cost-amount-input" 
+                           data-cost-id="${costId || ''}" 
+                           data-template-key="${template.key}"
+                           value="${amount.toFixed(2)}" 
+                           step="0.01"
+                           style="width: 150px; text-align: right; font-weight: 500;">
+                </td>
+                <td>
+                    <div style="display: flex; gap: 8px; align-items: center;">
+                        <label style="display: flex; align-items: center; gap: 4px; cursor: pointer; font-size: 12px;">
+                            <input type="checkbox" class="applies-to-checkbox" 
+                                   data-cost-id="${costId || ''}"
+                                   data-template-key="${template.key}"
+                                   data-type="inhouse"
+                                   ${appliesTo === 'inhouse' || appliesTo === 'both' ? 'checked' : ''}>
+                            <span style="padding: 2px 6px; background: #dbeafe; color: #1e40af; border-radius: 4px;">Inhouse</span>
+                        </label>
+                        <label style="display: flex; align-items: center; gap: 4px; cursor: pointer; font-size: 12px;">
+                            <input type="checkbox" class="applies-to-checkbox"
+                                   data-cost-id="${costId || ''}"
+                                   data-template-key="${template.key}"
+                                   data-type="outsourced"
+                                   ${appliesTo === 'outsourced' || appliesTo === 'both' ? 'checked' : ''}>
+                            <span style="padding: 2px 6px; background: #fef3c7; color: #92400e; border-radius: 4px;">Outsourced</span>
+                        </label>
+                    </div>
+                </td>
+                <td>
+                    ${costId ? `
+                        <button class="btn btn-sm btn-danger" onclick="deleteCost(${costId})" title="Delete">
+                            <i class="fas fa-trash"></i>
+                        </button>
+                    ` : `
+                        <span style="color: #9ca3af; font-size: 11px;">Not uploaded</span>
+                    `}
+                </td>
+            </tr>
+        `;
+    });
+
+    html += '</tbody></table>';
+    
+    // Add totals summary
+    let totalCosts = 0;
+    let inhouseCosts = 0;
+    let outsourcedCosts = 0;
+    costs.forEach(c => {
+        totalCosts += c.amount || 0;
+        if (c.applies_to === 'inhouse') inhouseCosts += c.amount || 0;
+        else if (c.applies_to === 'outsourced') outsourcedCosts += c.amount || 0;
+        else { inhouseCosts += (c.amount || 0) / 2; outsourcedCosts += (c.amount || 0) / 2; }
     });
     
-    // Display any costs not in predefined categories
-    Object.keys(costsByCategory).forEach(category => {
-        if (!categoryHeadings[category] && costsByCategory[category].length > 0) {
-            tableHTML += `
-                <tr style="background-color: #f0f0f0; font-weight: bold;">
-                    <td colspan="7" style="padding: 10px; font-size: 14px;">Other Costs</td>
-                </tr>
-            `;
-            
-            costsByCategory[category].forEach(cost => {
-                tableHTML += `
-                    <tr>
-                        <td style="padding-left: 20px;">${cost.name}</td>
-                        <td>₹${formatNumber(cost.amount)}</td>
-                        <td><span class="badge badge-info">${cost.applies_to}</span></td>
-                        <td>${cost.cost_type}</td>
-                        <td>${cost.basis}</td>
-                        <td><span class="badge badge-secondary">${cost.category}</span></td>
-                        <td>
-                            <button class="btn btn-sm btn-secondary" onclick="editCost(${cost.id})">
-                                <i class="fas fa-edit"></i>
-                            </button>
-                            <button class="btn btn-sm btn-danger" onclick="deleteCost(${cost.id})">
-                                <i class="fas fa-trash"></i>
-                            </button>
-                        </td>
-                    </tr>
-                `;
-            });
-        }
+    html += `
+        <div style="margin-top: 20px; padding: 15px; background: #f9fafb; border-radius: 8px; display: flex; gap: 30px;">
+            <div>
+                <span style="color: #6b7280; font-size: 12px;">Total Costs</span>
+                <div style="font-size: 18px; font-weight: 700;">₹${formatNumber(totalCosts)}</div>
+            </div>
+            <div>
+                <span style="color: #6b7280; font-size: 12px;">Inhouse Allocated</span>
+                <div style="font-size: 18px; font-weight: 700; color: #1e40af;">₹${formatNumber(inhouseCosts)}</div>
+            </div>
+            <div>
+                <span style="color: #6b7280; font-size: 12px;">Outsourced Allocated</span>
+                <div style="font-size: 18px; font-weight: 700; color: #92400e;">₹${formatNumber(outsourcedCosts)}</div>
+            </div>
+        </div>
+    `;
+
+    container.innerHTML = html;
+}
+
+// Save all cost changes (amounts and applies_to)
+async function saveAllCostChanges() {
+    const rows = document.querySelectorAll('tr[data-cost-id]');
+    const updates = [];
+    
+    rows.forEach(row => {
+        const costId = row.dataset.costId;
+        const templateKey = row.dataset.templateKey;
+        if (!costId) return; // Skip rows without existing cost
+        
+        const amountInput = row.querySelector('.cost-amount-input');
+        const inhouseCheckbox = row.querySelector('.applies-to-checkbox[data-type="inhouse"]');
+        const outsourcedCheckbox = row.querySelector('.applies-to-checkbox[data-type="outsourced"]');
+        
+        const amount = parseFloat(amountInput?.value || 0);
+        const inhouse = inhouseCheckbox?.checked;
+        const outsourced = outsourcedCheckbox?.checked;
+        
+        let appliesTo = 'both';
+        if (inhouse && !outsourced) appliesTo = 'inhouse';
+        else if (!inhouse && outsourced) appliesTo = 'outsourced';
+        else if (inhouse && outsourced) appliesTo = 'both';
+        
+        updates.push({ id: parseInt(costId), amount, applies_to: appliesTo });
     });
     
-    tableHTML += '</tbody></table>';
-    container.innerHTML = tableHTML;
+    if (updates.length === 0) {
+        showAlert('No changes to save', 'info');
+        return;
+    }
+    
+    try {
+        const response = await fetch(`${API_BASE}/costs/bulk-update`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ updates })
+        });
+        
+        if (response.ok) {
+            showAlert(`Updated ${updates.length} costs successfully`, 'success');
+            loadCosts(); // Refresh
+        } else {
+            const err = await response.json();
+            showAlert('Failed to save: ' + (err.detail || 'Unknown error'), 'error');
+        }
+    } catch (error) {
+        console.error('Save error:', error);
+        showAlert('Failed to save changes', 'error');
+    }
 }
 
 // Apply user-defined split for FIXED COST CAT - II
