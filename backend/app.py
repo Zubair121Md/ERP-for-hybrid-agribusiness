@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Depends, status, UploadFile, File, Form, Query, Request
+from fastapi import FastAPI, HTTPException, Depends, status, UploadFile, File, Form, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, StreamingResponse
@@ -2912,6 +2912,59 @@ async def get_cost_by_id(cost_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Cost not found")
     return cost
 
+
+class CostBulkUpdateItem(BaseModel):
+    id: int
+    amount: Optional[float] = None
+    applies_to: Optional[str] = None
+
+
+class CostBulkUpdateRequest(BaseModel):
+    updates: List[CostBulkUpdateItem]
+
+
+@app.put("/api/costs/bulk-update")
+async def bulk_update_costs(payload: CostBulkUpdateRequest, db: Session = Depends(get_db)):
+    """
+    Bulk update cost amounts and applies_to settings.
+    Must be registered before /api/costs/{cost_id} so 'bulk-update' is not parsed as an id.
+    """
+    updates = payload.updates
+    if not updates:
+        return {"success": False, "message": "No updates provided", "updated": 0}
+
+    updated_count = 0
+    try:
+        for update in updates:
+            cost = db.query(Cost).filter(Cost.id == update.id).first()
+            if not cost:
+                continue
+
+            if update.amount is not None:
+                cost.amount = float(update.amount)
+                cost.original_amount = float(update.amount)
+
+            if update.applies_to is not None:
+                applies_to = update.applies_to.strip().lower()
+                if applies_to in ("inhouse", "outsourced", "both"):
+                    cost.applies_to = applies_to
+                    if applies_to == "inhouse":
+                        cost.cost_type = "inhouse-only"
+                    elif applies_to == "outsourced":
+                        cost.cost_type = "outsourced-only"
+                    else:
+                        cost.cost_type = "common"
+
+            cost.updated_at = datetime.utcnow()
+            updated_count += 1
+
+        db.commit()
+        return {"success": True, "message": f"Updated {updated_count} costs", "updated": updated_count}
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.put("/api/costs/{cost_id}", response_model=CostResponse)
 async def update_cost(cost_id: int, cost_update: CostUpdate, db: Session = Depends(get_db)):
     cost = db.query(Cost).filter(Cost.id == cost_id).first()
@@ -2936,58 +2989,6 @@ async def delete_cost(cost_id: int, db: Session = Depends(get_db)):
     db.delete(cost)
     db.commit()
     return {"message": "Cost deleted successfully"}
-
-
-@app.put("/api/costs/bulk-update")
-async def bulk_update_costs(request: Request, db: Session = Depends(get_db)):
-    """
-    Bulk update cost amounts and applies_to settings.
-    Expects JSON: { "updates": [{ "id": 123, "amount": 5000.00, "applies_to": "inhouse" }, ...] }
-    """
-    try:
-        data = await request.json()
-        updates = data.get("updates", [])
-        
-        if not updates:
-            return {"success": False, "message": "No updates provided", "updated": 0}
-        
-        updated_count = 0
-        for update in updates:
-            cost_id = update.get("id")
-            if not cost_id:
-                continue
-            
-            cost = db.query(Cost).filter(Cost.id == cost_id).first()
-            if not cost:
-                continue
-            
-            # Update amount if provided
-            if "amount" in update:
-                cost.amount = float(update["amount"])
-                cost.original_amount = float(update["amount"])
-            
-            # Update applies_to if provided
-            if "applies_to" in update:
-                applies_to = update["applies_to"]
-                if applies_to in ("inhouse", "outsourced", "both"):
-                    cost.applies_to = applies_to
-                    # Also update cost_type for consistency
-                    if applies_to == "inhouse":
-                        cost.cost_type = "inhouse-only"
-                    elif applies_to == "outsourced":
-                        cost.cost_type = "outsourced-only"
-                    else:
-                        cost.cost_type = "common"
-            
-            cost.updated_at = datetime.utcnow()
-            updated_count += 1
-        
-        db.commit()
-        return {"success": True, "message": f"Updated {updated_count} costs", "updated": updated_count}
-    
-    except Exception as e:
-        db.rollback()
-        return {"success": False, "message": str(e), "updated": 0}
 
 
 # Initialize Cost Items endpoint removed - use /api/upload-cost-sheet instead

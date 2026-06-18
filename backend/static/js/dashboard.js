@@ -1216,12 +1216,18 @@ async function saveAllCostChanges() {
             body: JSON.stringify({ updates })
         });
         
-        if (response.ok) {
-            showAlert(`Updated ${updates.length} costs successfully`, 'success');
-            loadCosts(); // Refresh
+        const result = await response.json().catch(() => ({}));
+        if (response.ok && result.success !== false) {
+            showAlert(result.message || `Updated ${updates.length} costs successfully`, 'success');
+            loadCosts();
         } else {
-            const err = await response.json();
-            showAlert('Failed to save: ' + (err.detail || 'Unknown error'), 'error');
+            let msg = result.message || result.detail || 'Unknown error';
+            if (Array.isArray(msg)) {
+                msg = msg.map(e => e.msg || JSON.stringify(e)).join('; ');
+            } else if (typeof msg === 'object') {
+                msg = JSON.stringify(msg);
+            }
+            showAlert('Failed to save: ' + msg, 'error');
         }
     } catch (error) {
         console.error('Save error:', error);
