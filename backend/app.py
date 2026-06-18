@@ -4575,7 +4575,7 @@ def parse_category_totals_sheet(file_bytes: bytes) -> Dict[str, Any]:
 
     expenses = {
         'fixed_cost_cat_i':     {'total': 0.0, 'items': []},
-        'fixed_cost_cat_ii':    {'total': 0.0, 'items': [], 'splits': {'strawberry': 0.60, 'greens': 0.25, 'open_field': 0.0, 'aggregation': 0.15}},
+        'fixed_cost_cat_ii':    {'total': 0.0, 'items': [], 'splits': {'strawberry': 0.50, 'greens': 0.25, 'open_field': 0.10, 'aggregation': 0.15}},
         'variable_cost':        {'total': 0.0, 'subcategories': {}},
         'distribution_cost':    {'total': 0.0, 'items': []},
         'marketing_expenses':   {'total': 0.0, 'items': []},
@@ -7078,13 +7078,13 @@ async def upload_cost_sheet(file: UploadFile = File(...), db: Session = Depends(
             print(f"   📊 FIXED COST CAT - II: ₹{fc2:,.2f}")
             if fc2 > 0:
                 fc2_splits = (expenses.get('fixed_cost_cat_ii', {}) or {}).get('splits', {}) or {}
-                strawberry_pct = float(fc2_splits.get('strawberry', 0.60) or 0.60)
+                strawberry_pct = float(fc2_splits.get('strawberry', 0.50) or 0.50)
                 greens_pct = float(fc2_splits.get('greens', 0.25) or 0.25)
-                open_field_pct = float(fc2_splits.get('open_field', 0.00) or 0.00)
+                open_field_pct = float(fc2_splits.get('open_field', 0.10) or 0.10)
                 aggregation_pct = float(fc2_splits.get('aggregation', 0.15) or 0.15)
                 pct_total = strawberry_pct + greens_pct + open_field_pct + aggregation_pct
                 if pct_total <= 0:
-                    strawberry_pct, greens_pct, open_field_pct, aggregation_pct = 0.60, 0.25, 0.00, 0.15
+                    strawberry_pct, greens_pct, open_field_pct, aggregation_pct = 0.50, 0.25, 0.10, 0.15
                     pct_total = 1.0
 
                 strawberry_amt = round(fc2 * (strawberry_pct / pct_total), 2)

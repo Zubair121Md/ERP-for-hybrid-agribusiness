@@ -29,6 +29,115 @@ const COST_TEMPLATE = [
     { key: 'purchase_accounts', label: '9. PURCHASE ACCOUNTS', level: 0, defaultAppliesTo: 'outsourced' },
 ];
 
+const FC2_DEFAULT_SPLITS = { strawberry: 50, greens: 25, openField: 10, aggregation: 15 };
+
+const FC2_BUCKET_CONFIG = [
+    { key: 'strawberry', label: 'Strawberry', pctId: 'fc2-strawberry-pct', name: 'FIXED COST CAT - II - Strawberry', applies_to: 'inhouse', cost_type: 'inhouse-only' },
+    { key: 'greens', label: 'Greens', pctId: 'fc2-greens-pct', name: 'FIXED COST CAT - II - Greens', applies_to: 'inhouse', cost_type: 'inhouse-only' },
+    { key: 'openField', label: 'Open Field', pctId: 'fc2-openfield-pct', name: 'FIXED COST CAT - II - Open Field', applies_to: 'inhouse', cost_type: 'inhouse-only' },
+    { key: 'aggregation', label: 'Aggregation', pctId: 'fc2-aggregation-pct', name: 'FIXED COST CAT - II - Aggregation', applies_to: 'outsourced', cost_type: 'common' },
+];
+
+function getFc2CostsForMonth(costs, month) {
+    const m = normalizeMonthKey(month);
+    return (costs || []).filter(c => {
+        const n = (c.name || '').toUpperCase();
+        return normalizeMonthKey(c.month) === m && n.startsWith('FIXED COST CAT - II');
+    });
+}
+
+function getFc2BucketCosts(costs, month) {
+    const fc2 = getFc2CostsForMonth(costs, month);
+    return FC2_BUCKET_CONFIG.map(cfg => fc2.find(c => (c.name || '').toUpperCase() === cfg.name.toUpperCase()) || null);
+}
+
+function getFc2TotalAmount(costs, month) {
+    const buckets = getFc2BucketCosts(costs, month);
+    const bucketSum = buckets.reduce((s, c) => s + (c?.amount || 0), 0);
+    if (bucketSum > 0) return bucketSum;
+    const pooled = getFc2CostsForMonth(costs, month).find(c => (c.name || '').trim().toUpperCase() === 'FIXED COST CAT - II');
+    return pooled?.amount || 0;
+}
+
+function getFc2SplitPercents(costs, month) {
+    const buckets = getFc2BucketCosts(costs, month);
+    const total = buckets.reduce((s, c) => s + (c?.amount || 0), 0);
+    if (total <= 0) return { ...FC2_DEFAULT_SPLITS };
+    const [s, g, o, a] = buckets;
+    return {
+        strawberry: s ? ((s.amount / total) * 100) : 0,
+        greens: g ? ((g.amount / total) * 100) : 0,
+        openField: o ? ((o.amount / total) * 100) : 0,
+        aggregation: a ? ((a.amount / total) * 100) : 0,
+    };
+}
+
+function renderFc2SplitSection(costs, activeMonth, fc2Total) {
+    const pcts = getFc2SplitPercents(costs, activeMonth);
+    const buckets = getFc2BucketCosts(costs, activeMonth);
+    const pctValues = [pcts.strawberry, pcts.greens, pcts.openField, pcts.aggregation];
+    const amounts = FC2_BUCKET_CONFIG.map((_, i) => {
+        const pct = pctValues[i];
+        return fc2Total > 0 && pct > 0 ? (fc2Total * pct / 100) : (buckets[i]?.amount || 0);
+    });
+    let bucketRows = FC2_BUCKET_CONFIG.map((cfg, i) => `
+        <tr style="background: #fafafa;">
+            <td style="padding-left: 48px; font-size: 13px; color: #374151;">↳ ${cfg.label}</td>
+            <td style="text-align: right; font-size: 13px; color: #6b7280;" id="fc2-amt-${cfg.key}">₹${formatNumber(amounts[i])}</td>
+            <td colspan="2"></td>
+        </tr>
+    `).join('');
+    return `
+        <tr>
+            <td colspan="4" style="padding: 12px 20px; background: #f9fafb; border-bottom: 1px solid #e5e7eb;">
+                <div style="font-weight: 600; margin-bottom: 10px; font-size: 13px;">Fixed Cost II Split (% of total)</div>
+                <div style="display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-end;">
+                    ${FC2_BUCKET_CONFIG.map((cfg, i) => `
+                        <label style="font-size: 12px;">
+                            ${cfg.label}
+                            <input id="${cfg.pctId}" type="number" min="0" max="100" step="0.1"
+                                value="${pctValues[i].toFixed(1)}"
+                                oninput="updateFc2SplitPreview()"
+                                style="width: 70px; margin-left: 4px;"> %
+                        </label>
+                    `).join('')}
+                    <span id="fc2-pct-total-label" style="font-size: 12px; color: #6b7280; margin-left: 8px;">
+                        Total: ${pctValues.reduce((a, b) => a + b, 0).toFixed(1)}%
+                    </span>
+                </div>
+            </td>
+        </tr>
+        ${bucketRows}
+    `;
+}
+
+function updateFc2SplitPreview() {
+    const totalInput = document.querySelector('tr[data-template-key="fixed_cost_cat_ii"] .cost-amount-input');
+    const totalFc2 = parseFloat(totalInput?.value || 0);
+    const pcts = FC2_BUCKET_CONFIG.map(cfg => parseFloat(document.getElementById(cfg.pctId)?.value || 0));
+    const sumPct = pcts.reduce((a, b) => a + b, 0);
+    const label = document.getElementById('fc2-pct-total-label');
+    if (label) {
+        label.textContent = `Total: ${sumPct.toFixed(1)}%` + (Math.abs(sumPct - 100) > 0.01 ? ' (will normalize to 100%)' : '');
+        label.style.color = Math.abs(sumPct - 100) > 0.01 ? '#b45309' : '#6b7280';
+    }
+    if (totalFc2 <= 0 || sumPct <= 0) return;
+    const normalized = pcts.map(v => (v / sumPct) * 100);
+    let allocated = 0;
+    FC2_BUCKET_CONFIG.forEach((cfg, i) => {
+        const el = document.getElementById(`fc2-amt-${cfg.key}`);
+        if (!el) return;
+        let amt;
+        if (i === FC2_BUCKET_CONFIG.length - 1) {
+            amt = Math.round((totalFc2 - allocated) * 100) / 100;
+        } else {
+            amt = Math.round((totalFc2 * (normalized[i] / 100)) * 100) / 100;
+            allocated += amt;
+        }
+        el.textContent = '₹' + formatNumber(amt);
+    });
+}
+
 function getActiveCostMonth(costs) {
     const sel = normalizeMonthKey(document.getElementById('allocation-month')?.value || '');
     if (sel) return sel;
@@ -41,15 +150,15 @@ function getActiveCostMonth(costs) {
 function resolveTemplateKey(cost) {
     const nameUpper = (cost.name || '').toUpperCase();
     const cat = (cost.category || '').toLowerCase();
+    if (nameUpper.startsWith('FIXED COST CAT - II -')) return null;
     if (cat === 'fixed_cost_cat_i' || (nameUpper.includes('FIXED COST CAT') && nameUpper.includes('I') && !nameUpper.includes('II'))) {
         return 'fixed_cost_cat_i';
     }
     if (nameUpper === 'FIXED COST CAT - II' || (cat === 'fixed_cost_cat_ii' && nameUpper === 'FIXED COST CAT - II')) {
         return 'fixed_cost_cat_ii';
     }
-    if (nameUpper.includes('OPEN FIELD')) return 'open_field';
+    if (nameUpper.includes('OPEN FIELD') && !nameUpper.includes('FIXED COST')) return 'open_field';
     if (nameUpper.includes('LETTUCE')) return 'lettuce';
-    if (nameUpper.includes('STRAWBERRY') && nameUpper.includes('FIXED COST CAT - II')) return null;
     if (nameUpper.includes('STRAWBERRY')) return 'strawberry';
     if (nameUpper.includes('RASPBERRY') || nameUpper.includes('BLUEBERRY')) return 'raspberry_blueberry';
     if (nameUpper.includes('CITRUS')) return 'citrus';
@@ -1079,11 +1188,18 @@ function displayCosts(costs) {
     `;
 
     COST_TEMPLATE.forEach(template => {
-        const cost = costMap[template.key];
-        const amount = cost ? cost.amount : 0;
+        let cost = costMap[template.key];
+        let amount = cost ? cost.amount : 0;
+        let costId = cost ? cost.id : null;
+
+        if (template.key === 'fixed_cost_cat_ii') {
+            amount = getFc2TotalAmount(costs, activeMonth);
+            const pooled = getFc2CostsForMonth(costs, activeMonth).find(
+                c => (c.name || '').trim().toUpperCase() === 'FIXED COST CAT - II'
+            );
+            costId = pooled?.id || null;
+        }
         const appliesTo = cost ? cost.applies_to : template.defaultAppliesTo;
-        const costId = cost ? cost.id : null;
-        
         const indent = template.level === 1 ? 'padding-left: 40px;' : '';
         const bgColor = template.level === 0 ? 'background: #f3f4f6;' : '';
         const fontWeight = template.level === 0 ? 'font-weight: 600;' : '';
@@ -1109,6 +1225,7 @@ function displayCosts(costs) {
                            data-template-key="${template.key}"
                            value="${amount.toFixed(2)}" 
                            step="0.01"
+                           ${template.key === 'fixed_cost_cat_ii' ? 'oninput="updateFc2SplitPreview()"' : ''}
                            style="width: 150px; text-align: right; font-weight: 500;">
                 </td>
                 <td>
@@ -1142,6 +1259,10 @@ function displayCosts(costs) {
                 </td>
             </tr>
         `;
+
+        if (template.key === 'fixed_cost_cat_ii') {
+            html += renderFc2SplitSection(costs, activeMonth, amount);
+        }
     });
 
     html += '</tbody></table>';
@@ -1202,6 +1323,7 @@ async function saveAllCostChanges() {
         else if (!inhouse && !outsourced) appliesTo = 'both';
         
         const hasId = costId && costId !== '';
+        if (templateKey === 'fixed_cost_cat_ii') return;
         if (!hasId && amount <= 0) return;
         
         updates.push({
@@ -1213,97 +1335,96 @@ async function saveAllCostChanges() {
         });
     });
     
-    if (updates.length === 0) {
+    const fc2Input = document.querySelector('tr[data-template-key="fixed_cost_cat_ii"] .cost-amount-input');
+    const fc2Total = parseFloat(fc2Input?.value || 0);
+
+    if (updates.length === 0 && fc2Total <= 0) {
         showAlert('No changes to save', 'info');
         return;
     }
     
     try {
-        const response = await fetch(`${API_BASE}/costs/bulk-update`, {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ updates })
-        });
-        
-        const result = await response.json().catch(() => ({}));
-        if (response.ok && result.success !== false) {
-            showAlert(result.message || `Updated ${updates.length} costs successfully`, 'success');
-            loadCosts();
-        } else {
-            let msg = result.message || result.detail || 'Unknown error';
-            if (Array.isArray(msg)) {
-                msg = msg.map(e => e.msg || JSON.stringify(e)).join('; ');
-            } else if (typeof msg === 'object') {
-                msg = JSON.stringify(msg);
+        if (updates.length > 0) {
+            const response = await fetch(`${API_BASE}/costs/bulk-update`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ updates })
+            });
+            
+            const result = await response.json().catch(() => ({}));
+            if (!response.ok || result.success === false) {
+                let msg = result.message || result.detail || 'Unknown error';
+                if (Array.isArray(msg)) {
+                    msg = msg.map(e => e.msg || JSON.stringify(e)).join('; ');
+                } else if (typeof msg === 'object') {
+                    msg = JSON.stringify(msg);
+                }
+                showAlert('Failed to save: ' + msg, 'error');
+                return;
             }
-            showAlert('Failed to save: ' + msg, 'error');
         }
+
+        if (fc2Total > 0) {
+            const splitOk = await applyFixedCostIISplits();
+            if (splitOk === false) return;
+        }
+
+        showAlert('Costs saved successfully', 'success');
+        loadCosts();
     } catch (error) {
         console.error('Save error:', error);
         showAlert('Failed to save changes', 'error');
     }
 }
 
-// Apply user-defined split for FIXED COST CAT - II
-async function applyFixedCostIISplits(fixedCosts) {
+// Apply user-defined split for FIXED COST CAT - II (50/25/10/15 default)
+async function applyFixedCostIISplits() {
     try {
-        const strawberryPct = parseFloat(document.getElementById('fc2-strawberry-pct').value || '0');
-        const greensPct = parseFloat(document.getElementById('fc2-greens-pct').value || '0');
-        const openFieldPct = parseFloat(document.getElementById('fc2-openfield-pct').value || '0');
-        const aggregationPct = parseFloat(document.getElementById('fc2-aggregation-pct').value || '0');
+        const strawberryPct = parseFloat(document.getElementById('fc2-strawberry-pct')?.value || '0');
+        const greensPct = parseFloat(document.getElementById('fc2-greens-pct')?.value || '0');
+        const openFieldPct = parseFloat(document.getElementById('fc2-openfield-pct')?.value || '0');
+        const aggregationPct = parseFloat(document.getElementById('fc2-aggregation-pct')?.value || '0');
 
         const inputPcts = [strawberryPct, greensPct, openFieldPct, aggregationPct];
         if (inputPcts.some(v => v < 0 || Number.isNaN(v))) {
             showAlert('Fixed Cost II percentages must be non-negative numbers.', 'error');
-            return;
+            return false;
         }
         const totalPct = inputPcts.reduce((a, b) => a + b, 0);
         if (totalPct <= 0) {
             showAlert('Enter at least one percentage greater than 0.', 'error');
-            return;
+            return false;
         }
 
-        // Normalize automatically when total is not exactly 100.
         const normalized = inputPcts.map(v => (v / totalPct) * 100);
         if (Math.abs(totalPct - 100) > 0.01) {
             showAlert(`Percentages normalized from ${totalPct.toFixed(1)}% to 100%.`, 'info');
         }
 
-        // Sum FC-II total from bucket rows only; avoid double-counting legacy pooled "FIXED COST CAT - II".
+        const fc2Input = document.querySelector('tr[data-template-key="fixed_cost_cat_ii"] .cost-amount-input');
+        const totalFc2 = parseFloat(fc2Input?.value || 0);
+        if (totalFc2 <= 0) {
+            showAlert('Enter a Fixed Cost II total amount before applying split.', 'error');
+            return false;
+        }
+
+        const fc2Month = document.querySelector('tr[data-template-key="fixed_cost_cat_ii"]')?.dataset.month
+            || getActiveCostMonth(cachedCosts);
+        const fixedCosts = getFc2CostsForMonth(cachedCosts, fc2Month);
+
         const pooledFc2Cost = fixedCosts.find(c =>
             (c.name || '').trim().toUpperCase() === 'FIXED COST CAT - II'
         );
-        const fc2BucketRows = fixedCosts.filter(c => {
-            const u = (c.name || '').trim().toUpperCase();
-            return u.startsWith('FIXED COST CAT - II') && u !== 'FIXED COST CAT - II';
-        });
-        const totalFc2 = fc2BucketRows.length > 0
-            ? fc2BucketRows.reduce((sum, c) => sum + (c.amount || 0), 0)
-            : (pooledFc2Cost ? (pooledFc2Cost.amount || 0) : fixedCosts.reduce((sum, c) => sum + (c.amount || 0), 0));
-        if (totalFc2 <= 0) {
-            showAlert('Total Fixed Cost II amount is zero. Nothing to split.', 'error');
-            return;
-        }
 
-        // Helper to find or create cost slots
-        const findByName = (keyword) =>
-            fixedCosts.find(c => c.name.toLowerCase().includes(keyword));
+        const findBucket = (cfg) => fixedCosts.find(c => (c.name || '').toUpperCase() === cfg.name.toUpperCase());
 
-        const strawberryCost = findByName('strawberry');
-        const greensCost = findByName('greens');
-        const openFieldCost = findByName('open field');
-        const aggregationCost = findByName('aggregation');
-        const findAllByName = (keyword) =>
-            fixedCosts.filter(c => (c.name || '').toLowerCase().includes(keyword));
+        const targets = FC2_BUCKET_CONFIG.map((cfg, idx) => ({
+            pct: normalized[idx],
+            cost: findBucket(cfg),
+            label: cfg.label,
+            cfg,
+        }));
 
-        const targets = [
-            { pct: normalized[0], cost: strawberryCost, label: 'Strawberry' },
-            { pct: normalized[1], cost: greensCost, label: 'Greens' },
-            { pct: normalized[2], cost: openFieldCost, label: 'Open Field' },
-            { pct: normalized[3], cost: aggregationCost, label: 'Aggregation' },
-        ];
-
-        // Split amounts: round per positive bucket, put remainder on last positive bucket so sum === totalFc2
         const positiveIdx = targets.map((t, i) => (t.pct > 0 ? i : -1)).filter(i => i >= 0);
         const amounts = [0, 0, 0, 0];
         let allocatedSum = 0;
@@ -1319,29 +1440,9 @@ async function applyFixedCostIISplits(fixedCosts) {
         }
         const updates = targets.map((t, idx) => ({ ...t, amount: amounts[idx] }));
 
-        // Get month from any existing FC2 cost (for creating missing Open Field row). Backend expects YYYY-MM.
-        const existingCost = strawberryCost || greensCost || aggregationCost;
-        const selectedMonth = (document.getElementById('allocation-month')?.value || '').trim();
-        let fc2Month = existingCost ? (existingCost.month || selectedMonth || '2025-04') : (selectedMonth || '2025-04');
-        if (typeof fc2Month === 'string' && fc2Month.length > 7) {
-            const match = fc2Month.match(/(\d{4})-(\d{2})/);
-            fc2Month = match ? `${match[1]}-${match[2]}` : '2025-04';
-        }
-
-        const createConfig = {
-            'Strawberry': { name: 'FIXED COST CAT - II - Strawberry', applies_to: 'inhouse', cost_type: 'inhouse-only' },
-            'Greens': { name: 'FIXED COST CAT - II - Greens', applies_to: 'inhouse', cost_type: 'inhouse-only' },
-            'Open Field': { name: 'FIXED COST CAT - II - Open Field', applies_to: 'inhouse', cost_type: 'inhouse-only' },
-            'Aggregation': { name: 'FIXED COST CAT - II - Aggregation', applies_to: 'outsourced', cost_type: 'common' },
-        };
-
         for (const u of updates) {
             if (!u.cost) {
-                const cfg = createConfig[u.label];
-                if (!cfg) {
-                    continue;
-                }
-                // Backend create schema requires amount > 0; create with 0.01 if needed, then update to exact amount.
+                const cfg = u.cfg;
                 const createPayload = {
                     name: cfg.name,
                     amount: u.amount > 0 ? u.amount : 0.01,
@@ -1351,7 +1452,7 @@ async function applyFixedCostIISplits(fixedCosts) {
                     month: fc2Month,
                     is_fixed: 'fixed',
                     category: 'fixed_cost_cat_ii',
-                    source_file: 'cost_sheet_upload'
+                    source_file: 'manual'
                 };
                 const createRes = await fetch(`${API_BASE}/costs/`, {
                     method: 'POST',
@@ -1362,69 +1463,39 @@ async function applyFixedCostIISplits(fixedCosts) {
                     const err = await createRes.json().catch(() => ({}));
                     console.error(`Error creating Fixed Cost II ${u.label}:`, err);
                     showAlert(`Error creating Fixed Cost II - ${u.label} row.`, 'error');
-                    return;
+                    return false;
                 }
                 const created = await createRes.json().catch(() => null);
                 if (created && created.id) {
                     u.cost = created;
                 } else {
-                    console.error(`Create response missing id for ${u.label}`);
                     showAlert(`Error creating Fixed Cost II - ${u.label} row.`, 'error');
-                    return;
+                    return false;
                 }
             }
 
-            // Only send fields allowed by CostUpdate schema (amount, etc.)
-            const payload = {
-                amount: u.amount
-            };
-
+            const payload = { amount: u.amount };
             const response = await fetch(`${API_BASE}/costs/${u.cost.id}`, {
                 method: 'PUT',
-                headers: {
-                    'Content-Type': 'application/json'
-                },
+                headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(payload)
             });
 
             if (!response.ok) {
-                const err = await response.json().catch(() => ({}));
-                console.error('Error updating Fixed Cost II split:', err);
                 showAlert(`Error updating Fixed Cost II (${u.label})`, 'error');
-                return;
+                return false;
             }
         }
 
-        // Remove duplicate FC-II bucket rows if any exist (keep the updated one).
-        const dupGroups = [
-            { label: 'Strawberry', rows: findAllByName('strawberry') },
-            { label: 'Greens', rows: findAllByName('greens') },
-            { label: 'Open Field', rows: findAllByName('open field') },
-            { label: 'Aggregation', rows: findAllByName('aggregation') },
-        ];
-        for (const g of dupGroups) {
-            if (!g.rows || g.rows.length <= 1) continue;
-            const keep = updates.find(u => u.label === g.label && u.cost)?.cost;
-            const deleteRows = g.rows.filter(r => !keep || r.id !== keep.id);
-            for (const r of deleteRows) {
-                await fetch(`${API_BASE}/costs/${r.id}`, { method: 'DELETE' });
-            }
-        }
-
-        // Cleanup legacy pooled FC2 row after split rows are set.
         if (pooledFc2Cost) {
-            const deleteRes = await fetch(`${API_BASE}/costs/${pooledFc2Cost.id}`, { method: 'DELETE' });
-            if (!deleteRes.ok) {
-                const err = await deleteRes.json().catch(() => ({}));
-                console.warn('Could not delete legacy FIXED COST CAT - II pooled row:', err);
-            }
+            await fetch(`${API_BASE}/costs/${pooledFc2Cost.id}`, { method: 'DELETE' });
         }
 
-        showAlert('Fixed Cost II split updated successfully.', 'success');
-        loadCosts();
+        return true;
     } catch (error) {
         console.error('Error applying Fixed Cost II split:', error);
         showAlert('Unexpected error while updating Fixed Cost II split.', 'error');
+        return false;
     }
 }
 
