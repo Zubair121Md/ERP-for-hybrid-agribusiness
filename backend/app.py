@@ -849,6 +849,14 @@ def _pool_section_sales_kg(
         if month_key and _to_month_key(sale.month) != month_key:
             continue
 
+        if pool == "common_expenses_farm":
+            if product.source != "inhouse":
+                continue
+            kg = _sale_quantity_kg(sale)
+            if kg > 0:
+                total += kg
+            continue
+
         if pool in OUTSOURCED_SECTION_POOLS:
             if product.source != "outsourced":
                 continue
@@ -907,9 +915,21 @@ def _resolve_allocation_denominator_kg(
 ) -> float:
     """
     Denominator kg for pool allocation (P&L COP basis).
-    Priority: official P&L section kg → harvest template kg → mapped sales kg → stored → lookup → sales sum.
+    Priority: official P&L section kg → harvest template kg → mapped sales kg → stored → lookup → basis sum.
+  Wastage & shortage uses sum of outsourced wastage kg first (must reconcile to pool total).
     """
     month_key = _to_month_key(month or getattr(cost, "month", None) or "")
+    cost_name_upper = (cost.name or "").upper()
+    is_wastage = "WASTAGE" in cost_name_upper and "SHORTAGE" in cost_name_upper
+
+    if is_wastage and compute_total_basis_fn:
+        basis_sum = float(compute_total_basis_fn() or 0)
+        if basis_sum > 0:
+            return basis_sum
+        agg = float(OFFICIAL_SECTION_KG.get("aggregation") or 0)
+        if agg > 0:
+            return agg
+
     pool = _pool_key_for_cost(cost)
     if pool:
         official = float(OFFICIAL_SECTION_KG.get(pool) or 0)
@@ -1530,7 +1550,7 @@ ALLOCATION_DENOMINATOR_KG_BY_NAME: Dict[str, float] = {
     "MARKETING EXPENSES": 20536.10,
     "VEHICLE RUNNING COST": 20536.10,
     "OTHERS": 20536.10,
-    "WASTAGE & SHORTAGE": 20536.10,
+    "WASTAGE & SHORTAGE": 12798.665,
 }
 
 
@@ -1843,8 +1863,10 @@ def _normalize_mapping_section(section: Optional[str]) -> str:
 
 def _section_matches_pool(section: str, pool: str) -> bool:
     sl = (section or "").strip().lower()
-    if pool in ("open_field", "common_expenses_farm"):
+    if pool in ("open_field",):
         return sl == "open field"
+    if pool == "common_expenses_farm":
+        return sl in ("open field", "strawberry") or sl.startswith("polyhouse")
     if pool == "lettuce":
         return sl.startswith("polyhouse") or sl in ("lettuce", "greens")
     if pool == "strawberry":
@@ -2213,6 +2235,10 @@ class CostAllocationEngine:
             if variable_pool:
                 if variable_pool in ("packing", "packing_materials_others"):
                     applicable[product_id] = product
+                    continue
+                if variable_pool == "common_expenses_farm":
+                    if product.source == "inhouse":
+                        applicable[product_id] = product
                     continue
                 if variable_pool == "aggregation":
                     if product.source == "outsourced":
