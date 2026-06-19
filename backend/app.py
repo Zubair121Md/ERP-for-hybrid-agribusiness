@@ -4743,7 +4743,7 @@ def semantic_map_sales_columns(df_raw: pd.DataFrame, blocks_row: int, qty_row: i
 def extract_pl_semantic_totals(df_raw: pd.DataFrame) -> Dict[str, Any]:
     """
     Section-aware fallback extractor for P&L with sparse/merged rows.
-    It tracks current section and captures material maxima per section/subsection.
+    Also works as a simple row-by-row scanner for summary sheets.
     """
     def norm(v: Any) -> str:
         return str(v).strip().upper() if pd.notna(v) else ""
@@ -4768,6 +4768,7 @@ def extract_pl_semantic_totals(df_raw: pd.DataFrame) -> Dict[str, Any]:
             "packing": 0.0,
             "aggregation": 0.0,
             "common_expenses_farm": 0.0,
+            "packing_materials_others": 0.0,
         }
     }
 
@@ -4777,71 +4778,166 @@ def extract_pl_semantic_totals(df_raw: pd.DataFrame) -> Dict[str, Any]:
         if not txt:
             continue
 
-        # Section headers
-        if "FIXED COST" in txt and "CAT" in txt and "II" not in txt and "-II" not in txt:
-            section = "fixed_cost_cat_i"
+        # Get all numbers from this row
+        nums = [parse_numeric_robust(v) for v in row.tolist() if pd.notna(v)]
+        nums = [n for n in nums if abs(n) > 0]
+        row_max = max(nums) if nums else 0.0
+
+        # =====================================================================
+        # DIRECT KEYWORD MATCHING (for summary sheets with standalone category names)
+        # This runs BEFORE section tracking for simple "Category | Amount" layouts
+        # =====================================================================
+        
+        # Fixed Cost Cat-I (not II)
+        if "FIXED COST" in txt and "CAT" in txt:
+            if "II" in txt or "-II" in txt or "CAT-II" in txt or "CAT 2" in txt:
+                if row_max > totals["fixed_cost_cat_ii"]:
+                    totals["fixed_cost_cat_ii"] = row_max
+                    print(f"[SEMANTIC] Fixed Cost Cat-II: {row_max}")
+                section = "fixed_cost_cat_ii"
+            else:
+                if row_max > totals["fixed_cost_cat_i"]:
+                    totals["fixed_cost_cat_i"] = row_max
+                    print(f"[SEMANTIC] Fixed Cost Cat-I: {row_max}")
+                section = "fixed_cost_cat_i"
             variable_sub = None
-        elif "FIXED COST" in txt and ("CAT -II" in txt or "CAT - II" in txt or "CAT -2" in txt or "CAT II" in txt):
-            section = "fixed_cost_cat_ii"
-            variable_sub = None
-        elif "VARIABLE COST" in txt:
+            continue
+
+        # Variable cost section header OR standalone variable subcategories
+        if "VARIABLE COST" in txt:
             section = "variable"
             variable_sub = None
-        elif "DISTRIBUTION COST" in txt:
+        
+        # Open Field (standalone or in variable section)
+        if "OPEN FIELD" in txt and "FIXED" not in txt:
+            if row_max > totals["variable_subcategories"]["open_field"]:
+                totals["variable_subcategories"]["open_field"] = row_max
+                print(f"[SEMANTIC] Open Field: {row_max}")
+            continue
+        
+        # Lettuce (standalone)
+        if "LETTUCE" in txt:
+            if row_max > totals["variable_subcategories"]["lettuce"]:
+                totals["variable_subcategories"]["lettuce"] = row_max
+                print(f"[SEMANTIC] Lettuce: {row_max}")
+            continue
+        
+        # Strawberry (standalone)
+        if "STRAWBERRY" in txt:
+            if row_max > totals["variable_subcategories"]["strawberry"]:
+                totals["variable_subcategories"]["strawberry"] = row_max
+                print(f"[SEMANTIC] Strawberry: {row_max}")
+            continue
+        
+        # Raspberry & Blueberry
+        if "RASPBERRY" in txt or "BLUEBERRY" in txt or "BLUBERRY" in txt:
+            if row_max > totals["variable_subcategories"]["raspberry_blueberry"]:
+                totals["variable_subcategories"]["raspberry_blueberry"] = row_max
+                print(f"[SEMANTIC] Raspberry & Blueberry: {row_max}")
+            continue
+        
+        # Citrus
+        if "CITRUS" in txt:
+            if row_max > totals["variable_subcategories"]["citrus"]:
+                totals["variable_subcategories"]["citrus"] = row_max
+                print(f"[SEMANTIC] Citrus: {row_max}")
+            continue
+        
+        # Packing (but not Packing Materials)
+        if "PACKING" in txt and "MATERIALS" not in txt and "PURCHASE" not in txt:
+            if row_max > totals["variable_subcategories"]["packing"]:
+                totals["variable_subcategories"]["packing"] = row_max
+                print(f"[SEMANTIC] Packing: {row_max}")
+            continue
+        
+        # Packing Materials (Others)
+        if "PACKING" in txt and "MATERIALS" in txt and "PURCHASE" not in txt:
+            if row_max > totals["variable_subcategories"]["packing_materials_others"]:
+                totals["variable_subcategories"]["packing_materials_others"] = row_max
+                print(f"[SEMANTIC] Packing Materials (Others): {row_max}")
+            continue
+        
+        # Aggregation
+        if "AGGREGATION" in txt:
+            if row_max > totals["variable_subcategories"]["aggregation"]:
+                totals["variable_subcategories"]["aggregation"] = row_max
+                print(f"[SEMANTIC] Aggregation: {row_max}")
+            continue
+        
+        # Common Expenses - Farm
+        if "COMMON" in txt and ("EXPENSES" in txt or "FARM" in txt):
+            if row_max > totals["variable_subcategories"]["common_expenses_farm"]:
+                totals["variable_subcategories"]["common_expenses_farm"] = row_max
+                print(f"[SEMANTIC] Common Expenses - Farm: {row_max}")
+            continue
+
+        # Distribution Cost
+        if "DISTRIBUTION" in txt:
+            if row_max > totals["distribution_cost"]:
+                totals["distribution_cost"] = row_max
+                print(f"[SEMANTIC] Distribution Cost: {row_max}")
             section = "distribution_cost"
             variable_sub = None
-        elif "MARKETING EXPENSES" in txt:
+            continue
+        
+        # Marketing Expenses
+        if "MARKETING" in txt:
+            if row_max > totals["marketing_expenses"]:
+                totals["marketing_expenses"] = row_max
+                print(f"[SEMANTIC] Marketing Expenses: {row_max}")
             section = "marketing_expenses"
             variable_sub = None
-        elif "VEHICLE RUNNING COST" in txt:
+            continue
+        
+        # Vehicle Running Cost
+        if "VEHICLE" in txt and "RUNNING" in txt:
+            if row_max > totals["vehicle_running_cost"]:
+                totals["vehicle_running_cost"] = row_max
+                print(f"[SEMANTIC] Vehicle Running Cost: {row_max}")
             section = "vehicle_running_cost"
             variable_sub = None
-        elif txt.strip() == "OTHERS" or " 6 OTHERS" in txt:
+            continue
+        
+        # Others (standalone - but not purchase others)
+        if txt.strip() == "OTHERS" or (txt.strip().endswith("OTHERS") and "PURCHASE" not in txt and "PACKING" not in txt):
+            if row_max > totals["others"]:
+                totals["others"] = row_max
+                print(f"[SEMANTIC] Others: {row_max}")
             section = "others"
             variable_sub = None
-        elif "WASTAGE" in txt and "SHORTAGE" in txt:
+            continue
+        
+        # Wastage & Shortage
+        if "WASTAGE" in txt:
+            if row_max > totals["wastage_shortage"]:
+                totals["wastage_shortage"] = row_max
+                print(f"[SEMANTIC] Wastage & Shortage: {row_max}")
             section = "wastage_shortage"
             variable_sub = None
-        elif "PURCHASE ACCOUNTS" in txt:
+            continue
+        
+        # Purchase Accounts (sum all purchase items)
+        if "PURCHASE" in txt:
+            totals["purchase_accounts"] += row_max
+            print(f"[SEMANTIC] Purchase item: {row_max} (total now: {totals['purchase_accounts']})")
             section = "purchase_accounts"
             variable_sub = None
-        elif "INCOME" == txt.strip():
+            continue
+
+        # Income section - stop
+        if txt.strip() == "INCOME":
             section = None
             variable_sub = None
 
-        # Variable sub section headers (Tally: OPEN FIELD :, LETTUCE:, AGGREGATION, etc.)
-        if section == "variable":
-            bare = re.sub(r'\s*:\s*$', '', txt.strip())
-            if bare == "OPEN FIELD" or bare.startswith("OPEN FIELD"):
-                variable_sub = "open_field"
-            elif bare == "LETTUCE" or (bare.startswith("LETTUCE") and len(bare) <= 10):
-                variable_sub = "lettuce"
-            elif bare == "STRAWBERRY" or (bare.startswith("STRAWBERRY") and len(bare) <= 12):
-                variable_sub = "strawberry"
-            elif bare == "CITRUS" or (bare.startswith("CITRUS") and len(bare) <= 8):
-                variable_sub = "citrus"
-            elif "RASPBERRY" in bare or "BLUBERRY" in bare or "BLUEBERRY" in bare:
-                variable_sub = "raspberry_blueberry"
-            elif bare == "PACKING" or (bare.startswith("PACKING") and len(bare) <= 10):
-                variable_sub = "packing"
-            elif bare == "AGGREGATION" or (bare.startswith("AGGREGATION") and len(bare) <= 14):
-                variable_sub = "aggregation"
-            elif "COMMON EXPENSES" in bare and "FARM" in bare:
-                variable_sub = "common_expenses_farm"
-
-        nums = [parse_numeric_robust(v) for v in row.tolist() if pd.notna(v)]
-        nums = [n for n in nums if abs(n) > 0]
-        if not nums:
-            continue
-
-        row_max = max(nums)
+        # Fallback: track section-based values for traditional P&L format
         if section in {"fixed_cost_cat_i", "fixed_cost_cat_ii", "distribution_cost", "marketing_expenses", "vehicle_running_cost", "others", "wastage_shortage", "purchase_accounts"}:
             if row_max > totals[section]:
                 totals[section] = row_max
         elif section == "variable" and variable_sub:
-            if row_max > totals["variable_subcategories"][variable_sub]:
+            if row_max > totals["variable_subcategories"].get(variable_sub, 0):
                 totals["variable_subcategories"][variable_sub] = row_max
 
+    print(f"[SEMANTIC] Final totals: {totals}")
     return totals
 
 
@@ -5011,18 +5107,63 @@ def parse_category_totals_sheet(file_bytes: bytes) -> Dict[str, Any]:
     - "Purchase Vegetables" / "Purchase Return" (summed into Purchase Accounts)
     """
     df = pd.read_excel(io.BytesIO(file_bytes))
-    if df is None or df.empty or len(df.columns) < 2:
-        return {"success": False, "error": "Summary sheet has no usable columns."}
-
-    # Take first 2 columns as category + amount if headers are weird.
-    c0, c1 = df.columns[0], df.columns[1]
+    print(f"[SUMMARY PARSER] DataFrame shape: {df.shape}, columns: {list(df.columns)}")
+    
+    if df is None or df.empty:
+        return {"success": False, "error": "Summary sheet is empty."}
+    
+    # Try to find the best columns for category and amount
+    # Look through all columns to find text and numeric data
     rows = []
-    for _, r in df.iterrows():
-        cat = str(r.get(c0, "")).strip()
-        if not cat or cat.lower() in {"nan", "none", ""}:
-            continue
-        amt = parse_numeric_robust(r.get(c1, 0))
-        rows.append((cat, amt))
+    
+    # Strategy 1: Use first two columns
+    if len(df.columns) >= 2:
+        c0, c1 = df.columns[0], df.columns[1]
+        for idx, r in df.iterrows():
+            cat = str(r.get(c0, "")).strip()
+            if not cat or cat.lower() in {"nan", "none", "", "unnamed"}:
+                continue
+            amt = parse_numeric_robust(r.get(c1, 0))
+            if cat and (amt != 0 or any(kw in cat.upper() for kw in ["COST", "FIELD", "LETTUCE", "STRAWBERRY", "PACKING", "PURCHASE", "DISTRIBUTION", "MARKETING", "VEHICLE", "WASTAGE", "AGGREGATION", "CITRUS", "RASPBERRY", "OTHERS"])):
+                rows.append((cat, amt))
+                print(f"[SUMMARY PARSER] Row {idx}: '{cat}' = {amt}")
+    
+    # Strategy 2: If few rows found, try scanning all columns for category-amount pairs
+    if len(rows) < 5:
+        print(f"[SUMMARY PARSER] Few rows found ({len(rows)}), trying column scan...")
+        rows = []
+        for idx, r in df.iterrows():
+            row_vals = list(r.values)
+            cat_val = None
+            amt_val = 0.0
+            
+            for v in row_vals:
+                v_str = str(v).strip() if pd.notna(v) else ""
+                if not v_str or v_str.lower() in {"nan", "none", ""}:
+                    continue
+                
+                # Check if it looks like a category name
+                v_upper = v_str.upper()
+                is_category = any(kw in v_upper for kw in [
+                    "COST", "FIELD", "LETTUCE", "STRAWBERRY", "PACKING", 
+                    "PURCHASE", "DISTRIBUTION", "MARKETING", "VEHICLE", 
+                    "WASTAGE", "AGGREGATION", "CITRUS", "RASPBERRY", 
+                    "OTHERS", "COMMON", "FARM", "BLUEBERRY", "ANALYSIS"
+                ])
+                
+                if is_category and cat_val is None:
+                    cat_val = v_str
+                else:
+                    # Try to parse as number
+                    num = parse_numeric_robust(v)
+                    if num != 0:
+                        amt_val = num
+            
+            if cat_val and cat_val.upper() != "COST ANALYSIS":
+                rows.append((cat_val, amt_val))
+                print(f"[SUMMARY PARSER] Scanned Row {idx}: '{cat_val}' = {amt_val}")
+    
+    print(f"[SUMMARY PARSER] Total rows to process: {len(rows)}")
 
     def normalize(s: str) -> str:
         """Normalize string for keyword matching: lowercase, collapse spaces/punctuation."""
@@ -7413,18 +7554,28 @@ async def upload_cost_sheet(
             header_info = parse_result.get('header_info', {})
             expenses = parse_result.get('expenses', {})
 
-            # Semantic fallback: fill gaps when variable sections or purchase total are missing.
+            # Semantic fallback: ALWAYS run to fill any gaps. This is crucial for summary sheets.
             try:
                 var_subs = expenses.get('variable_cost', {}).get('subcategories', {}) or {}
-                expected_var_keys = ['open_field', 'lettuce', 'strawberry', 'raspberry_blueberry', 'citrus', 'packing', 'aggregation', 'common_expenses_farm']
+                expected_var_keys = ['open_field', 'lettuce', 'strawberry', 'raspberry_blueberry', 'citrus', 'packing', 'aggregation', 'common_expenses_farm', 'packing_materials_others']
                 var_total = sum(float((var_subs.get(k, {}) or {}).get('total', 0.0) or 0.0) for k in expected_var_keys)
-                needs_fallback = var_total <= 0 or (expenses.get('purchase_accounts', {}).get('total', 0.0) or 0.0) <= 0
+                fc1 = float(expenses.get('fixed_cost_cat_i', {}).get('total', 0.0) or 0.0)
+                fc2 = float(expenses.get('fixed_cost_cat_ii', {}).get('total', 0.0) or 0.0)
+                purchase = float(expenses.get('purchase_accounts', {}).get('total', 0.0) or 0.0)
+                
+                # Always run semantic fallback if any major category is missing
+                needs_fallback = var_total <= 0 or fc1 <= 0 or fc2 <= 0 or purchase <= 0
+                print(f"   📊 Pre-semantic check: var_total={var_total:,.2f}, fc1={fc1:,.2f}, fc2={fc2:,.2f}, purchase={purchase:,.2f}, needs_fallback={needs_fallback}")
+                
                 if needs_fallback:
-                    semantic_layout = read_excel_layout_with_openpyxl(content)
-                    semantic_totals = extract_pl_semantic_totals(semantic_layout["df_raw"])
+                    print(f"   🔄 Running semantic fallback extractor...")
+                    # Read raw DataFrame for semantic extraction
+                    semantic_df = pd.read_excel(io.BytesIO(content), header=None)
+                    semantic_totals = extract_pl_semantic_totals(semantic_df)
+                    
                     semantic_expenses = {
                         'fixed_cost_cat_i': {'total': semantic_totals.get('fixed_cost_cat_i', 0.0), 'items': []},
-                        'fixed_cost_cat_ii': {'total': semantic_totals.get('fixed_cost_cat_ii', 0.0), 'items': [], 'splits': expenses.get('fixed_cost_cat_ii', {}).get('splits', {})},
+                        'fixed_cost_cat_ii': {'total': semantic_totals.get('fixed_cost_cat_ii', 0.0), 'items': [], 'splits': expenses.get('fixed_cost_cat_ii', {}).get('splits', {'strawberry': 0.50, 'greens': 0.25, 'open_field': 0.10, 'aggregation': 0.15})},
                         'variable_cost': {'total': 0.0, 'subcategories': {
                             k: {'total': v, 'items': []} for k, v in semantic_totals.get('variable_subcategories', {}).items()
                         }},
@@ -7436,13 +7587,47 @@ async def upload_cost_sheet(
                         'purchase_accounts': {'total': semantic_totals.get('purchase_accounts', 0.0), 'items': []},
                     }
                     expenses = _merge_expenses_prefer_higher(expenses, semantic_expenses)
-                    print(f"   ℹ️  Applied semantic P&L fallback (variable total now ₹{_variable_cost_subtotal(expenses):,.2f})")
+                    new_var_total = _variable_cost_subtotal(expenses)
+                    print(f"   ✅ Applied semantic P&L fallback (variable total now ₹{new_var_total:,.2f})")
             except Exception as _sem_e:
-                print(f"⚠️ Semantic P&L fallback skipped: {_sem_e}")
+                import traceback
+                print(f"⚠️ Semantic P&L fallback error: {_sem_e}")
+                print(traceback.format_exc())
             
-            # Extract month from period (e.g., "COST ANALYSIS-APRIL TO NOVEMBER-2025" -> "2025-04")
+            # Extract month from period or file content (e.g., "COST ANALYSIS – MAY 2026")
             period = header_info.get('period', '')
             month = "2025-04"  # Default
+            
+            # Also try to find month in the raw file content
+            try:
+                raw_df = pd.read_excel(io.BytesIO(content), header=None)
+                file_text = " ".join(str(v).upper() for v in raw_df.values.flatten() if pd.notna(v))
+                # Look for patterns like "MAY 2026", "COST ANALYSIS – MAY 2026", etc.
+                month_patterns = [
+                    (r'JANUARY\s*[-–]?\s*(\d{4})', '01'), (r'JAN\s*[-–]?\s*(\d{4})', '01'),
+                    (r'FEBRUARY\s*[-–]?\s*(\d{4})', '02'), (r'FEB\s*[-–]?\s*(\d{4})', '02'),
+                    (r'MARCH\s*[-–]?\s*(\d{4})', '03'), (r'MAR\s*[-–]?\s*(\d{4})', '03'),
+                    (r'APRIL\s*[-–]?\s*(\d{4})', '04'), (r'APR\s*[-–]?\s*(\d{4})', '04'),
+                    (r'MAY\s*[-–]?\s*(\d{4})', '05'),
+                    (r'JUNE\s*[-–]?\s*(\d{4})', '06'), (r'JUN\s*[-–]?\s*(\d{4})', '06'),
+                    (r'JULY\s*[-–]?\s*(\d{4})', '07'), (r'JUL\s*[-–]?\s*(\d{4})', '07'),
+                    (r'AUGUST\s*[-–]?\s*(\d{4})', '08'), (r'AUG\s*[-–]?\s*(\d{4})', '08'),
+                    (r'SEPTEMBER\s*[-–]?\s*(\d{4})', '09'), (r'SEP\s*[-–]?\s*(\d{4})', '09'),
+                    (r'OCTOBER\s*[-–]?\s*(\d{4})', '10'), (r'OCT\s*[-–]?\s*(\d{4})', '10'),
+                    (r'NOVEMBER\s*[-–]?\s*(\d{4})', '11'), (r'NOV\s*[-–]?\s*(\d{4})', '11'),
+                    (r'DECEMBER\s*[-–]?\s*(\d{4})', '12'), (r'DEC\s*[-–]?\s*(\d{4})', '12'),
+                ]
+                for pattern, mm in month_patterns:
+                    match = re.search(pattern, file_text)
+                    if match:
+                        year = match.group(1)
+                        month = f"{year}-{mm}"
+                        period = f"Detected: {match.group(0)}"
+                        print(f"   📅 Detected month from file: {month}")
+                        break
+            except Exception as _month_e:
+                print(f"   ⚠️ Month detection from file failed: {_month_e}")
+            
             if period:
                 # Try to extract month from period string
                 period_upper = period.upper()
