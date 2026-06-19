@@ -4917,9 +4917,6 @@ def _looks_like_category_totals_sheet(df: pd.DataFrame) -> bool:
         if df is None or df.empty:
             return False
         
-        # Check column count - summary sheets are typically 2-3 columns
-        non_empty_cols = sum(1 for c in df.columns if not str(c).startswith('Unnamed'))
-        
         # Scan first 30 rows for patterns
         head_rows = df.head(30).astype(str).apply(lambda s: " ".join(s.tolist()).upper(), axis=1).tolist()
         head_text = " ".join(head_rows)
@@ -4943,30 +4940,42 @@ def _looks_like_category_totals_sheet(df: pd.DataFrame) -> bool:
         # Summary sheet markers - things we expect to see
         summary_markers = [
             'FIXED COST CAT',
-            'DISTRIBUTION COST',
+            'DISTRIBUTION',
             'MARKETING',
-            'VEHICLE RUNNING',
+            'VEHICLE',
             'WASTAGE',
             'PURCHASE',
             'OPEN FIELD',
             'LETTUCE',
             'STRAWBERRY',
             'AGGREGATION',
+            'CITRUS',
+            'PACKING',
+            'COMMON',
+            'OTHERS',
         ]
         summary_count = sum(1 for marker in summary_markers if marker in head_text)
         
-        # If we see multiple summary markers AND the sheet is simple (2-3 cols), it's a summary
-        if summary_count >= 4:
-            # Additional check: make sure amounts are in column B (index 1)
+        # Check for "COST ANALYSIS" header - strong indicator
+        if 'COST ANALYSIS' in head_text:
+            print(f"[SUMMARY DETECT] IS summary - has COST ANALYSIS header (markers={summary_count})")
+            return True
+        
+        # If we see multiple summary markers, it's likely a summary
+        if summary_count >= 5:
+            # Additional check: make sure amounts exist in the data
             has_amounts = False
-            for _, row in df.head(20).iterrows():
-                try:
-                    val = parse_numeric_robust(row.iloc[1] if len(row) > 1 else 0)
-                    if val and abs(val) > 100:  # Significant amount
-                        has_amounts = True
-                        break
-                except:
-                    pass
+            for _, row in df.head(25).iterrows():
+                for cell in row:
+                    try:
+                        val = parse_numeric_robust(cell)
+                        if val and abs(val) > 1000:  # Significant amount
+                            has_amounts = True
+                            break
+                    except:
+                        pass
+                if has_amounts:
+                    break
             
             if has_amounts:
                 print(f"[SUMMARY DETECT] IS summary - found {summary_count} summary markers with amounts")
@@ -4978,12 +4987,6 @@ def _looks_like_category_totals_sheet(df: pd.DataFrame) -> bool:
         has_amt = any("amount" in c or "total" in c for c in cols)
         if has_cat and has_amt:
             print(f"[SUMMARY DETECT] IS summary - has Category/Amount headers")
-            return True
-        
-        # Check first column for "COST ANALYSIS" header
-        first_col_text = " ".join(str(df.iloc[i, 0]).upper() for i in range(min(5, len(df))) if pd.notna(df.iloc[i, 0]))
-        if 'COST ANALYSIS' in first_col_text and summary_count >= 3:
-            print(f"[SUMMARY DETECT] IS summary - has COST ANALYSIS header")
             return True
         
         print(f"[SUMMARY DETECT] NOT summary - no clear indicators (summary_count={summary_count})")
@@ -5077,24 +5080,26 @@ def parse_category_totals_sheet(file_bytes: bytes) -> Dict[str, Any]:
 
         # =====================================================================
         # VARIABLE COST SUBCATEGORIES - Match by keywords
+        # These can appear as standalone rows like "Open Field", "Lettuce", "Strawberry"
+        # in summary sheets, not just "VARIABLE COST - OPEN FIELD"
         # =====================================================================
         matched_var = False
 
-        # Open Field: "open field" (but not "open field - something else")
-        if has_keywords(cat, "open", "field") and not has_any_keyword(cat, "variable cost"):
+        # Open Field: "open field" - standalone or with "variable cost" prefix
+        if has_keywords(cat, "open", "field"):
             expenses['variable_cost']['subcategories'].setdefault('open_field', {'total': 0.0, 'items': []})
             expenses['variable_cost']['subcategories']['open_field']['total'] = float(amt)
             print(f"   → VARIABLE COST - OPEN FIELD: {amt}")
             matched_var = True
 
-        # Lettuce: "lettuce"
+        # Lettuce: "lettuce" - standalone row
         elif has_keywords(cat, "lettuce"):
             expenses['variable_cost']['subcategories'].setdefault('lettuce', {'total': 0.0, 'items': []})
             expenses['variable_cost']['subcategories']['lettuce']['total'] = float(amt)
             print(f"   → VARIABLE COST - LETTUCE: {amt}")
             matched_var = True
 
-        # Strawberry: "strawberry"
+        # Strawberry: "strawberry" - standalone row
         elif has_keywords(cat, "strawberry"):
             expenses['variable_cost']['subcategories'].setdefault('strawberry', {'total': 0.0, 'items': []})
             expenses['variable_cost']['subcategories']['strawberry']['total'] = float(amt)
@@ -5108,35 +5113,37 @@ def parse_category_totals_sheet(file_bytes: bytes) -> Dict[str, Any]:
             print(f"   → VARIABLE COST - RASPBERRY & BLUEBERRY: {amt}")
             matched_var = True
 
-        # Citrus: "citrus"
+        # Citrus: "citrus" - standalone row
         elif has_keywords(cat, "citrus"):
             expenses['variable_cost']['subcategories'].setdefault('citrus', {'total': 0.0, 'items': []})
             expenses['variable_cost']['subcategories']['citrus']['total'] = float(amt)
             print(f"   → VARIABLE COST - CITRUS: {amt}")
             matched_var = True
 
-        # Packing: "packing" but NOT "packing materials (others)" and NOT "purchase packing materials"
+        # Packing: "packing" but NOT "packing materials" and NOT "purchase packing"
         elif has_keywords(cat, "packing") and not has_keywords(cat, "materials") and not has_keywords(cat, "purchase"):
             expenses['variable_cost']['subcategories'].setdefault('packing', {'total': 0.0, 'items': []})
             expenses['variable_cost']['subcategories']['packing']['total'] = float(amt)
             print(f"   → VARIABLE COST - PACKING: {amt}")
             matched_var = True
 
-        # Packing Materials (Others): separate variable cost item - NOT purchase packing materials
-        elif has_keywords(cat, "packing", "materials") and has_any_keyword(cat, "other", "others") and not has_keywords(cat, "purchase"):
+        # Packing Materials (Others): "packing materials" with "other" - NOT "purchase packing"
+        elif has_keywords(cat, "packing", "materials") and not has_keywords(cat, "purchase"):
             packing_materials_others = float(amt)
-            print(f"   → PACKING MATERIALS (OTHERS): {amt} (tracked separately)")
+            expenses['variable_cost']['subcategories'].setdefault('packing_materials_others', {'total': 0.0, 'items': []})
+            expenses['variable_cost']['subcategories']['packing_materials_others']['total'] = float(amt)
+            print(f"   → PACKING MATERIALS (OTHERS): {amt}")
             matched_var = True
 
-        # Aggregation: "aggregation"
+        # Aggregation: "aggregation" - standalone row
         elif has_keywords(cat, "aggregation"):
             expenses['variable_cost']['subcategories'].setdefault('aggregation', {'total': 0.0, 'items': []})
             expenses['variable_cost']['subcategories']['aggregation']['total'] = float(amt)
             print(f"   → VARIABLE COST - AGGREGATION: {amt}")
             matched_var = True
 
-        # Common Expenses - Farm: "common expenses" + "farm"
-        elif has_keywords(cat, "common", "expenses", "farm") or has_keywords(cat, "common", "farm"):
+        # Common Expenses - Farm: "common expenses" and/or "common" + "farm"
+        elif has_keywords(cat, "common", "expenses") or (has_keywords(cat, "common") and has_keywords(cat, "farm")):
             expenses['variable_cost']['subcategories'].setdefault('common_expenses_farm', {'total': 0.0, 'items': []})
             expenses['variable_cost']['subcategories']['common_expenses_farm']['total'] = float(amt)
             print(f"   → VARIABLE COST - COMMON EXPENSES - FARM: {amt}")
@@ -5167,14 +5174,14 @@ def parse_category_totals_sheet(file_bytes: bytes) -> Dict[str, Any]:
             print(f"   → VEHICLE RUNNING COST: {amt}")
             continue
 
-        # Others: exactly "others" or "other expenses"
-        if cat_norm == "others" or has_keywords(cat, "other", "expense"):
+        # Others: "others" standalone or "other expenses" - but not if it's a purchase item
+        if (cat_norm == "others" or cat_norm == "other" or has_keywords(cat, "other", "expense")) and not has_keywords(cat, "purchase"):
             expenses['others']['total'] = float(amt)
             print(f"   → OTHERS: {amt}")
             continue
 
-        # Wastage & Shortage: "wastage" + "shortage"
-        if has_keywords(cat, "wastage", "shortage") or has_keywords(cat, "wastage") and has_keywords(cat, "short"):
+        # Wastage & Shortage: "wastage" alone or with "shortage"
+        if has_keywords(cat, "wastage"):
             expenses['wastage_shortage']['total'] = float(amt)
             print(f"   → WASTAGE & SHORTAGE: {amt}")
             continue
