@@ -1262,6 +1262,10 @@
                     <div class="table-card">
                         <div class="table-header">
                             <h3 class="table-title">Cost Allocation</h3>
+                            <p style="margin: 0 0 12px; font-size: 0.9rem; color: #6b7280; max-width: 720px; line-height: 1.5;">
+                                <strong>Cost Allocation</strong> splits each P&amp;L cost pool across product lines by sold kg (or harvest kg for inhouse sections).
+                                Run this after uploading sales and P&amp;L so each line gets its share of variable, fixed, packing, and distribution costs.
+                            </p>
                             <div class="table-actions" style="flex-wrap: wrap; gap: 10px; align-items: center;">
                                 <select id="allocation-month" class="btn btn-secondary">
                                     <option value="2025-04-24 00:00:00">April 2025</option>
@@ -2111,7 +2115,21 @@
             });
             
             console.log(`📥 P&L Response: ${response.status} ${response.statusText}`);
-            const data = await response.json();
+            const rawText = await response.text();
+            let data;
+            try {
+                data = JSON.parse(rawText);
+            } catch (parseErr) {
+                const preview = rawText.slice(0, 200).replace(/\s+/g, ' ').trim();
+                throw new Error(
+                    response.ok
+                        ? 'Server returned invalid JSON'
+                        : `Server error ${response.status}: ${preview || response.statusText}`
+                );
+            }
+            if (!response.ok) {
+                throw new Error(data.message || data.detail || `Server error ${response.status}`);
+            }
             console.log('📊 P&L Response data:', data);
             
             // Hide progress

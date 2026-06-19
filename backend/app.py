@@ -872,6 +872,30 @@ def _pool_section_sales_kg(
     return total
 
 
+def _pool_section_harvest_kg(
+    db: Session,
+    pool: str,
+    pool_cache: Optional[Dict] = None,
+) -> float:
+    """Sum harvest template kg for products in this P&L section pool."""
+    if pool not in INHOUSE_SECTION_POOLS:
+        return 0.0
+    cache = pool_cache if pool_cache is not None else _build_pool_mapping_cache(db)
+    keys, has_map = cache.get(pool, (set(), False))
+    total = 0.0
+    for h in db.query(HarvestData).all():
+        if has_map:
+            key = _canonical_product_key(_base_product_display_name(h.product_name))
+            if not key or key not in keys:
+                continue
+        elif not _section_matches_pool(h.section, pool):
+            continue
+        qty = float(h.quantity or 0)
+        if qty > 0:
+            total += qty
+    return total
+
+
 def _resolve_allocation_denominator_kg(
     db: Session,
     cost,
@@ -883,11 +907,17 @@ def _resolve_allocation_denominator_kg(
 ) -> float:
     """
     Denominator kg for pool allocation (P&L COP basis).
-    Priority: mapped section sales kg → stored on cost → official lookup → applicable sales sum.
+    Priority: official P&L section kg → harvest template kg → mapped sales kg → stored → lookup → sales sum.
     """
     month_key = _to_month_key(month or getattr(cost, "month", None) or "")
     pool = _pool_key_for_cost(cost)
     if pool:
+        official = float(OFFICIAL_SECTION_KG.get(pool) or 0)
+        if official > 0:
+            return official
+        harvest_kg = _pool_section_harvest_kg(db, pool, pool_cache=pool_cache)
+        if harvest_kg > 0:
+            return harvest_kg
         section_kg = _pool_section_sales_kg(
             db, pool, month_key, product_map, sales_map, pool_cache=pool_cache
         )
@@ -1293,6 +1323,45 @@ class MonthlyWastageOverride(Base):
 Base.metadata.create_all(bind=engine)
 
 
+def _seed_default_section_mappings():
+    """Load default product-section mappings once; merge missing rows on every startup."""
+    if not DEFAULT_MAPPINGS_PATH.is_file():
+        print(f"⚠️  Default mappings file not found: {DEFAULT_MAPPINGS_PATH}")
+        return
+    db = SessionLocal()
+    try:
+        with open(DEFAULT_MAPPINGS_PATH, encoding="utf-8") as f:
+            data = json.load(f)
+        items = data.get("mappings") or []
+        if not items:
+            return
+        existing = {
+            ((m.section or "").strip().lower(), (m.product_name or "").strip().lower())
+            for m in db.query(ProductSectionMapping).all()
+        }
+        added = 0
+        for item in items:
+            section = (item.get("section") or "").strip()
+            product_name = (item.get("product_name") or "").strip()
+            if not section or not product_name:
+                continue
+            key = (section.lower(), product_name.lower())
+            if key in existing:
+                continue
+            db.add(ProductSectionMapping(section=section, product_name=product_name))
+            existing.add(key)
+            added += 1
+        if added:
+            db.commit()
+            _sync_allowlists_from_section_mappings(db)
+            print(f"✅ Seeded {added} default product-section mapping(s)")
+    except Exception as exc:
+        db.rollback()
+        print(f"⚠️  Could not seed default mappings: {exc}")
+    finally:
+        db.close()
+
+
 def _get_monthly_wastage_override(db: Session, month_key: str) -> Optional[MonthlyWastageOverride]:
     key = _to_month_key(month_key)
     if not key:
@@ -1424,28 +1493,44 @@ def _ensure_monthly_sale_stock_flow_columns():
 _ensure_monthly_sale_stock_flow_columns()
 
 
+# Official P&L section kg (from management P&L KG column) — flat COP denominators per pool
+OFFICIAL_SECTION_KG: Dict[str, float] = {
+    "strawberry": 4688.2,
+    "lettuce": 2539.63,
+    "open_field": 509.6,
+    "common_expenses_farm": 7883.08,
+    "aggregation": 12798.665,
+    "packing": 20536.1,
+    "packing_materials_others": 20536.095,
+    "raspberry_blueberry": 0.0,
+    "citrus": 0.0,
+}
+
+DEFAULT_MAPPINGS_PATH = Path(__file__).resolve().parent / "default_product_section_mappings.json"
+
 # Official kg denominators (management / P&L sheet). Keys = cost names uppercased like saved in DB.
 ALLOCATION_DENOMINATOR_KG_BY_NAME: Dict[str, float] = {
-    "FIXED COST CAT - I": 16511.05,
-    "FIXED COST CAT - II - STRAWBERRY": 2544.8,
-    "FIXED COST CAT - II - GREENS": 2034.45,
-    "FIXED COST CAT - II - OPEN FIELD": 608.6,
-    # Fallback only when no net kg can be computed from sales + wastage in DB
-    "FIXED COST CAT - II - AGGREGATION": 12057.0,
-    "VARIABLE COST - OPEN FIELD": 608.6,
-    "VARIABLE COST - LETTUCE": 2034.45,
+    "FIXED COST CAT - I": 20536.10,
+    "FIXED COST CAT - II - STRAWBERRY": 4688.2,
+    "FIXED COST CAT - II - GREENS": 2539.63,
+    "FIXED COST CAT - II - OPEN FIELD": 509.6,
+    "FIXED COST CAT - II - AGGREGATION": 12798.665,
+    "VARIABLE COST - OPEN FIELD": 509.6,
+    "VARIABLE COST - LETTUCE": 2539.63,
     "VARIABLE COST - RASPBERRY & BLUEBERRY": 1816.94,
     "VARIABLE COST - RASPBERRY&BLUBERRY": 1816.94,
-    "VARIABLE COST - PACKING": 16511.0,
-    "VARIABLE COST - STRAWBERRY": 2544.8,
-    "VARIABLE COST - AGGREGATION": 12057.0,
-    "VARIABLE COST - POLYHOUSE GREENS": 2034.45,
+    "VARIABLE COST - PACKING": 20536.1,
+    "VARIABLE COST - STRAWBERRY": 4688.2,
+    "VARIABLE COST - AGGREGATION": 12798.665,
+    "VARIABLE COST - COMMON EXPENSES - FARM": 7883.08,
+    "VARIABLE COST - PACKING MATERIALS (OTHERS)": 20536.095,
+    "VARIABLE COST - POLYHOUSE GREENS": 2539.63,
     "VARIABLE COST - OTHER BERRIES": 1816.94,
-    "DISTRIBUTION COST": 16511.0,
-    "MARKETING EXPENSES": 16511.0,
-    "VEHICLE RUNNING COST": 16511.0,
-    "OTHERS": 16511.0,
-    "WASTAGE & SHORTAGE": 16511.0,
+    "DISTRIBUTION COST": 20536.10,
+    "MARKETING EXPENSES": 20536.10,
+    "VEHICLE RUNNING COST": 20536.10,
+    "OTHERS": 20536.10,
+    "WASTAGE & SHORTAGE": 20536.10,
 }
 
 
@@ -7152,11 +7237,14 @@ def parse_purple_patch_pl(file_path, db):
         }
 
 @app.post("/api/upload-pl")
-async def upload_pl(file: UploadFile = File(...), db: Session = Depends(get_db)):
+async def upload_pl(
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+):
     """Upload and parse Purple Patch P&L Excel file — uses the cost sheet parser"""
-    # Redirect to the upload-cost-sheet handler (same logic)
     print(f"🚀 /api/upload-pl called — redirecting to upload-cost-sheet logic")
-    return await upload_cost_sheet(file, db)
+    return await upload_cost_sheet(background_tasks, file, db)
 
 @app.post("/api/upload-cost-sheet")
 async def upload_cost_sheet(
@@ -8003,6 +8091,8 @@ async def get_excel_preview(month: str, db: Session = Depends(get_db)):
         sales=sales_data,
         summary=summary
     )
+
+_seed_default_section_mappings()
 
 if __name__ == "__main__":
     import uvicorn

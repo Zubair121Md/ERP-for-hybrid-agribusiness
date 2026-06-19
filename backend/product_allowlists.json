@@ -1,47 +1,43 @@
 {
   "lettuce_greens_products": [
+    "Artichoke",
     "Arugula(Rocket Lettuce)",
-    "Baby Bokchoy",
     "BABY SPINACH BOX",
-    "Basil",
+    "Baby Bokchoy",
     "Bok Choy",
     "Butterhead lettuce",
     "Celery",
-    "Chinese Cabbage",
     "Chives",
     "Curly Parsley",
-    "Dill Leaves",
-    "Edible Flowers",
     "Fennel Leaves",
-    "Flat Parsely",
+    "Green Lettuce",
     "Kale Leaves",
     "Kale Red",
     "Lettuce Curly Green",
     "Lettuce Red",
-    "Lollo Bionda Lettuce",
-    "Lollo Rosa",
-    "Microgreens-Beetroot",
-    "Micro Greens-Radish",
-    "MICROGREENS (SUNFLOWER)",
-    "MIXED SALAD GREENS",
     "MIXED SALAD GREENS BOX",
+    "Micro Greens-Radish",
     "Oregano",
-    "Rhubarb",
     "Romaine Lettuce",
     "Sage",
     "Salad Spinach",
-    "Swiss Chard",
-    "Tarragon",
-    "Watercress lettuce",
-    "Zucchini Flower"
+    "Watercress lettuce"
   ],
   "open_field_products": [
+    "Dill Leaves",
     "Iceberg Lettuce",
-    "Spring Onion"
+    "Iceberg",
+    "Spring Onion",
+    "Zuchini Green",
+    "Zucchini Green"
   ],
   "open_field_extra_products": [
+    "Dill Leaves",
     "Iceberg Lettuce",
-    "Spring Onion"
+    "Iceberg",
+    "Spring Onion",
+    "Zuchini Green",
+    "Zucchini Green"
   ],
   "notes": "Lettuce/greens: lettuce_greens_products only. Open field: open_field_products only (no keyword matching). Spring Onion is open field, not lettuce. Weight summary uses full sales kg per product row (inhouse+outsourced); never subtracts wastage."
 }
