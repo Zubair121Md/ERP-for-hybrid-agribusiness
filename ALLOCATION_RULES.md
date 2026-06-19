@@ -16,14 +16,16 @@ Product share    = Pool rate × Product basis kg
 
 ## Section denominator kg (priority)
 
-For inhouse section pools, the denominator is chosen in this order:
+For agricultural businesses with **closing stock**, the denominator should reflect what was **actually sold**, not what was produced. The priority is:
 
-1. **Official P&L kg** — fixed values from the management P&L (authoritative)
-2. **Harvest template kg** — sum from uploaded harvest data for mapped products
-3. **Mapped sales kg** — sum of sold kg for products in the Product–Section mapping
-4. **Stored / lookup / sum of applicable basis** — fallback for costs without a section pool
+1. **Actual sales kg** — sum of sold kg for mapped products in the uploaded sales data (PRIMARY)
+2. **Harvest template kg** — sum from uploaded harvest data (fallback if no sales)
+3. **Reference P&L kg** — fixed values from management P&L (last resort fallback)
+4. **Stored / lookup / sum of applicable basis** — for costs without a section pool
 
-### Official section kg (from P&L)
+This ensures costs are allocated only to products that were **actually sold**, not products sitting in closing stock.
+
+### Reference section kg (P&L fallback only)
 
 | Section / pool | Denominator kg | Products included |
 |---|---:|---|

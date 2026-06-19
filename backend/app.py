@@ -926,23 +926,25 @@ def _resolve_allocation_denominator_kg(
         basis_sum = float(compute_total_basis_fn() or 0)
         if basis_sum > 0:
             return basis_sum
-        agg = float(OFFICIAL_SECTION_KG.get("aggregation") or 0)
+        agg = float(FALLBACK_SECTION_KG.get("aggregation") or 0)
         if agg > 0:
             return agg
 
     pool = _pool_key_for_cost(cost)
     if pool:
-        official = float(OFFICIAL_SECTION_KG.get(pool) or 0)
-        if official > 0:
-            return official
-        harvest_kg = _pool_section_harvest_kg(db, pool, pool_cache=pool_cache)
-        if harvest_kg > 0:
-            return harvest_kg
+        # Priority: actual sales kg → harvest kg → fallback P&L kg
+        # For agricultural businesses with closing stock, actual sales should drive allocation
         section_kg = _pool_section_sales_kg(
             db, pool, month_key, product_map, sales_map, pool_cache=pool_cache
         )
         if section_kg > 0:
             return section_kg
+        harvest_kg = _pool_section_harvest_kg(db, pool, pool_cache=pool_cache)
+        if harvest_kg > 0:
+            return harvest_kg
+        fallback = float(FALLBACK_SECTION_KG.get(pool) or 0)
+        if fallback > 0:
+            return fallback
 
     stored = getattr(cost, "allocation_denominator_kg", None)
     if stored is not None and float(stored) > 0:
@@ -1513,8 +1515,9 @@ def _ensure_monthly_sale_stock_flow_columns():
 _ensure_monthly_sale_stock_flow_columns()
 
 
-# Official P&L section kg (from management P&L KG column) — flat COP denominators per pool
-OFFICIAL_SECTION_KG: Dict[str, float] = {
+# Reference P&L section kg (from management P&L KG column) — used as FALLBACK only when sales data unavailable.
+# For agricultural businesses with closing stock, actual sales kg should be primary denominator.
+FALLBACK_SECTION_KG: Dict[str, float] = {
     "strawberry": 4688.2,
     "lettuce": 2539.63,
     "open_field": 509.6,
@@ -2415,6 +2418,7 @@ class CostAllocationEngine:
                 "source": product.source,
                 "unit": getattr(product, 'unit', 'kg'),
                 "quantity": sale.quantity,
+                "sales_kg": qty_kg,
                 "sale_price": sale.sale_price,
                 "direct_cost": direct_cost,
                 "purchase_cost": purchase_cost,
@@ -3705,6 +3709,8 @@ async def get_product_cost_breakdown(
         den = float(cost.allocation_denominator_kg or 0)
         pool_amt = float(cost.amount or 0)
         pool_per_kg = (pool_amt / den) if den > 0 else 0.0
+        # product_kg = this line's allocation basis; for normal costs this is sales_kg
+        product_kg = (allocation.allocated_amount / pool_per_kg) if pool_per_kg > 0 else sales_kg
         cost_info = {
             "cost_id": cost.id,
             "cost_name": cost.name,
@@ -3715,6 +3721,7 @@ async def get_product_cost_breakdown(
             "total_cost_amount": pool_amt,
             "allocation_denominator_kg": den,
             "pool_per_kg": pool_per_kg,
+            "product_kg": product_kg,
             "amount_per_kg": (allocation.allocated_amount / sales_kg) if sales_kg > 0 else 0.0,
         }
         
