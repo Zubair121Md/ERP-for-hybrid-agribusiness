@@ -836,26 +836,36 @@ def _pool_section_sales_kg(
     pool_cache: Optional[Dict] = None,
 ) -> float:
     """
-    Total sold kg for a pool = sum of sales kg for all mapped inhouse products in that section.
-    Matches P&L 'KG' column logic (section total, flat COP per kg).
+    Total sold kg for a pool = sum of sales kg for all products in that P&L section.
+    Matches P&L COP: flat rate = pool ÷ section_kg; each line gets rate × line_kg.
     """
     cache = pool_cache if pool_cache is not None else _build_pool_mapping_cache(db)
-    keys, has_map = cache.get(pool, (set(), False))
+    keys, has_map = cache.get(pool, (set(), False)) if pool in INHOUSE_SECTION_POOLS else (set(), False)
     total = 0.0
     for pid, product in product_map.items():
-        if product.source != "inhouse":
-            continue
         sale = sales_map.get(pid)
         if not sale:
             continue
         if month_key and _to_month_key(sale.month) != month_key:
             continue
-        if has_map:
-            if not _product_matches_variable_pool(product.name, pool, keys, True):
+
+        if pool in OUTSOURCED_SECTION_POOLS:
+            if product.source != "outsourced":
                 continue
+            if has_map and not _product_matches_variable_pool(product.name, pool, keys, True):
+                continue
+        elif pool in BOTH_SECTION_POOLS:
+            pass  # inhouse + outsourced
         else:
-            if not _product_matches_variable_pool(product.name, pool, keys, False):
+            if product.source != "inhouse":
                 continue
+            if has_map:
+                if not _product_matches_variable_pool(product.name, pool, keys, True):
+                    continue
+            else:
+                if not _product_matches_variable_pool(product.name, pool, keys, False):
+                    continue
+
         kg = _sale_quantity_kg(sale)
         if kg > 0:
             total += kg
@@ -909,7 +919,6 @@ def _latest_cost_month(db: Session) -> Optional[str]:
 
 
 def _is_fc2_bucket_cost_name(name: Optional[str]) -> bool:
-    return (name or "").strip().upper().startswith("FIXED COST CAT - II -")
     return (name or "").strip().upper().startswith("FIXED COST CAT - II -")
 
 
@@ -1717,6 +1726,13 @@ VARIABLE_COST_POOLS = frozenset({
     "open_field", "lettuce", "strawberry", "raspberry_blueberry", "citrus",
     "packing", "aggregation", "common_expenses_farm", "packing_materials_others",
 })
+
+# Section pools using P&L flat COP: pool ÷ section_kg × product_kg
+INHOUSE_SECTION_POOLS = frozenset({
+    "open_field", "lettuce", "strawberry", "citrus", "raspberry_blueberry", "common_expenses_farm",
+})
+OUTSOURCED_SECTION_POOLS = frozenset({"aggregation"})
+BOTH_SECTION_POOLS = frozenset({"packing", "packing_materials_others"})
 
 
 def _normalize_mapping_section(section: Optional[str]) -> str:
