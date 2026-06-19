@@ -1846,7 +1846,7 @@
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/chart.js@3.9.1/dist/chart.min.js"></script>
-    <script src="static/js/dashboard.js?v=20260618210000"></script>
+    <script src="static/js/dashboard.js?v=20260618220000"></script>
     <script src="static/js/upload-fix.js?v=20260521120000"></script>
     
     <!-- INLINE UPLOAD FIX - This will definitely work -->
@@ -2148,11 +2148,14 @@
                     ratiosDiv.textContent = `${(data.ratios.inhouse * 100).toFixed(1)}% / ${(data.ratios.outsourced * 100).toFixed(1)}%`;
                 }
                 
-                // Display detailed parsed costs
-                if (data.parsed_costs && data.parsed_costs.length > 0) {
+                // Display detailed parsed costs (pool rows only — no line-item double count)
+                const poolParsed = (data.parsed_costs || []).filter(
+                    c => (c.category || '').toLowerCase() !== 'variable_cost_item'
+                );
+                if (poolParsed.length > 0) {
                     let parsedHtml = '<div style="margin-top: 20px; padding: 20px; background: #f9fafb; border-radius: 8px;"><h5 style="margin-bottom: 15px; color: #374151;">📋 Parsed Cost Categories:</h5><div style="max-height: 400px; overflow-y: auto;"><table style="width: 100%; border-collapse: collapse;"><thead><tr style="background: #e5e7eb;"><th style="padding: 10px; text-align: left; border-bottom: 2px solid #d1d5db;">Cost Name</th><th style="padding: 10px; text-align: right; border-bottom: 2px solid #d1d5db;">Amount</th><th style="padding: 10px; text-align: center; border-bottom: 2px solid #d1d5db;">Basis</th><th style="padding: 10px; text-align: center; border-bottom: 2px solid #d1d5db;">Applies To</th></tr></thead><tbody>';
                     
-                    data.parsed_costs.forEach(cost => {
+                    poolParsed.forEach(cost => {
                         parsedHtml += `<tr style="border-bottom: 1px solid #e5e7eb;"><td style="padding: 10px;">${cost.name}</td><td style="padding: 10px; text-align: right; font-weight: 600;">₹${parseFloat(cost.amount).toLocaleString('en-IN', {maximumFractionDigits: 2})}</td><td style="padding: 10px; text-align: center;"><span style="padding: 4px 8px; background: #dbeafe; color: #1e40af; border-radius: 4px; font-size: 12px;">${cost.basis || 'N/A'}</span></td><td style="padding: 10px; text-align: center;"><span style="padding: 4px 8px; background: ${cost.applies_to === 'inhouse' ? '#dbeafe' : cost.applies_to === 'outsourced' ? '#fef3c7' : '#e0e7ff'}; color: ${cost.applies_to === 'inhouse' ? '#1e40af' : cost.applies_to === 'outsourced' ? '#92400e' : '#3730a3'}; border-radius: 4px; font-size: 12px;">${cost.applies_to || 'both'}</span></td></tr>`;
                     });
                     
@@ -2169,14 +2172,31 @@
                 }
             }
             
-            // Force refresh dashboard data
-            console.log('🔄 Refreshing dashboard after P&L upload...');
-            setTimeout(() => {
-                if (typeof loadDashboardData === 'function') loadDashboardData();
-                if (typeof loadCosts === 'function') loadCosts();
-                if (typeof updatePLPreview === 'function') updatePLPreview();
-                console.log('✅ Dashboard refreshed after P&L upload');
-            }, 1000);
+            // Update P&L preview immediately from upload response (no wait)
+            if (data.template_summary && typeof applyCostSummaryToPreview === 'function') {
+                applyCostSummaryToPreview(data.template_summary);
+            } else if (data.total_expenses && typeof applyCostSummaryToPreview === 'function') {
+                applyCostSummaryToPreview({ total: data.total_expenses });
+            }
+
+            // Set allocation month to uploaded month so Costs tab matches
+            if (data.month) {
+                const monthSel = document.getElementById('allocation-month');
+                if (monthSel) {
+                    const m = data.month;
+                    if (![...monthSel.options].some(o => o.value === m)) {
+                        monthSel.add(new Option(m, m));
+                    }
+                    monthSel.value = m;
+                }
+            }
+
+            // Refresh costs tab immediately (no delay)
+            console.log('🔄 Refreshing costs after P&L upload...');
+            if (typeof loadCosts === 'function') {
+                loadCosts({ silent: true, month: data.month });
+            }
+            if (typeof loadDashboardData === 'function') loadDashboardData();
             
         } catch (error) {
             console.error('💥 P&L Upload error:', error);
@@ -2198,31 +2218,21 @@
         }
     }
     
-    // P&L Preview function
+    // P&L Preview function — uses template summary API (one row per category, correct month)
     async function updatePLPreview() {
         console.log('🔄 Updating P&L preview...');
-        
         try {
-            const response = await fetch('/api/costs');
-            const costs = await response.json();
-            
-            // Filter P&L costs (from cost sheet upload)
-            const plCosts = costs.filter(cost =>
-                (cost.source_file === 'cost_sheet_upload' || cost.source_file === 'pl_upload')
-                && cost.category !== 'variable_cost_item'
-            );
-            
-            // Calculate totals
-            const totalCosts = plCosts.reduce((sum, cost) => sum + cost.amount, 0);
-            const inhouseCosts = plCosts.filter(cost => cost.applies_to === 'inhouse').reduce((sum, cost) => sum + cost.amount, 0);
-            const outsourcedCosts = plCosts.filter(cost => cost.applies_to === 'outsourced').reduce((sum, cost) => sum + cost.amount, 0);
-            
-            // Update preview cards
-            document.getElementById('pl-total-costs').textContent = `₹${totalCosts.toLocaleString()}`;
-            document.getElementById('pl-inhouse-costs').textContent = `₹${inhouseCosts.toLocaleString()}`;
-            document.getElementById('pl-outsourced-costs').textContent = `₹${outsourcedCosts.toLocaleString()}`;
-            
-            console.log('✅ P&L preview updated');
+            const month = document.getElementById('allocation-month')?.value || '';
+            const url = month
+                ? `/api/costs/template-summary?month=${encodeURIComponent(month)}`
+                : '/api/costs/template-summary';
+            const response = await fetch(url);
+            if (!response.ok) throw new Error('Failed to load cost summary');
+            const summary = await response.json();
+            if (typeof applyCostSummaryToPreview === 'function') {
+                applyCostSummaryToPreview(summary);
+            }
+            console.log('✅ P&L preview updated', summary);
         } catch (error) {
             console.error('💥 Error updating P&L preview:', error);
         }

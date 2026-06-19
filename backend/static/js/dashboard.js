@@ -174,6 +174,85 @@ function resolveTemplateKey(cost) {
     if (cat === 'purchase_accounts' || nameUpper === 'PURCHASE ACCOUNTS') return 'purchase_accounts';
     return null;
 }
+
+function splitAppliesToAmount(amount, appliesTo) {
+    const amt = parseFloat(amount) || 0;
+    const a = (appliesTo || 'both').toLowerCase();
+    if (a === 'inhouse') return { inhouse: amt, outsourced: 0 };
+    if (a === 'outsourced') return { inhouse: 0, outsourced: amt };
+    return { inhouse: amt / 2, outsourced: amt / 2 };
+}
+
+function buildCostMapForMonth(costs, month) {
+    const costMap = {};
+    const unmappedCosts = [];
+    const activeMonth = normalizeMonthKey(month || getActiveCostMonth(costs));
+    (costs || []).forEach(cost => {
+        const costMonth = normalizeMonthKey(cost.month);
+        if (costMonth && costMonth !== activeMonth) return;
+        const nameUpper = (cost.name || '').toUpperCase();
+        if (nameUpper.startsWith('FIXED COST CAT - II -')) return;
+        if ((cost.category || '').toLowerCase() === 'variable_cost_item') return;
+        const templateKey = resolveTemplateKey(cost);
+        if (!templateKey) {
+            unmappedCosts.push(cost);
+            return;
+        }
+        if (!costMap[templateKey]) costMap[templateKey] = cost;
+        else if ((cost.amount || 0) > (costMap[templateKey].amount || 0)) {
+            costMap[templateKey] = cost;
+        }
+    });
+    return { costMap, unmappedCosts, activeMonth };
+}
+
+function getTemplateRowAmount(costs, costMap, templateKey, activeMonth) {
+    if (templateKey === 'fixed_cost_cat_ii') {
+        return getFc2TotalAmount(costs, activeMonth);
+    }
+    const cost = costMap[templateKey];
+    return cost ? (cost.amount || 0) : 0;
+}
+
+function computeCostTemplateSummary(costs, month) {
+    const { costMap, unmappedCosts, activeMonth } = buildCostMapForMonth(costs, month);
+    let totalCosts = 0;
+    let inhouseCosts = 0;
+    let outsourcedCosts = 0;
+    COST_TEMPLATE.filter(t => !t.isParent).forEach(template => {
+        const amount = getTemplateRowAmount(costs, costMap, template.key, activeMonth);
+        if (amount <= 0) return;
+        const cost = costMap[template.key];
+        const appliesTo = cost ? cost.applies_to : template.defaultAppliesTo;
+        const split = splitAppliesToAmount(amount, appliesTo);
+        totalCosts += amount;
+        inhouseCosts += split.inhouse;
+        outsourcedCosts += split.outsourced;
+    });
+    unmappedCosts.forEach(cost => {
+        const amt = cost.amount || 0;
+        if (amt <= 0) return;
+        const split = splitAppliesToAmount(amt, cost.applies_to);
+        totalCosts += amt;
+        inhouseCosts += split.inhouse;
+        outsourcedCosts += split.outsourced;
+    });
+    return { totalCosts, inhouseCosts, outsourcedCosts, costMap, unmappedCosts, activeMonth };
+}
+
+function applyCostSummaryToPreview(summary) {
+    if (!summary) return;
+    const total = summary.total ?? summary.totalCosts ?? 0;
+    const inhouse = summary.inhouse ?? summary.inhouseCosts ?? 0;
+    const outsourced = summary.outsourced ?? summary.outsourcedCosts ?? 0;
+    const totalEl = document.getElementById('pl-total-costs');
+    const inhouseEl = document.getElementById('pl-inhouse-costs');
+    const outsourcedEl = document.getElementById('pl-outsourced-costs');
+    if (totalEl) totalEl.textContent = `₹${formatNumber(total)}`;
+    if (inhouseEl) inhouseEl.textContent = `₹${formatNumber(inhouse)}`;
+    if (outsourcedEl) outsourcedEl.textContent = `₹${formatNumber(outsourced)}`;
+}
+
 let pendingDashboardStats = null;
 
 function normalizeMonthKey(value) {
@@ -270,6 +349,14 @@ function setupEventListeners() {
     document.getElementById('cost-form').addEventListener('submit', submitCostForm);
     
     // Month filters removed - now using all data
+    const allocMonth = document.getElementById('allocation-month');
+    if (allocMonth) {
+        allocMonth.addEventListener('change', () => {
+            loadCosts({ silent: true });
+            if (typeof refreshCostSummaryPreview === 'function') refreshCostSummaryPreview();
+            if (typeof updatePLPreview === 'function') updatePLPreview();
+        });
+    }
 }
 
 // Tab switching
@@ -1130,23 +1217,65 @@ function displaySales(sales) {
 }
 
 // Load costs
-async function loadCosts() {
+async function loadCosts(options = {}) {
+    const { silent = false, month: monthOverride } = options;
     try {
-        showLoading('costs-table');
-        
-        const response = await fetch(`${API_BASE}/costs`);
-        const costs = await response.json();
-        cachedCosts = costs || [];
-        cachedCostMonths = [...new Set(cachedCosts.map(c => normalizeMonthKey(c.month)).filter(Boolean))];
+        if (!silent) showLoading('costs-table');
+
+        const month = normalizeMonthKey(
+            monthOverride || document.getElementById('allocation-month')?.value || ''
+        );
+        const costsPromise = month
+            ? fetch(`${API_BASE}/costs/${encodeURIComponent(month)}`)
+            : fetch(`${API_BASE}/costs`);
+        const summaryPromise = fetch(
+            `${API_BASE}/costs/template-summary${month ? `?month=${encodeURIComponent(month)}` : ''}`
+        );
+
+        const [costsRes, summaryRes, allRes] = await Promise.all([
+            costsPromise,
+            summaryPromise,
+            month ? fetch(`${API_BASE}/costs`) : Promise.resolve(null),
+        ]);
+
+        const monthCosts = costsRes.ok ? await costsRes.json() : [];
+        if (allRes && allRes.ok) {
+            cachedCosts = await allRes.json();
+            cachedCostMonths = [...new Set(cachedCosts.map(c => normalizeMonthKey(c.month)).filter(Boolean))];
+        } else {
+            cachedCosts = monthCosts || [];
+            cachedCostMonths = [...new Set(cachedCosts.map(c => normalizeMonthKey(c.month)).filter(Boolean))];
+        }
         refreshAllocationMonthOptionsFromCache();
-        
-        displayCosts(cachedCosts);
-        
+
+        const displayMonthCosts = month
+            ? cachedCosts.filter(c => normalizeMonthKey(c.month) === month)
+            : cachedCosts;
+        displayCosts(displayMonthCosts.length ? displayMonthCosts : monthCosts);
+
+        if (summaryRes.ok) {
+            applyCostSummaryToPreview(await summaryRes.json());
+        }
     } catch (error) {
         console.error('Error loading costs:', error);
         showAlert('Error loading costs', 'error');
     }
 }
+
+async function refreshCostSummaryPreview(month) {
+    try {
+        const m = normalizeMonthKey(month || document.getElementById('allocation-month')?.value || '');
+        const res = await fetch(
+            `${API_BASE}/costs/template-summary${m ? `?month=${encodeURIComponent(m)}` : ''}`
+        );
+        if (res.ok) applyCostSummaryToPreview(await res.json());
+    } catch (e) {
+        console.warn('Cost summary preview refresh failed:', e);
+    }
+}
+
+window.refreshCostSummaryPreview = refreshCostSummaryPreview;
+window.applyCostSummaryToPreview = applyCostSummaryToPreview;
 
 // Initialize Cost Items function removed - use cost sheet upload instead
 
@@ -1155,31 +1284,8 @@ function displayCosts(costs) {
     const container = document.getElementById('costs-table');
     costs = costs || [];
     const activeMonth = getActiveCostMonth(costs);
-
-    const costMap = {};
-    const unmappedCosts = [];
-    costs.forEach(cost => {
-        const month = normalizeMonthKey(cost.month);
-        if (month && month !== activeMonth) return;
-        
-        // Skip FC-II bucket rows (they're shown under FC-II total)
-        const nameUpper = (cost.name || '').toUpperCase();
-        if (nameUpper.startsWith('FIXED COST CAT - II -')) return;
-        
-        // Skip variable cost item details (they're line items under parent)
-        if ((cost.category || '').toLowerCase() === 'variable_cost_item') return;
-        
-        const templateKey = resolveTemplateKey(cost);
-        if (!templateKey) {
-            // Track costs that don't match template for display
-            unmappedCosts.push(cost);
-            return;
-        }
-        if (!costMap[templateKey]) costMap[templateKey] = cost;
-        else if ((cost.amount || 0) > (costMap[templateKey].amount || 0)) {
-            costMap[templateKey] = cost;
-        }
-    });
+    const { costMap, unmappedCosts } = buildCostMapForMonth(costs, activeMonth);
+    const summary = computeCostTemplateSummary(costs, activeMonth);
 
     let html = `
         <div style="margin-bottom: 15px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
@@ -1205,15 +1311,13 @@ function displayCosts(costs) {
 
     COST_TEMPLATE.forEach(template => {
         let cost = costMap[template.key];
-        let amount = cost ? cost.amount : 0;
+        let amount = getTemplateRowAmount(costs, costMap, template.key, activeMonth);
         let costId = cost ? cost.id : null;
-
         if (template.key === 'fixed_cost_cat_ii') {
-            amount = getFc2TotalAmount(costs, activeMonth);
             const pooled = getFc2CostsForMonth(costs, activeMonth).find(
                 c => (c.name || '').trim().toUpperCase() === 'FIXED COST CAT - II'
             );
-            costId = pooled?.id || null;
+            costId = pooled?.id || getFc2BucketCosts(costs, activeMonth).find(c => c)?.id || null;
         }
         const appliesTo = cost ? cost.applies_to : template.defaultAppliesTo;
         const indent = template.level === 1 ? 'padding-left: 40px;' : '';
@@ -1281,24 +1385,7 @@ function displayCosts(costs) {
         }
     });
 
-    html += '</tbody></table>';
-    
-    // Add totals summary - only include costs that match the template
-    let totalCosts = 0;
-    let inhouseCosts = 0;
-    let outsourcedCosts = 0;
-    Object.values(costMap).forEach(c => {
-        totalCosts += c.amount || 0;
-        if (c.applies_to === 'inhouse') inhouseCosts += c.amount || 0;
-        else if (c.applies_to === 'outsourced') outsourcedCosts += c.amount || 0;
-        else { inhouseCosts += (c.amount || 0) / 2; outsourcedCosts += (c.amount || 0) / 2; }
-    });
-    
-    // Add unmapped costs section if any exist
     if (unmappedCosts.length > 0) {
-        let unmappedTotal = 0;
-        unmappedCosts.forEach(c => { unmappedTotal += c.amount || 0; });
-        
         html += `
             <tr style="background: #fef2f2;">
                 <td colspan="4" style="padding: 12px; font-size: 14px; border-top: 2px solid #f87171;">
@@ -1323,8 +1410,11 @@ function displayCosts(costs) {
                 </tr>
             `;
         });
-        totalCosts += unmappedTotal;
     }
+
+    html += '</tbody></table>';
+    
+    const { totalCosts, inhouseCosts, outsourcedCosts } = summary;
     
     html += `
         <div style="margin-top: 20px; padding: 15px; background: #f9fafb; border-radius: 8px; display: flex; gap: 30px;">
@@ -1344,6 +1434,7 @@ function displayCosts(costs) {
     `;
 
     container.innerHTML = html;
+    applyCostSummaryToPreview(summary);
 }
 
 // Save all cost changes (amounts and applies_to) — updates existing or creates new rows

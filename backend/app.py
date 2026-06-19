@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Depends, status, UploadFile, File, Form, Query
+from fastapi import FastAPI, HTTPException, Depends, status, UploadFile, File, Form, Query, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, StreamingResponse
@@ -787,7 +787,7 @@ def _to_month_key(value: Any) -> str:
     return s[:7] if len(s) >= 7 else s
 
 
-def _pnl_upload_sheet_total(db: Session) -> float:
+def _pnl_upload_sheet_total(db: Session, month: Optional[str] = None) -> float:
     """
     P&L sheet total for dashboard/reference: uploaded pool costs only.
 
@@ -795,14 +795,183 @@ def _pnl_upload_sheet_total(db: Session) -> float:
     created via split UI as manual rows in older data), while excluding
     variable_cost_item detail lines to avoid pool double-counting.
     """
-    total = db.query(func.sum(Cost.amount)).filter(
+    q = db.query(func.sum(Cost.amount)).filter(
         Cost.category != "variable_cost_item",
         or_(
             Cost.source_file == "cost_sheet_upload",
             Cost.name.like("FIXED COST CAT - II -%"),
         ),
-    ).scalar()
+    )
+    if month:
+        q = q.filter(Cost.month == month)
+    total = q.scalar()
     return float(total or 0.0)
+
+
+def _is_fc2_bucket_cost_name(name: Optional[str]) -> bool:
+    return (name or "").strip().upper().startswith("FIXED COST CAT - II -")
+
+
+def _infer_cost_template_key(cost) -> Optional[str]:
+    """Map a Cost row to a template key (pool row only; excludes FC-II buckets and line items)."""
+    if (cost.category or "").strip() == "variable_cost_item":
+        return None
+    if _is_fc2_bucket_cost_name(cost.name):
+        return None
+    name_upper = (cost.name or "").upper()
+    cat = (cost.category or "").lower()
+    pool = (getattr(cost, "allocation_pool", None) or "").strip().lower()
+    if pool and pool != "auto":
+        template_keys = {
+            "open_field", "lettuce", "strawberry", "raspberry_blueberry", "citrus",
+            "packing", "aggregation", "common_expenses_farm", "packing_materials_others",
+            "distribution_cost", "marketing_expenses", "vehicle_running_cost", "others",
+            "wastage_shortage", "purchase_accounts",
+        }
+        if pool in template_keys:
+            return pool
+    if cat == "fixed_cost_cat_i" or (
+        "FIXED COST CAT" in name_upper and " I" in name_upper and " II" not in name_upper
+    ):
+        return "fixed_cost_cat_i"
+    if name_upper == "FIXED COST CAT - II" or (
+        cat == "fixed_cost_cat_ii" and name_upper == "FIXED COST CAT - II"
+    ):
+        return "fixed_cost_cat_ii"
+    if "OPEN FIELD" in name_upper and "FIXED COST" not in name_upper:
+        return "open_field"
+    if "LETTUCE" in name_upper:
+        return "lettuce"
+    if "STRAWBERRY" in name_upper:
+        return "strawberry"
+    if "RASPBERRY" in name_upper or "BLUEBERRY" in name_upper:
+        return "raspberry_blueberry"
+    if "CITRUS" in name_upper:
+        return "citrus"
+    if "PACKING MATERIALS" in name_upper and "OTHER" in name_upper:
+        return "packing_materials_others"
+    if "PACKING" in name_upper:
+        return "packing"
+    if "AGGREGATION" in name_upper and "FIXED COST" not in name_upper:
+        return "aggregation"
+    if "COMMON EXPENSES" in name_upper and "FARM" in name_upper:
+        return "common_expenses_farm"
+    if cat == "distribution_cost" or "DISTRIBUTION" in name_upper:
+        return "distribution_cost"
+    if cat == "marketing_expenses" or "MARKETING" in name_upper:
+        return "marketing_expenses"
+    if cat == "vehicle_running_cost" or "VEHICLE" in name_upper:
+        return "vehicle_running_cost"
+    if cat == "others" or name_upper == "OTHERS":
+        return "others"
+    if cat == "wastage_shortage" or "WASTAGE" in name_upper:
+        return "wastage_shortage"
+    if cat == "purchase_accounts" or name_upper == "PURCHASE ACCOUNTS":
+        return "purchase_accounts"
+    return None
+
+
+def _fc2_total_for_month(costs: List, month: str) -> float:
+    month_key = _to_month_key(month)
+    fc2_rows = [
+        c for c in costs
+        if _to_month_key(c.month) == month_key and _is_fc2_bucket_cost_name(c.name)
+    ]
+    bucket_sum = sum(float(c.amount or 0) for c in fc2_rows)
+    if bucket_sum > 0:
+        return bucket_sum
+    pooled = next(
+        (
+            c for c in costs
+            if _to_month_key(c.month) == month_key
+            and (c.name or "").strip().upper() == "FIXED COST CAT - II"
+        ),
+        None,
+    )
+    return float(pooled.amount or 0) if pooled else 0.0
+
+
+def _split_applies_to_amount(amount: float, applies_to: Optional[str]) -> tuple:
+    amt = float(amount or 0)
+    applies = (applies_to or "both").strip().lower()
+    if applies == "inhouse":
+        return amt, 0.0
+    if applies == "outsourced":
+        return 0.0, amt
+    return amt / 2.0, amt / 2.0
+
+
+def compute_template_cost_summary(db: Session, month: str) -> Dict[str, Any]:
+    """One pool row per template category — matches the Costs tab display totals."""
+    month_key = _to_month_key(month)
+    costs = db.query(Cost).filter(Cost.month == month_key).all()
+    cost_map: Dict[str, Cost] = {}
+    unmapped: List[Dict[str, Any]] = []
+
+    for cost in costs:
+        template_key = _infer_cost_template_key(cost)
+        if not template_key:
+            if (cost.category or "").strip() != "variable_cost_item" and not _is_fc2_bucket_cost_name(cost.name):
+                unmapped.append({
+                    "id": cost.id,
+                    "name": cost.name,
+                    "amount": float(cost.amount or 0),
+                    "applies_to": cost.applies_to,
+                })
+            continue
+        existing = cost_map.get(template_key)
+        if not existing or float(cost.amount or 0) > float(existing.amount or 0):
+            cost_map[template_key] = cost
+
+    template_order = [
+        "fixed_cost_cat_i", "fixed_cost_cat_ii", "open_field", "lettuce", "strawberry",
+        "raspberry_blueberry", "citrus", "packing", "aggregation", "common_expenses_farm",
+        "packing_materials_others", "distribution_cost", "marketing_expenses",
+        "vehicle_running_cost", "others", "wastage_shortage", "purchase_accounts",
+    ]
+    rows: List[Dict[str, Any]] = []
+    total = inhouse = outsourced = 0.0
+
+    for key in template_order:
+        cost = cost_map.get(key)
+        if key == "fixed_cost_cat_ii":
+            amount = _fc2_total_for_month(costs, month_key)
+            applies_to = cost.applies_to if cost else "inhouse"
+        elif cost:
+            amount = float(cost.amount or 0)
+            applies_to = cost.applies_to
+        else:
+            continue
+        if amount <= 0:
+            continue
+        inh, out = _split_applies_to_amount(amount, applies_to)
+        total += amount
+        inhouse += inh
+        outsourced += out
+        rows.append({
+            "template_key": key,
+            "name": cost.name if cost else key,
+            "amount": amount,
+            "applies_to": applies_to,
+        })
+
+    for item in unmapped:
+        amt = float(item.get("amount") or 0)
+        if amt <= 0:
+            continue
+        inh, out = _split_applies_to_amount(amt, item.get("applies_to"))
+        total += amt
+        inhouse += inh
+        outsourced += out
+
+    return {
+        "month": month_key,
+        "total": round(total, 2),
+        "inhouse": round(inhouse, 2),
+        "outsourced": round(outsourced, 2),
+        "rows": rows,
+        "unmapped_count": len(unmapped),
+    }
 
 
 def compute_inhouse_outsourced_ratios(db: Session, alpha: float = 0.5) -> tuple:
@@ -1523,7 +1692,7 @@ def _load_pool_product_keys(db: Session, pool: str) -> set:
     keys: set = set()
     for m in db.query(ProductSectionMapping).all():
         if _section_matches_pool(m.section, pool):
-            key = _canonical_product_key(m.product_name)
+            key = _canonical_product_key(_base_product_display_name(m.product_name))
             if key:
                 keys.add(key)
     return keys
@@ -2113,6 +2282,48 @@ class CostAllocationEngine:
         }
 
 
+def refresh_allocation_denominator_kg_for_month(db: Session, month: str) -> None:
+    """Recompute allocation_denominator_kg for one month's pool costs (fast path after P&L upload)."""
+    month_key = _to_month_key(month)
+    engine = CostAllocationEngine(db)
+    engine._pool_mapping_cache = _build_pool_mapping_cache(db)
+    products = db.query(Product).filter(Product.is_active == True).all()
+    product_map = {p.id: p for p in products}
+    monthly_sales = db.query(MonthlySale).filter(MonthlySale.month == month_key).all()
+    if not monthly_sales:
+        monthly_sales = db.query(MonthlySale).all()
+    sales_map = {s.product_id: s for s in monthly_sales}
+    for cost in db.query(Cost).filter(Cost.month == month_key).all():
+        if cost.basis == "direct_cost" or "PURCHASE ACCOUNTS" in (cost.name or "").upper():
+            continue
+        if (cost.category or "").strip() == "variable_cost_item":
+            continue
+        applicable = engine._get_applicable_products(cost, product_map, sales_map)
+        net_total = 0.0
+        for pid in applicable:
+            if pid not in sales_map:
+                continue
+            net_total += engine._net_product_basis(cost, sales_map[pid])
+        gross_total = engine._compute_total_basis(cost, applicable, sales_map, month=month_key)
+        if "WASTAGE" in (cost.name or "").upper() and "SHORTAGE" in (cost.name or "").upper():
+            if gross_total > 0:
+                cost.allocation_denominator_kg = float(gross_total)
+            continue
+        if net_total > 0:
+            cost.allocation_denominator_kg = float(net_total)
+        elif gross_total > 0:
+            den = getattr(cost, "allocation_denominator_kg", None)
+            if den is None or den <= 0:
+                den = _lookup_allocation_denominator_kg(cost.name)
+            cost.allocation_denominator_kg = float(den) if den and den > 0 else float(gross_total)
+    try:
+        db.commit()
+        print(f"✅ Refreshed allocation_denominator_kg for month {month_key}.")
+    except Exception as e:
+        print(f"⚠️  refresh_allocation_denominator_kg_for_month: {e}")
+        db.rollback()
+
+
 def refresh_allocation_denominator_kg_for_all_costs(db: Session) -> None:
     """Recompute Cost.allocation_denominator_kg from current sales (net kg per pool) after file uploads."""
     engine = CostAllocationEngine(db)
@@ -2149,6 +2360,18 @@ def refresh_allocation_denominator_kg_for_all_costs(db: Session) -> None:
     except Exception as e:
         print(f"⚠️  refresh_allocation_denominator_kg_for_all_costs: {e}")
         db.rollback()
+
+
+def _run_denominator_refresh_for_month(month: str) -> None:
+    """Background job: refresh kg denominators after P&L upload without blocking the response."""
+    db = SessionLocal()
+    try:
+        refresh_allocation_denominator_kg_for_month(db, month)
+    except Exception as e:
+        print(f"⚠️  Background denominator refresh failed: {e}")
+    finally:
+        db.close()
+
 
 # API Endpoints
 @app.get("/")
@@ -2866,9 +3089,30 @@ async def get_all_costs(db: Session = Depends(get_db)):
     """Get all costs data - no month filtering"""
     return db.query(Cost).order_by(Cost.created_at.desc()).all()
 
+
+@app.get("/api/costs/template-summary")
+async def get_costs_template_summary(
+    month: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+):
+    """Template-aligned cost totals for the Costs tab and P&L preview (one row per category)."""
+    target = _to_month_key(month) if month else None
+    if not target:
+        latest = (
+            db.query(Cost.month)
+            .filter(Cost.month.isnot(None))
+            .distinct()
+            .order_by(Cost.month.desc())
+            .first()
+        )
+        target = _to_month_key(latest[0]) if latest and latest[0] else datetime.utcnow().strftime("%Y-%m")
+    return compute_template_cost_summary(db, target)
+
+
 @app.get("/api/costs/{month}", response_model=List[CostResponse])
 async def get_costs(month: str, db: Session = Depends(get_db)):
     return db.query(Cost).filter(Cost.month == month).order_by(Cost.created_at.desc()).all()
+
 
 @app.get("/api/costs/id/{cost_id}", response_model=CostResponse)
 async def get_cost_by_id(cost_id: int, db: Session = Depends(get_db)):
@@ -6789,7 +7033,11 @@ async def upload_pl(file: UploadFile = File(...), db: Session = Depends(get_db))
     return await upload_cost_sheet(file, db)
 
 @app.post("/api/upload-cost-sheet")
-async def upload_cost_sheet(file: UploadFile = File(...), db: Session = Depends(get_db)):
+async def upload_cost_sheet(
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+):
     """
     Upload P&L cost sheet Excel file and save costs directly to cost management.
     Uses the new cost sheet parser to extract and save all expense categories.
@@ -6880,32 +7128,32 @@ async def upload_cost_sheet(file: UploadFile = File(...), db: Session = Depends(
                         "costs_created": 0
                     }
 
-            # Always retry with merged-cell-resolved layout; keep whichever parse is more complete.
-            try:
-                normalized_layout = read_excel_layout_with_openpyxl(content)
-                normalized_df = pd.DataFrame(normalized_layout["matrix"])
-                with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as normalized_tmp:
-                    normalized_path = normalized_tmp.name
-                with pd.ExcelWriter(normalized_path, engine="xlsxwriter") as writer:
-                    normalized_df.to_excel(writer, index=False, header=False)
-                if not summary_mode:
+            # Retry with merged-cell layout only when the primary parse looks incomplete.
+            direct_score = _score_parse_expenses(parse_result.get('expenses', {}))
+            if not summary_mode and direct_score < 50000:
+                try:
+                    normalized_layout = read_excel_layout_with_openpyxl(content)
+                    normalized_df = pd.DataFrame(normalized_layout["matrix"])
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as normalized_tmp:
+                        normalized_path = normalized_tmp.name
+                    with pd.ExcelWriter(normalized_path, engine="xlsxwriter") as writer:
+                        normalized_df.to_excel(writer, index=False, header=False)
                     normalized_result = parse_cost_sheet(normalized_path)
                     if normalized_result.get('success', False):
-                        direct_score = _score_parse_expenses(parse_result.get('expenses', {}))
                         norm_score = _score_parse_expenses(normalized_result.get('expenses', {}))
                         if norm_score > direct_score:
                             print(f"✅ Using merged-cell-resolved P&L parse (score {norm_score:,.0f} > {direct_score:,.0f})")
                             parse_result = normalized_result
                         else:
                             print(f"✅ Keeping direct P&L parse (score {direct_score:,.0f} >= {norm_score:,.0f})")
-            except Exception as _norm_e:
-                print(f"⚠️ Merged-cell resolved re-parse skipped: {_norm_e}")
-            finally:
-                try:
-                    if 'normalized_path' in locals() and os.path.exists(normalized_path):
-                        os.unlink(normalized_path)
-                except Exception:
-                    pass
+                except Exception as _norm_e:
+                    print(f"⚠️ Merged-cell resolved re-parse skipped: {_norm_e}")
+                finally:
+                    try:
+                        if 'normalized_path' in locals() and os.path.exists(normalized_path):
+                            os.unlink(normalized_path)
+                    except Exception:
+                        pass
             
             # Extract data
             header_info = parse_result.get('header_info', {})
@@ -7288,10 +7536,8 @@ async def upload_cost_sheet(file: UploadFile = File(...), db: Session = Depends(
             print(f"   TOTAL: ₹{final_total:,.2f}")
             
             db.commit()
-            try:
-                refresh_allocation_denominator_kg_for_all_costs(db)
-            except Exception as _den_e:
-                print(f"⚠️  Denominator refresh after P&L upload: {_den_e}")
+            template_summary = compute_template_cost_summary(db, month)
+            background_tasks.add_task(_run_denominator_refresh_for_month, month)
             
             print(f"✅ Cost Sheet upload completed!")
             print(f"   💵 Costs created: {costs_created}")
@@ -7303,6 +7549,8 @@ async def upload_cost_sheet(file: UploadFile = File(...), db: Session = Depends(
             # Get all costs created/updated for this month
             all_costs = db.query(Cost).filter(Cost.month == month, Cost.source_file == "cost_sheet_upload").all()
             for cost in all_costs:
+                if (cost.category or "").strip() == "variable_cost_item":
+                    continue
                 parsed_costs.append({
                     "name": cost.name,
                     "amount": cost.amount,
@@ -7320,6 +7568,7 @@ async def upload_cost_sheet(file: UploadFile = File(...), db: Session = Depends(
                 "period": period,
                 "month": month,
                 "total_expenses": final_total,
+                "template_summary": template_summary,
                 "category_totals": {
                     "fixed_cost_cat_i": fixed_cat_i,
                     "fixed_cost_cat_ii": fixed_cat_ii,
