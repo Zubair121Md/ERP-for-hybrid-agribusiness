@@ -808,7 +808,108 @@ def _pnl_upload_sheet_total(db: Session, month: Optional[str] = None) -> float:
     return float(total or 0.0)
 
 
+def _pool_key_for_cost(cost) -> Optional[str]:
+    """Variable / FC-II pool key used for section kg denominators."""
+    pool = _infer_variable_pool_from_cost(cost)
+    if pool:
+        return pool
+    name_upper = (cost.name or "").upper()
+    if not _is_fixed_cost_cat_ii_name(cost.name):
+        return None
+    if "STRAWBERRY" in name_upper:
+        return "strawberry"
+    if "GREENS" in name_upper:
+        return "lettuce"
+    if "OPEN FIELD" in name_upper:
+        return "open_field"
+    if "AGGREGATION" in name_upper:
+        return "aggregation"
+    return None
+
+
+def _pool_section_sales_kg(
+    db: Session,
+    pool: str,
+    month_key: str,
+    product_map: Dict,
+    sales_map: Dict,
+    pool_cache: Optional[Dict] = None,
+) -> float:
+    """
+    Total sold kg for a pool = sum of sales kg for all mapped inhouse products in that section.
+    Matches P&L 'KG' column logic (section total, flat COP per kg).
+    """
+    cache = pool_cache if pool_cache is not None else _build_pool_mapping_cache(db)
+    keys, has_map = cache.get(pool, (set(), False))
+    total = 0.0
+    for pid, product in product_map.items():
+        if product.source != "inhouse":
+            continue
+        sale = sales_map.get(pid)
+        if not sale:
+            continue
+        if month_key and _to_month_key(sale.month) != month_key:
+            continue
+        if has_map:
+            if not _product_matches_variable_pool(product.name, pool, keys, True):
+                continue
+        else:
+            if not _product_matches_variable_pool(product.name, pool, keys, False):
+                continue
+        kg = _sale_quantity_kg(sale)
+        if kg > 0:
+            total += kg
+    return total
+
+
+def _resolve_allocation_denominator_kg(
+    db: Session,
+    cost,
+    product_map: Dict,
+    sales_map: Dict,
+    month: Optional[str],
+    pool_cache: Optional[Dict] = None,
+    compute_total_basis_fn=None,
+) -> float:
+    """
+    Denominator kg for pool allocation (P&L COP basis).
+    Priority: mapped section sales kg → stored on cost → official lookup → applicable sales sum.
+    """
+    month_key = _to_month_key(month or getattr(cost, "month", None) or "")
+    pool = _pool_key_for_cost(cost)
+    if pool:
+        section_kg = _pool_section_sales_kg(
+            db, pool, month_key, product_map, sales_map, pool_cache=pool_cache
+        )
+        if section_kg > 0:
+            return section_kg
+
+    stored = getattr(cost, "allocation_denominator_kg", None)
+    if stored is not None and float(stored) > 0:
+        return float(stored)
+
+    lookup = _lookup_allocation_denominator_kg(cost.name)
+    if lookup is not None and float(lookup) > 0:
+        return float(lookup)
+
+    if compute_total_basis_fn:
+        return float(compute_total_basis_fn() or 0.0)
+    return 0.0
+
+
+def _latest_cost_month(db: Session) -> Optional[str]:
+    row = (
+        db.query(Cost.month)
+        .filter(Cost.month.isnot(None))
+        .distinct()
+        .order_by(Cost.month.desc())
+        .first()
+    )
+    return _to_month_key(row[0]) if row and row[0] else None
+
+
 def _is_fc2_bucket_cost_name(name: Optional[str]) -> bool:
+    return (name or "").strip().upper().startswith("FIXED COST CAT - II -")
     return (name or "").strip().upper().startswith("FIXED COST CAT - II -")
 
 
@@ -1841,6 +1942,7 @@ class CostAllocationEngine:
             allocated_so_far: Dict[int, float] = {pid: 0.0 for pid in product_map.keys()}
             cap_by_product: Dict[int, float] = {}
             self._pool_mapping_cache = _build_pool_mapping_cache(self.db)
+            self._full_product_map = product_map
 
             # Process each cost
             for cost in costs:
@@ -1880,29 +1982,25 @@ class CostAllocationEngine:
         if not applicable_products:
             return
         
-        # Step 2: For sales_kg basis, use uploaded sales kg directly (already post-wastage in your process).
-        # Do NOT subtract wastage again.
-        use_direct_sales_kg = (cost.basis == "sales_kg")
-        if use_direct_sales_kg:
-            total_basis_f = self._compute_total_basis(cost, applicable_products, sales_map, month=month)
-            if total_basis_f <= 0:
-                return
-            total_basis_dec = Decimal(str(total_basis_f))
-            cost.allocation_denominator_kg = float(total_basis_f)
-        else:
-            # Non-sales_kg paths retain denominator fallback behavior.
-            den = getattr(cost, "allocation_denominator_kg", None)
-            if den is None or den <= 0:
-                den = _lookup_allocation_denominator_kg(cost.name)
-            if den is not None and den > 0:
-                total_basis_dec = Decimal(str(den))
-                cost.allocation_denominator_kg = float(den)
-            else:
-                total_basis_f = self._compute_total_basis(cost, applicable_products, sales_map, month=month)
-                if total_basis_f <= 0:
-                    return
-                total_basis_dec = Decimal(str(total_basis_f))
-                cost.allocation_denominator_kg = float(total_basis_f)
+        # Step 2: P&L-style flat COP = pool ÷ section kg; each product gets COP × its sold kg.
+        month_key = _to_month_key(month or getattr(cost, "month", None) or "")
+        full_product_map = getattr(self, "_full_product_map", None) or product_map
+
+        total_basis_f = _resolve_allocation_denominator_kg(
+            self.db,
+            cost,
+            full_product_map,
+            sales_map,
+            month_key,
+            pool_cache=getattr(self, "_pool_mapping_cache", None),
+            compute_total_basis_fn=lambda: self._compute_total_basis(
+                cost, applicable_products, sales_map, month=month
+            ),
+        )
+        if total_basis_f <= 0:
+            return
+        total_basis_dec = Decimal(str(total_basis_f))
+        cost.allocation_denominator_kg = float(total_basis_f)
 
         amount_dec = Decimal(str(cost.amount))
 
@@ -2283,7 +2381,7 @@ class CostAllocationEngine:
 
 
 def refresh_allocation_denominator_kg_for_month(db: Session, month: str) -> None:
-    """Recompute allocation_denominator_kg for one month's pool costs (fast path after P&L upload)."""
+    """Recompute allocation_denominator_kg for one month's pool costs (section kg from mappings)."""
     month_key = _to_month_key(month)
     engine = CostAllocationEngine(db)
     engine._pool_mapping_cache = _build_pool_mapping_cache(db)
@@ -2299,23 +2397,19 @@ def refresh_allocation_denominator_kg_for_month(db: Session, month: str) -> None
         if (cost.category or "").strip() == "variable_cost_item":
             continue
         applicable = engine._get_applicable_products(cost, product_map, sales_map)
-        net_total = 0.0
-        for pid in applicable:
-            if pid not in sales_map:
-                continue
-            net_total += engine._net_product_basis(cost, sales_map[pid])
-        gross_total = engine._compute_total_basis(cost, applicable, sales_map, month=month_key)
-        if "WASTAGE" in (cost.name or "").upper() and "SHORTAGE" in (cost.name or "").upper():
-            if gross_total > 0:
-                cost.allocation_denominator_kg = float(gross_total)
-            continue
-        if net_total > 0:
-            cost.allocation_denominator_kg = float(net_total)
-        elif gross_total > 0:
-            den = getattr(cost, "allocation_denominator_kg", None)
-            if den is None or den <= 0:
-                den = _lookup_allocation_denominator_kg(cost.name)
-            cost.allocation_denominator_kg = float(den) if den and den > 0 else float(gross_total)
+        den = _resolve_allocation_denominator_kg(
+            db,
+            cost,
+            product_map,
+            sales_map,
+            month_key,
+            pool_cache=engine._pool_mapping_cache,
+            compute_total_basis_fn=lambda c=cost, a=applicable: engine._compute_total_basis(
+                c, a, sales_map, month=month_key
+            ),
+        )
+        if den > 0:
+            cost.allocation_denominator_kg = float(den)
     try:
         db.commit()
         print(f"✅ Refreshed allocation_denominator_kg for month {month_key}.")
@@ -2464,15 +2558,23 @@ async def reset_database(db: Session = Depends(get_db)):
 
 # Dashboard endpoints
 @app.get("/api/dashboard/stats", response_model=DashboardStats)
-async def get_dashboard_stats(db: Session = Depends(get_db)):
+async def get_dashboard_stats(
+    month: Optional[str] = Query(None, description="Allocation month (YYYY-MM) for cost totals"),
+    db: Session = Depends(get_db),
+):
     """Get overall dashboard statistics"""
     
     # Product stats
     total_products = db.query(Product).count()
     active_products = db.query(Product).filter(Product.is_active == True).count()
     
-    # Revenue and cost stats for ALL data (no month filtering)
-    sales = db.query(MonthlySale).all()
+    month_key = _to_month_key(month) if month else _latest_cost_month(db)
+    
+    # Revenue and cost stats — filter by month when available
+    if month_key:
+        sales = db.query(MonthlySale).filter(MonthlySale.month == month_key).all()
+    else:
+        sales = db.query(MonthlySale).all()
     all_costs = db.query(Cost).all()
     fa = _get_financial_adjustment(db)
     sales_returns = float(fa.sales_returns or 0.0)
@@ -2502,10 +2604,13 @@ async def get_dashboard_stats(db: Session = Depends(get_db)):
         else:
             print(f"📊 Dashboard: No costs in system")
     
-    # Dashboard must match P&L sheet totals exactly.
-    # Keep direct/economic costs for diagnostics, but card totals and profit use P&L basis.
+    # Dashboard must match P&L template totals for the selected month.
     total_full_costs = total_direct_costs + total_shared_costs
-    pnl_total = _pnl_upload_sheet_total(db)
+    if month_key:
+        summary = compute_template_cost_summary(db, month_key)
+        pnl_total = float(summary.get("total") or 0.0)
+    else:
+        pnl_total = _pnl_upload_sheet_total(db)
     total_costs = float(pnl_total or 0.0)
     total_profit = net_revenue - total_costs
     profit_margin = (total_profit / total_costs * 100) if total_costs > 0 else 0.0
@@ -3470,6 +3575,9 @@ async def get_product_cost_breakdown(
     # Process each allocation
     for allocation in allocations:
         cost = allocation.cost
+        den = float(cost.allocation_denominator_kg or 0)
+        pool_amt = float(cost.amount or 0)
+        pool_per_kg = (pool_amt / den) if den > 0 else 0.0
         cost_info = {
             "cost_id": cost.id,
             "cost_name": cost.name,
@@ -3477,7 +3585,9 @@ async def get_product_cost_breakdown(
             "applies_to": cost.applies_to,
             "basis": cost.basis,
             "amount": allocation.allocated_amount,
-            "total_cost_amount": cost.amount,
+            "total_cost_amount": pool_amt,
+            "allocation_denominator_kg": den,
+            "pool_per_kg": pool_per_kg,
             "amount_per_kg": (allocation.allocated_amount / sales_kg) if sales_kg > 0 else 0.0,
         }
         

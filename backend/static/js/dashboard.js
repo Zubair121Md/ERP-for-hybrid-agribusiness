@@ -353,6 +353,7 @@ function setupEventListeners() {
     if (allocMonth) {
         allocMonth.addEventListener('change', () => {
             loadCosts({ silent: true });
+            loadDashboardData();
             if (typeof refreshCostSummaryPreview === 'function') refreshCostSummaryPreview();
             if (typeof updatePLPreview === 'function') updatePLPreview();
         });
@@ -427,8 +428,11 @@ async function loadDashboardData() {
     try {
         showLoading('stats-grid');
         
-        // Load dashboard stats
-        const statsResponse = await fetch(`${API_BASE}/dashboard/stats`);
+        const month = normalizeMonthKey(document.getElementById('allocation-month')?.value || '');
+        const statsUrl = month
+            ? `${API_BASE}/dashboard/stats?month=${encodeURIComponent(month)}`
+            : `${API_BASE}/dashboard/stats`;
+        const statsResponse = await fetch(statsUrl);
         const stats = await statsResponse.json();
         
         displayDashboardStats(stats);
@@ -2258,6 +2262,21 @@ async function showCostBreakdown(productId) {
     }
 }
 
+function formatPoolCostLine(cost) {
+    const poolRate = cost.pool_per_kg > 0
+        ? `P&amp;L rate ₹${formatNumber(cost.pool_per_kg)}/kg`
+        : '';
+    const den = cost.allocation_denominator_kg > 0
+        ? `section ${formatNumber(cost.allocation_denominator_kg)} kg`
+        : '';
+    const poolTot = cost.total_cost_amount > 0
+        ? `pool ₹${formatNumber(cost.total_cost_amount)}`
+        : '';
+    const meta = [poolTot, poolRate, den].filter(Boolean).join(' · ');
+    return `₹${formatNumber(cost.amount)} | ₹${formatNumber(cost.amount_per_kg || 0)}/kg (${cost.basis || 'sales_kg'})` +
+        (meta ? `<br><small style="color:#6b7280;">${meta}</small>` : '');
+}
+
 function displayCostBreakdownModal(breakdown) {
     console.log('📊 Displaying cost breakdown modal for:', breakdown.product_name);
     
@@ -2356,7 +2375,7 @@ function displayCostBreakdownModal(breakdown) {
                                 ${breakdown.costs_by_type.inhouse_only.map(cost => `
                                     <li style="padding: 5px 0; border-bottom: 1px solid #eee;">
                                         <strong>${cost.cost_name}</strong><br>
-                                        <small>₹${formatNumber(cost.amount)} | ₹${formatNumber(cost.amount_per_kg || 0)}/kg (${cost.basis})</small>
+                                        <small>${formatPoolCostLine(cost)}</small>
                                     </li>
                                 `).join('')}
                                 ${breakdown.costs_by_type.inhouse_only.length === 0 ? '<li>None</li>' : ''}
@@ -2368,7 +2387,7 @@ function displayCostBreakdownModal(breakdown) {
                                 ${breakdown.costs_by_type.outsourced_only.map(cost => `
                                     <li style="padding: 5px 0; border-bottom: 1px solid #eee;">
                                         <strong>${cost.cost_name}</strong><br>
-                                        <small>₹${formatNumber(cost.amount)} | ₹${formatNumber(cost.amount_per_kg || 0)}/kg (${cost.basis})</small>
+                                        <small>${formatPoolCostLine(cost)}</small>
                                     </li>
                                 `).join('')}
                                 ${breakdown.costs_by_type.outsourced_only.length === 0 ? '<li>None</li>' : ''}
@@ -2380,7 +2399,7 @@ function displayCostBreakdownModal(breakdown) {
                                 ${breakdown.costs_by_type.common.map(cost => `
                                     <li style="padding: 5px 0; border-bottom: 1px solid #eee;">
                                         <strong>${cost.cost_name}</strong><br>
-                                        <small>₹${formatNumber(cost.amount)} | ₹${formatNumber(cost.amount_per_kg || 0)}/kg (${cost.basis})</small>
+                                        <small>${formatPoolCostLine(cost)}</small>
                                     </li>
                                 `).join('')}
                                 ${breakdown.costs_by_type.common.length === 0 ? '<li>None</li>' : ''}
@@ -2410,7 +2429,8 @@ function displayCostBreakdownModal(breakdown) {
                                 <th>Applies To</th>
                                 <th>Basis</th>
                                 <th>Allocated Amount</th>
-                                <th>Allocated ₹/kg</th>
+                                <th>Pool ₹/kg</th>
+                                <th>Section kg</th>
                                 <th>Total Cost Amount</th>
                             </tr>
                         </thead>
@@ -2422,7 +2442,8 @@ function displayCostBreakdownModal(breakdown) {
                                     <td><span class="badge ${cost.applies_to === 'inhouse' ? 'badge-success' : cost.applies_to === 'outsourced' ? 'badge-info' : 'badge-secondary'}">${cost.applies_to}</span></td>
                                     <td>${cost.basis}</td>
                                     <td>₹${formatNumber(cost.amount)}</td>
-                                    <td>₹${formatNumber(cost.amount_per_kg || 0)}</td>
+                                    <td>₹${formatNumber(cost.pool_per_kg || cost.amount_per_kg || 0)}</td>
+                                    <td>${cost.allocation_denominator_kg > 0 ? formatNumber(cost.allocation_denominator_kg) : '—'}</td>
                                     <td>₹${formatNumber(cost.total_cost_amount)}</td>
                                 </tr>
                             `).join('')}
