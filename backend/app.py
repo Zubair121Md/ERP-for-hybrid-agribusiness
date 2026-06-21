@@ -4788,14 +4788,15 @@ def extract_pl_semantic_totals(df_raw: pd.DataFrame) -> Dict[str, Any]:
         # This runs BEFORE section tracking for simple "Category | Amount" layouts
         # =====================================================================
         
-        # Fixed Cost Cat-I (not II)
+        # Fixed Cost Cat-I / II — check II before I (avoid Cat-II matching as Cat-I)
         if "FIXED COST" in txt and "CAT" in txt:
-            if "II" in txt or "-II" in txt or "CAT-II" in txt or "CAT 2" in txt:
+            cat_norm = _normalize_summary_label(txt)
+            if _is_fc2_label(txt, cat_norm):
                 if row_max > totals["fixed_cost_cat_ii"]:
                     totals["fixed_cost_cat_ii"] = row_max
                     print(f"[SEMANTIC] Fixed Cost Cat-II: {row_max}")
                 section = "fixed_cost_cat_ii"
-            else:
+            elif _is_fc1_label(txt, cat_norm):
                 if row_max > totals["fixed_cost_cat_i"]:
                     totals["fixed_cost_cat_i"] = row_max
                     print(f"[SEMANTIC] Fixed Cost Cat-I: {row_max}")
@@ -5093,93 +5094,56 @@ def _looks_like_category_totals_sheet(df: pd.DataFrame) -> bool:
         return False
 
 
-def parse_category_totals_sheet(file_bytes: bytes) -> Dict[str, Any]:
-    """
-    Parse a summary sheet of the form:
-    Category | Total Amount
-    and map into the fixed template expense structure.
-    
-    INTELLIGENT MATCHING: Uses keyword detection, not exact strings.
-    Handles variations like:
-    - "Fixed Cost Cat-I" / "Fixed Cost Cat - I" / "Fixed Cost Cat 1"
-    - "Open Field" / "OPEN FIELD" / "open field"
-    - "Raspberry & Blueberry" / "Raspberry Blueberry" / "raspberry and blueberry"
-    - "Purchase Vegetables" / "Purchase Return" (summed into Purchase Accounts)
-    """
-    df = pd.read_excel(io.BytesIO(file_bytes))
-    print(f"[SUMMARY PARSER] DataFrame shape: {df.shape}, columns: {list(df.columns)}")
-    
-    if df is None or df.empty:
-        return {"success": False, "error": "Summary sheet is empty."}
-    
-    # Try to find the best columns for category and amount
-    # Look through all columns to find text and numeric data
-    rows = []
-    
-    # Strategy 1: Use first two columns
-    if len(df.columns) >= 2:
-        c0, c1 = df.columns[0], df.columns[1]
-        for idx, r in df.iterrows():
-            cat = str(r.get(c0, "")).strip()
-            if not cat or cat.lower() in {"nan", "none", "", "unnamed"}:
-                continue
-            amt = parse_numeric_robust(r.get(c1, 0))
-            if cat and (amt != 0 or any(kw in cat.upper() for kw in ["COST", "FIELD", "LETTUCE", "STRAWBERRY", "PACKING", "PURCHASE", "DISTRIBUTION", "MARKETING", "VEHICLE", "WASTAGE", "AGGREGATION", "CITRUS", "RASPBERRY", "OTHERS"])):
-                rows.append((cat, amt))
-                print(f"[SUMMARY PARSER] Row {idx}: '{cat}' = {amt}")
-    
-    # Strategy 2: If few rows found, try scanning all columns for category-amount pairs
-    if len(rows) < 5:
-        print(f"[SUMMARY PARSER] Few rows found ({len(rows)}), trying column scan...")
-        rows = []
-        for idx, r in df.iterrows():
-            row_vals = list(r.values)
-            cat_val = None
-            amt_val = 0.0
-            
-            for v in row_vals:
-                v_str = str(v).strip() if pd.notna(v) else ""
-                if not v_str or v_str.lower() in {"nan", "none", ""}:
-                    continue
-                
-                # Check if it looks like a category name
-                v_upper = v_str.upper()
-                is_category = any(kw in v_upper for kw in [
-                    "COST", "FIELD", "LETTUCE", "STRAWBERRY", "PACKING", 
-                    "PURCHASE", "DISTRIBUTION", "MARKETING", "VEHICLE", 
-                    "WASTAGE", "AGGREGATION", "CITRUS", "RASPBERRY", 
-                    "OTHERS", "COMMON", "FARM", "BLUEBERRY", "ANALYSIS"
-                ])
-                
-                if is_category and cat_val is None:
-                    cat_val = v_str
-                else:
-                    # Try to parse as number
-                    num = parse_numeric_robust(v)
-                    if num != 0:
-                        amt_val = num
-            
-            if cat_val and cat_val.upper() != "COST ANALYSIS":
-                rows.append((cat_val, amt_val))
-                print(f"[SUMMARY PARSER] Scanned Row {idx}: '{cat_val}' = {amt_val}")
-    
-    print(f"[SUMMARY PARSER] Total rows to process: {len(rows)}")
+def _normalize_summary_label(text: str) -> str:
+    """Normalize category labels for matching."""
+    return re.sub(r"[^a-z0-9]+", " ", (text or "").lower()).strip()
 
-    def normalize(s: str) -> str:
-        """Normalize string for keyword matching: lowercase, collapse spaces/punctuation."""
-        return re.sub(r"[^a-z0-9]+", " ", (s or "").lower()).strip()
 
-    def has_keywords(text: str, *keywords) -> bool:
-        """Check if normalized text contains ALL keywords."""
-        norm = normalize(text)
-        return all(kw.lower() in norm for kw in keywords)
+def _is_fc2_label(cat_upper: str, cat_norm: str) -> bool:
+    compact = cat_norm.replace(" ", "")
+    return (
+        re.search(r"CAT\s*[- ]?\s*II\b", cat_upper)
+        or re.search(r"CAT\s*2\b", cat_upper)
+        or "cat-ii" in compact
+        or "catii" in compact
+    )
 
-    def has_any_keyword(text: str, *keywords) -> bool:
-        """Check if normalized text contains ANY keyword."""
-        norm = normalize(text)
-        return any(kw.lower() in norm for kw in keywords)
 
-    expenses = {
+def _is_fc1_label(cat_upper: str, cat_norm: str) -> bool:
+    if _is_fc2_label(cat_upper, cat_norm):
+        return False
+    compact = cat_norm.replace(" ", "")
+    return (
+        re.search(r"CAT\s*[- ]?\s*I\b", cat_upper)
+        or re.search(r"CAT\s*1\b", cat_upper)
+        or "cat-i" in compact
+        or "cati" in compact
+    )
+
+
+def _extract_summary_row_label_amount(row) -> tuple:
+    """First text cell = label; amount = rightmost numeric cell (usually column B)."""
+    label = ""
+    amount = 0.0
+    nums: List[float] = []
+    for v in row.tolist():
+        if pd.isna(v):
+            continue
+        v_str = str(v).strip()
+        if not v_str or v_str.lower() in {"nan", "none"}:
+            continue
+        num = parse_numeric_robust(v)
+        if num != 0.0:
+            nums.append(num)
+        elif not label:
+            label = v_str
+    if nums:
+        amount = nums[-1]
+    return label, amount
+
+
+def _empty_expenses_dict() -> Dict[str, Any]:
+    return {
         'fixed_cost_cat_i':     {'total': 0.0, 'items': []},
         'fixed_cost_cat_ii':    {'total': 0.0, 'items': [], 'splits': {'strawberry': 0.50, 'greens': 0.25, 'open_field': 0.10, 'aggregation': 0.15}},
         'variable_cost':        {'total': 0.0, 'subcategories': {}},
@@ -5191,181 +5155,165 @@ def parse_category_totals_sheet(file_bytes: bytes) -> Dict[str, Any]:
         'purchase_accounts':    {'total': 0.0, 'items': []},
     }
 
-    # Track purchase sub-items to sum them
+
+def _map_summary_category_to_expenses(cat: str, amt: float, expenses: Dict[str, Any], purchase_total: float) -> float:
+    """Map one summary row into expenses dict. Returns updated purchase_total."""
+    cat_upper = (cat or "").upper().strip()
+    cat_norm = _normalize_summary_label(cat)
+
+    if not cat_upper or cat_upper.startswith("COST ANALYSIS"):
+        return purchase_total
+
+    def set_var(key: str, label: str) -> None:
+        expenses['variable_cost']['subcategories'].setdefault(key, {'total': 0.0, 'items': []})
+        expenses['variable_cost']['subcategories'][key]['total'] = float(amt)
+        print(f"   → VARIABLE COST - {label}: {amt}")
+
+    # Fixed Cost Cat I / II — check II before I
+    if "FIXED" in cat_upper and "COST" in cat_upper and "CAT" in cat_upper:
+        if _is_fc2_label(cat_upper, cat_norm):
+            expenses['fixed_cost_cat_ii']['total'] = float(amt)
+            print(f"   → FIXED COST CAT - II: {amt}")
+            return purchase_total
+        if _is_fc1_label(cat_upper, cat_norm):
+            expenses['fixed_cost_cat_i']['total'] = float(amt)
+            print(f"   → FIXED COST CAT - I: {amt}")
+            return purchase_total
+
+    # Variable cost rows — explicit "VARIABLE COST - X" or standalone section names
+    if "OPEN FIELD" in cat_upper and "FIXED" not in cat_upper:
+        set_var('open_field', 'OPEN FIELD')
+        return purchase_total
+    if "LETTUCE" in cat_upper:
+        set_var('lettuce', 'LETTUCE')
+        return purchase_total
+    if "STRAWBERRY" in cat_upper and "FIXED" not in cat_upper:
+        set_var('strawberry', 'STRAWBERRY')
+        return purchase_total
+    if any(k in cat_upper for k in ("RASPBERRY", "BLUEBERRY", "BLUBERRY")):
+        set_var('raspberry_blueberry', 'RASPBERRY & BLUEBERRY')
+        return purchase_total
+    if "CITRUS" in cat_upper:
+        set_var('citrus', 'CITRUS')
+        return purchase_total
+    if "PACKING" in cat_upper and "MATERIALS" in cat_upper and "PURCHASE" not in cat_upper:
+        set_var('packing_materials_others', 'PACKING MATERIALS (OTHERS)')
+        return purchase_total
+    if "PACKING" in cat_upper and "PURCHASE" not in cat_upper:
+        set_var('packing', 'PACKING')
+        return purchase_total
+    if "AGGREGATION" in cat_upper:
+        set_var('aggregation', 'AGGREGATION')
+        return purchase_total
+    if "COMMON" in cat_upper and ("EXPENSES" in cat_upper or "FARM" in cat_upper):
+        set_var('common_expenses_farm', 'COMMON EXPENSES - FARM')
+        return purchase_total
+
+    if "DISTRIBUTION" in cat_upper:
+        expenses['distribution_cost']['total'] = float(amt)
+        print(f"   → DISTRIBUTION COST: {amt}")
+        return purchase_total
+    if "MARKETING" in cat_upper:
+        expenses['marketing_expenses']['total'] = float(amt)
+        print(f"   → MARKETING EXPENSES: {amt}")
+        return purchase_total
+    if "VEHICLE" in cat_upper and ("RUNNING" in cat_upper or "COST" in cat_upper):
+        expenses['vehicle_running_cost']['total'] = float(amt)
+        print(f"   → VEHICLE RUNNING COST: {amt}")
+        return purchase_total
+    if cat_norm in ("others", "other") or (cat_upper == "OTHERS"):
+        expenses['others']['total'] = float(amt)
+        print(f"   → OTHERS: {amt}")
+        return purchase_total
+    if "WASTAGE" in cat_upper:
+        expenses['wastage_shortage']['total'] = float(amt)
+        print(f"   → WASTAGE & SHORTAGE: {amt}")
+        return purchase_total
+
+    # Purchase header row (no amount) — skip; sub-items summed below
+    if cat_upper == "PURCHASE ACCOUNTS":
+        return purchase_total
+
+    if "PURCHASE" in cat_upper:
+        purchase_total += float(amt)
+        print(f"   → PURCHASE line: {amt} (running total: {purchase_total})")
+        return purchase_total
+
+    print(f"   → UNMATCHED: '{cat}' = {amt}")
+    return purchase_total
+
+
+def parse_cost_analysis_summary(file_bytes: bytes) -> Dict[str, Any]:
+    """
+    Parse simple 2-column COST ANALYSIS sheets (Category | Amount).
+    Reads with header=None so the title row is not treated as column headers.
+    """
+    df = pd.read_excel(io.BytesIO(file_bytes), header=None)
+    print(f"[COST ANALYSIS PARSER] shape={df.shape}")
+
+    expenses = _empty_expenses_dict()
     purchase_total = 0.0
-    packing_materials_others = 0.0
+    period = ""
+    rows_parsed = 0
 
-    for cat, amt in rows:
-        if amt is None:
-            amt = 0.0
-        cat_norm = normalize(cat)
-        cat_upper = cat.upper()
-        
-        print(f"[SUMMARY PARSER] Processing: '{cat}' = {amt}")
-
-        # =====================================================================
-        # FIXED COST CAT - I: "fixed cost cat-i", "fixed cost cat 1", "fixed cost cat - i"
-        # Must have "fixed" + "cost" + "cat" + ("i" or "1") but NOT "ii" or "2"
-        # =====================================================================
-        if has_keywords(cat, "fixed", "cost", "cat"):
-            # Check for Cat-II first (to avoid "i" in "ii" matching Cat-I)
-            if re.search(r'\b(ii|2)\b', cat_norm) or 'cat-ii' in cat_norm.replace(' ', '') or 'cat ii' in cat_norm:
-                expenses['fixed_cost_cat_ii']['total'] = float(amt)
-                print(f"   → FIXED COST CAT - II: {amt}")
-                continue
-            # Cat-I: has "i" or "1" but not "ii"
-            if re.search(r'\b(i|1)\b', cat_norm) or 'cat-i' in cat_norm.replace(' ', ''):
-                expenses['fixed_cost_cat_i']['total'] = float(amt)
-                print(f"   → FIXED COST CAT - I: {amt}")
-                continue
-
-        # =====================================================================
-        # VARIABLE COST SUBCATEGORIES - Match by keywords
-        # These can appear as standalone rows like "Open Field", "Lettuce", "Strawberry"
-        # in summary sheets, not just "VARIABLE COST - OPEN FIELD"
-        # =====================================================================
-        matched_var = False
-
-        # Open Field: "open field" - standalone or with "variable cost" prefix
-        if has_keywords(cat, "open", "field"):
-            expenses['variable_cost']['subcategories'].setdefault('open_field', {'total': 0.0, 'items': []})
-            expenses['variable_cost']['subcategories']['open_field']['total'] = float(amt)
-            print(f"   → VARIABLE COST - OPEN FIELD: {amt}")
-            matched_var = True
-
-        # Lettuce: "lettuce" - standalone row
-        elif has_keywords(cat, "lettuce"):
-            expenses['variable_cost']['subcategories'].setdefault('lettuce', {'total': 0.0, 'items': []})
-            expenses['variable_cost']['subcategories']['lettuce']['total'] = float(amt)
-            print(f"   → VARIABLE COST - LETTUCE: {amt}")
-            matched_var = True
-
-        # Strawberry: "strawberry" - standalone row
-        elif has_keywords(cat, "strawberry"):
-            expenses['variable_cost']['subcategories'].setdefault('strawberry', {'total': 0.0, 'items': []})
-            expenses['variable_cost']['subcategories']['strawberry']['total'] = float(amt)
-            print(f"   → VARIABLE COST - STRAWBERRY: {amt}")
-            matched_var = True
-
-        # Raspberry & Blueberry: "raspberry" or "blueberry" or "bluberry"
-        elif has_any_keyword(cat, "raspberry", "blueberry", "bluberry"):
-            expenses['variable_cost']['subcategories'].setdefault('raspberry_blueberry', {'total': 0.0, 'items': []})
-            expenses['variable_cost']['subcategories']['raspberry_blueberry']['total'] = float(amt)
-            print(f"   → VARIABLE COST - RASPBERRY & BLUEBERRY: {amt}")
-            matched_var = True
-
-        # Citrus: "citrus" - standalone row
-        elif has_keywords(cat, "citrus"):
-            expenses['variable_cost']['subcategories'].setdefault('citrus', {'total': 0.0, 'items': []})
-            expenses['variable_cost']['subcategories']['citrus']['total'] = float(amt)
-            print(f"   → VARIABLE COST - CITRUS: {amt}")
-            matched_var = True
-
-        # Packing: "packing" but NOT "packing materials" and NOT "purchase packing"
-        elif has_keywords(cat, "packing") and not has_keywords(cat, "materials") and not has_keywords(cat, "purchase"):
-            expenses['variable_cost']['subcategories'].setdefault('packing', {'total': 0.0, 'items': []})
-            expenses['variable_cost']['subcategories']['packing']['total'] = float(amt)
-            print(f"   → VARIABLE COST - PACKING: {amt}")
-            matched_var = True
-
-        # Packing Materials (Others): "packing materials" with "other" - NOT "purchase packing"
-        elif has_keywords(cat, "packing", "materials") and not has_keywords(cat, "purchase"):
-            packing_materials_others = float(amt)
-            expenses['variable_cost']['subcategories'].setdefault('packing_materials_others', {'total': 0.0, 'items': []})
-            expenses['variable_cost']['subcategories']['packing_materials_others']['total'] = float(amt)
-            print(f"   → PACKING MATERIALS (OTHERS): {amt}")
-            matched_var = True
-
-        # Aggregation: "aggregation" - standalone row
-        elif has_keywords(cat, "aggregation"):
-            expenses['variable_cost']['subcategories'].setdefault('aggregation', {'total': 0.0, 'items': []})
-            expenses['variable_cost']['subcategories']['aggregation']['total'] = float(amt)
-            print(f"   → VARIABLE COST - AGGREGATION: {amt}")
-            matched_var = True
-
-        # Common Expenses - Farm: "common expenses" and/or "common" + "farm"
-        elif has_keywords(cat, "common", "expenses") or (has_keywords(cat, "common") and has_keywords(cat, "farm")):
-            expenses['variable_cost']['subcategories'].setdefault('common_expenses_farm', {'total': 0.0, 'items': []})
-            expenses['variable_cost']['subcategories']['common_expenses_farm']['total'] = float(amt)
-            print(f"   → VARIABLE COST - COMMON EXPENSES - FARM: {amt}")
-            matched_var = True
-
-        if matched_var:
+    for idx in range(len(df)):
+        row = df.iloc[idx]
+        label, amount = _extract_summary_row_label_amount(row)
+        if not label:
             continue
-
-        # =====================================================================
-        # OTHER COST CATEGORIES
-        # =====================================================================
-
-        # Distribution Cost: "distribution" + "cost"
-        if has_keywords(cat, "distribution", "cost") or has_keywords(cat, "distribution"):
-            expenses['distribution_cost']['total'] = float(amt)
-            print(f"   → DISTRIBUTION COST: {amt}")
+        label_upper = label.upper()
+        if "COST ANALYSIS" in label_upper and not period:
+            period = label.strip()
+            print(f"[COST ANALYSIS PARSER] Period header: {period}")
             continue
+        print(f"[COST ANALYSIS PARSER] Row {idx}: '{label}' = {amount}")
+        purchase_total = _map_summary_category_to_expenses(label, amount, expenses, purchase_total)
+        rows_parsed += 1
 
-        # Marketing Expenses: "marketing"
-        if has_keywords(cat, "marketing"):
-            expenses['marketing_expenses']['total'] = float(amt)
-            print(f"   → MARKETING EXPENSES: {amt}")
-            continue
-
-        # Vehicle Running Cost: "vehicle" + "running" or "vehicle" + "cost"
-        if has_keywords(cat, "vehicle", "running") or has_keywords(cat, "vehicle", "cost"):
-            expenses['vehicle_running_cost']['total'] = float(amt)
-            print(f"   → VEHICLE RUNNING COST: {amt}")
-            continue
-
-        # Others: "others" standalone or "other expenses" - but not if it's a purchase item
-        if (cat_norm == "others" or cat_norm == "other" or has_keywords(cat, "other", "expense")) and not has_keywords(cat, "purchase"):
-            expenses['others']['total'] = float(amt)
-            print(f"   → OTHERS: {amt}")
-            continue
-
-        # Wastage & Shortage: "wastage" alone or with "shortage"
-        if has_keywords(cat, "wastage"):
-            expenses['wastage_shortage']['total'] = float(amt)
-            print(f"   → WASTAGE & SHORTAGE: {amt}")
-            continue
-
-        # =====================================================================
-        # PURCHASE ACCOUNTS: Sum all purchase sub-items
-        # "purchase vegetables", "purchase return", "purchase chemicals", etc.
-        # =====================================================================
-        if has_keywords(cat, "purchase"):
-            # This is a purchase sub-item - add to running total
-            purchase_total += float(amt)
-            print(f"   → PURCHASE SUB-ITEM: {amt} (running total: {purchase_total})")
-            continue
-
-        print(f"   → UNMATCHED: '{cat}'")
-
-    # Set purchase accounts total from summed sub-items
     if purchase_total != 0:
         expenses['purchase_accounts']['total'] = purchase_total
-        print(f"[SUMMARY PARSER] PURCHASE ACCOUNTS TOTAL: {purchase_total}")
+        print(f"[COST ANALYSIS PARSER] PURCHASE ACCOUNTS TOTAL: {purchase_total}")
 
-    # Add packing materials (others) to variable cost if present
-    if packing_materials_others > 0:
-        expenses['variable_cost']['subcategories'].setdefault('packing_materials_others', {'total': 0.0, 'items': []})
-        expenses['variable_cost']['subcategories']['packing_materials_others']['total'] = packing_materials_others
+    expenses['variable_cost']['total'] = sum(
+        v.get('total', 0.0) for v in expenses['variable_cost']['subcategories'].values()
+    )
 
-    # Variable total is sum of subcategories
-    expenses['variable_cost']['total'] = sum(v.get('total', 0.0) for v in expenses['variable_cost']['subcategories'].values())
-
-    print(f"[SUMMARY PARSER] === FINAL TOTALS ===")
-    print(f"   FIXED COST CAT - I: {expenses['fixed_cost_cat_i']['total']}")
-    print(f"   FIXED COST CAT - II: {expenses['fixed_cost_cat_ii']['total']}")
-    print(f"   VARIABLE COST TOTAL: {expenses['variable_cost']['total']}")
+    print(f"[COST ANALYSIS PARSER] === FINAL TOTALS ===")
+    print(f"   FC-I: {expenses['fixed_cost_cat_i']['total']}")
+    print(f"   FC-II: {expenses['fixed_cost_cat_ii']['total']}")
+    print(f"   Variable: {expenses['variable_cost']['total']}")
     for sub, data in expenses['variable_cost']['subcategories'].items():
         print(f"      {sub}: {data['total']}")
-    print(f"   DISTRIBUTION COST: {expenses['distribution_cost']['total']}")
-    print(f"   MARKETING EXPENSES: {expenses['marketing_expenses']['total']}")
-    print(f"   VEHICLE RUNNING COST: {expenses['vehicle_running_cost']['total']}")
-    print(f"   OTHERS: {expenses['others']['total']}")
-    print(f"   WASTAGE & SHORTAGE: {expenses['wastage_shortage']['total']}")
-    print(f"   PURCHASE ACCOUNTS: {expenses['purchase_accounts']['total']}")
 
-    return {"success": True, "expenses": expenses}
+    score = _score_parse_expenses(expenses)
+    return {
+        "success": score > 0,
+        "expenses": expenses,
+        "period": period,
+        "rows_parsed": rows_parsed,
+        "score": score,
+    }
+
+
+def _looks_like_cost_analysis_summary(file_bytes: bytes) -> bool:
+    try:
+        df = pd.read_excel(io.BytesIO(file_bytes), header=None, nrows=30)
+        text = " ".join(str(v).upper() for v in df.values.flatten() if pd.notna(v))
+        if "COST ANALYSIS" in text:
+            return True
+        markers = ["FIXED COST CAT", "VARIABLE COST", "OPEN FIELD", "STRAWBERRY", "DISTRIBUTION"]
+        return sum(1 for m in markers if m in text) >= 3
+    except Exception:
+        return False
+
+
+def parse_category_totals_sheet(file_bytes: bytes) -> Dict[str, Any]:
+    """Parse Category | Amount summary sheets (delegates to headerless parser)."""
+    result = parse_cost_analysis_summary(file_bytes)
+    if not result.get("success"):
+        return {"success": False, "error": "Could not parse summary sheet."}
+    return {"success": True, "expenses": result["expenses"]}
+
 
 def detect_new_sales_stock_format(df_raw: pd.DataFrame) -> bool:
     """Compatibility wrapper around structure detection."""
@@ -7472,29 +7420,39 @@ async def upload_cost_sheet(
         
         try:
             # ============================================================
-            # Summary-sheet fast path (Category | Total Amount)
+            # COST ANALYSIS summary sheet (Category | Amount) — try first
             # ============================================================
             summary_mode = False
+            parse_result = {"success": False}
             try:
-                summary_df = pd.read_excel(io.BytesIO(content))
-                if _looks_like_category_totals_sheet(summary_df):
+                if _looks_like_cost_analysis_summary(content):
+                    ca_result = parse_cost_analysis_summary(content)
+                    if ca_result.get("success") and ca_result.get("score", 0) > 10000:
+                        parse_result = {
+                            "success": True,
+                            "header_info": {"company_name": "", "period": ca_result.get("period", "")},
+                            "expenses": ca_result["expenses"],
+                            "total_expenses": _score_parse_expenses(ca_result["expenses"]),
+                        }
+                        summary_mode = True
+                        print(f"✅ COST ANALYSIS summary parsed (score={ca_result['score']:,.0f}, rows={ca_result.get('rows_parsed', 0)})")
+                if not summary_mode and _looks_like_category_totals_sheet(pd.read_excel(io.BytesIO(content), header=None)):
                     parsed = parse_category_totals_sheet(content)
                     if parsed.get("success"):
                         parse_result = {
                             "success": True,
                             "header_info": {"company_name": "", "period": ""},
                             "expenses": parsed["expenses"],
-                            "total_expenses": sum(v.get("total", 0.0) for v in parsed["expenses"].values()),
+                            "total_expenses": _score_parse_expenses(parsed["expenses"]),
                         }
                         summary_mode = True
                         print("✅ Detected Category/Total summary sheet; using direct mapping.")
-                    else:
-                        parse_result = {"success": False, "error": parsed.get("error", "Summary parse failed")}
             except Exception as _sum_e:
+                print(f"⚠️ Summary parse attempt failed: {_sum_e}")
                 parse_result = {"success": False, "error": str(_sum_e)}
 
-            # Parse the cost sheet
-            print(f"🔍 Parsing cost sheet from: {tmp_file_path}")
+            # Full P&L parser only when summary sheet was not detected
+            print(f"🔍 Parsing cost sheet from: {tmp_file_path} (summary_mode={summary_mode})")
             if not summary_mode:
                 parse_result = parse_cost_sheet(tmp_file_path)
             
@@ -7554,45 +7512,40 @@ async def upload_cost_sheet(
             header_info = parse_result.get('header_info', {})
             expenses = parse_result.get('expenses', {})
 
-            # Semantic fallback: ALWAYS run to fill any gaps. This is crucial for summary sheets.
-            try:
-                var_subs = expenses.get('variable_cost', {}).get('subcategories', {}) or {}
-                expected_var_keys = ['open_field', 'lettuce', 'strawberry', 'raspberry_blueberry', 'citrus', 'packing', 'aggregation', 'common_expenses_farm', 'packing_materials_others']
-                var_total = sum(float((var_subs.get(k, {}) or {}).get('total', 0.0) or 0.0) for k in expected_var_keys)
-                fc1 = float(expenses.get('fixed_cost_cat_i', {}).get('total', 0.0) or 0.0)
-                fc2 = float(expenses.get('fixed_cost_cat_ii', {}).get('total', 0.0) or 0.0)
-                purchase = float(expenses.get('purchase_accounts', {}).get('total', 0.0) or 0.0)
-                
-                # Always run semantic fallback if any major category is missing
-                needs_fallback = var_total <= 0 or fc1 <= 0 or fc2 <= 0 or purchase <= 0
-                print(f"   📊 Pre-semantic check: var_total={var_total:,.2f}, fc1={fc1:,.2f}, fc2={fc2:,.2f}, purchase={purchase:,.2f}, needs_fallback={needs_fallback}")
-                
-                if needs_fallback:
-                    print(f"   🔄 Running semantic fallback extractor...")
-                    # Read raw DataFrame for semantic extraction
-                    semantic_df = pd.read_excel(io.BytesIO(content), header=None)
-                    semantic_totals = extract_pl_semantic_totals(semantic_df)
-                    
-                    semantic_expenses = {
-                        'fixed_cost_cat_i': {'total': semantic_totals.get('fixed_cost_cat_i', 0.0), 'items': []},
-                        'fixed_cost_cat_ii': {'total': semantic_totals.get('fixed_cost_cat_ii', 0.0), 'items': [], 'splits': expenses.get('fixed_cost_cat_ii', {}).get('splits', {'strawberry': 0.50, 'greens': 0.25, 'open_field': 0.10, 'aggregation': 0.15})},
-                        'variable_cost': {'total': 0.0, 'subcategories': {
-                            k: {'total': v, 'items': []} for k, v in semantic_totals.get('variable_subcategories', {}).items()
-                        }},
-                        'distribution_cost': {'total': semantic_totals.get('distribution_cost', 0.0), 'items': []},
-                        'marketing_expenses': {'total': semantic_totals.get('marketing_expenses', 0.0), 'items': []},
-                        'vehicle_running_cost': {'total': semantic_totals.get('vehicle_running_cost', 0.0), 'items': []},
-                        'others': {'total': semantic_totals.get('others', 0.0), 'items': []},
-                        'wastage_shortage': {'total': semantic_totals.get('wastage_shortage', 0.0), 'items': []},
-                        'purchase_accounts': {'total': semantic_totals.get('purchase_accounts', 0.0), 'items': []},
-                    }
-                    expenses = _merge_expenses_prefer_higher(expenses, semantic_expenses)
-                    new_var_total = _variable_cost_subtotal(expenses)
-                    print(f"   ✅ Applied semantic P&L fallback (variable total now ₹{new_var_total:,.2f})")
-            except Exception as _sem_e:
-                import traceback
-                print(f"⚠️ Semantic P&L fallback error: {_sem_e}")
-                print(traceback.format_exc())
+            # Semantic fallback only for full P&L sheets (never overwrite summary parse)
+            if not summary_mode:
+                try:
+                    var_subs = expenses.get('variable_cost', {}).get('subcategories', {}) or {}
+                    expected_var_keys = ['open_field', 'lettuce', 'strawberry', 'raspberry_blueberry', 'citrus', 'packing', 'aggregation', 'common_expenses_farm', 'packing_materials_others']
+                    var_total = sum(float((var_subs.get(k, {}) or {}).get('total', 0.0) or 0.0) for k in expected_var_keys)
+                    fc1 = float(expenses.get('fixed_cost_cat_i', {}).get('total', 0.0) or 0.0)
+                    fc2 = float(expenses.get('fixed_cost_cat_ii', {}).get('total', 0.0) or 0.0)
+                    purchase = float(expenses.get('purchase_accounts', {}).get('total', 0.0) or 0.0)
+                    needs_fallback = var_total <= 0 or fc1 <= 0 or fc2 <= 0 or purchase <= 0
+                    print(f"   📊 Pre-semantic check: var_total={var_total:,.2f}, fc1={fc1:,.2f}, fc2={fc2:,.2f}, purchase={purchase:,.2f}, needs_fallback={needs_fallback}")
+                    if needs_fallback:
+                        print(f"   🔄 Running semantic fallback extractor...")
+                        semantic_df = pd.read_excel(io.BytesIO(content), header=None)
+                        semantic_totals = extract_pl_semantic_totals(semantic_df)
+                        semantic_expenses = {
+                            'fixed_cost_cat_i': {'total': semantic_totals.get('fixed_cost_cat_i', 0.0), 'items': []},
+                            'fixed_cost_cat_ii': {'total': semantic_totals.get('fixed_cost_cat_ii', 0.0), 'items': [], 'splits': expenses.get('fixed_cost_cat_ii', {}).get('splits', {'strawberry': 0.50, 'greens': 0.25, 'open_field': 0.10, 'aggregation': 0.15})},
+                            'variable_cost': {'total': 0.0, 'subcategories': {
+                                k: {'total': v, 'items': []} for k, v in semantic_totals.get('variable_subcategories', {}).items()
+                            }},
+                            'distribution_cost': {'total': semantic_totals.get('distribution_cost', 0.0), 'items': []},
+                            'marketing_expenses': {'total': semantic_totals.get('marketing_expenses', 0.0), 'items': []},
+                            'vehicle_running_cost': {'total': semantic_totals.get('vehicle_running_cost', 0.0), 'items': []},
+                            'others': {'total': semantic_totals.get('others', 0.0), 'items': []},
+                            'wastage_shortage': {'total': semantic_totals.get('wastage_shortage', 0.0), 'items': []},
+                            'purchase_accounts': {'total': semantic_totals.get('purchase_accounts', 0.0), 'items': []},
+                        }
+                        expenses = _merge_expenses_prefer_higher(expenses, semantic_expenses)
+                        print(f"   ✅ Applied semantic P&L fallback (variable total now ₹{_variable_cost_subtotal(expenses):,.2f})")
+                except Exception as _sem_e:
+                    import traceback
+                    print(f"⚠️ Semantic P&L fallback error: {_sem_e}")
+                    print(traceback.format_exc())
             
             # Extract month from period or file content (e.g., "COST ANALYSIS – MAY 2026")
             period = header_info.get('period', '')
