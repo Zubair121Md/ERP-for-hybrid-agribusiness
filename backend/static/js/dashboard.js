@@ -2091,110 +2091,6 @@ async function showAllocationDiagnostics() {
 }
 window.showAllocationDiagnostics = showAllocationDiagnostics;
 
-// Render bucket summary showing kg breakdown by section
-function renderBucketSummary(result) {
-    const products = result.products || [];
-    if (products.length === 0) return '';
-    
-    // Compute kg by bucket
-    const buckets = {
-        strawberry: { inhouse: 0, outsourced: 0 },
-        lettuce: { inhouse: 0, outsourced: 0 },
-        open_field: { inhouse: 0, outsourced: 0 },
-        aggregation: { inhouse: 0, outsourced: 0 },
-        other: { inhouse: 0, outsourced: 0 }
-    };
-    
-    products.forEach(p => {
-        const kg = p.sales_kg || p.quantity || 0;
-        const name = (p.product_name || '').toUpperCase();
-        const source = (p.source || '').toLowerCase();
-        const isInhouse = source === 'inhouse';
-        
-        let bucket = 'other';
-        if (name.includes('STRAWBERRY')) bucket = 'strawberry';
-        else if (name.includes('LETTUCE') || name.includes('CELERY') || name.includes('KALE') || 
-                 name.includes('SPINACH') || name.includes('ARUGULA') || name.includes('ROMAINE') ||
-                 name.includes('BOKCHOY') || name.includes('BOK CHOY') || name.includes('PARSLEY') ||
-                 name.includes('WATERCRESS') || name.includes('CHIVES') || name.includes('FENNEL') ||
-                 name.includes('OREGANO') || name.includes('SAGE') || name.includes('SALAD')) bucket = 'lettuce';
-        else if (name.includes('DILL') || name.includes('ICEBERG') || name.includes('SPRING ONION') || 
-                 name.includes('ZUCCHINI') || name.includes('ZUCHINI')) bucket = 'open_field';
-        else if (source === 'outsourced') bucket = 'aggregation';
-        
-        if (isInhouse) {
-            buckets[bucket].inhouse += kg;
-        } else {
-            buckets[bucket].outsourced += kg;
-            // All outsourced goes to aggregation bucket for allocation purposes
-            if (bucket !== 'aggregation') {
-                buckets.aggregation.outsourced += 0; // Already added above
-            }
-        }
-    });
-    
-    const totalKg = Object.values(buckets).reduce((sum, b) => sum + b.inhouse + b.outsourced, 0);
-    
-    const bucketLabels = {
-        strawberry: 'Strawberry',
-        lettuce: 'Lettuce / Greens',
-        open_field: 'Open Field',
-        aggregation: 'Aggregation (Outsourced)',
-        other: 'Other (Inhouse)'
-    };
-    
-    let html = `
-        <div style="margin-bottom: 20px; padding: 16px; background: #f8fafc; border-radius: 8px; border: 1px solid #e2e8f0;">
-            <h4 style="margin: 0 0 12px; color: #334155;">Sales Kg by Section (Allocation Denominators)</h4>
-            <p style="margin: 0 0 12px; font-size: 13px; color: #64748b;">
-                These are the <strong>actual sales kg</strong> used as denominators for cost allocation. 
-                Closing stock is not included (costs are allocated only to what was sold).
-            </p>
-            <table class="table" style="margin: 0; font-size: 13px;">
-                <thead>
-                    <tr style="background: #e2e8f0;">
-                        <th>Bucket</th>
-                        <th style="text-align: right;">Inhouse kg</th>
-                        <th style="text-align: right;">Outsourced kg</th>
-                        <th style="text-align: right;">Total kg</th>
-                        <th style="text-align: right;">Share</th>
-                    </tr>
-                </thead>
-                <tbody>
-    `;
-    
-    Object.entries(buckets).forEach(([key, data]) => {
-        const total = data.inhouse + data.outsourced;
-        if (total > 0 || key === 'aggregation') {
-            const share = totalKg > 0 ? ((total / totalKg) * 100).toFixed(1) : '0.0';
-            html += `
-                <tr>
-                    <td>${bucketLabels[key]}</td>
-                    <td style="text-align: right;">${formatNumber(data.inhouse)}</td>
-                    <td style="text-align: right;">${formatNumber(data.outsourced)}</td>
-                    <td style="text-align: right; font-weight: 600;">${formatNumber(total)}</td>
-                    <td style="text-align: right;">${share}%</td>
-                </tr>
-            `;
-        }
-    });
-    
-    html += `
-                    <tr style="background: #f1f5f9; font-weight: 600;">
-                        <td>Total</td>
-                        <td style="text-align: right;">${formatNumber(Object.values(buckets).reduce((s, b) => s + b.inhouse, 0))}</td>
-                        <td style="text-align: right;">${formatNumber(Object.values(buckets).reduce((s, b) => s + b.outsourced, 0))}</td>
-                        <td style="text-align: right;">${formatNumber(totalKg)}</td>
-                        <td style="text-align: right;">100%</td>
-                    </tr>
-                </tbody>
-            </table>
-        </div>
-    `;
-    
-    return html;
-}
-
 // Allocation functions
 async function runAllocation() {
     const month = normalizeMonthKey(document.getElementById('allocation-month').value);
@@ -2256,8 +2152,6 @@ function displayAllocationResults(result) {
                 <div class="stat-value">₹${formatNumber(result.total_profit)}</div>
             </div>
         </div>
-        
-        ${renderBucketSummary(result)}
         
         <h3>Product-wise Allocation Results</h3>
         <table class="table">

@@ -2454,16 +2454,12 @@ class CostAllocationEngine:
         # Calculate top products
         top_products = products_data[:5]  # Top 5 by profit
         
-        # Economic totals: direct purchase + allocated overhead (matches per-product rows)
-        total_direct = sum(p.get("direct_cost", 0.0) for p in products_data)
-        total_allocated_sum = sum(p.get("allocated_costs", 0.0) for p in products_data)
-        total_costs = total_full_costs
-        total_profit = total_revenue - total_costs
-
-        # P&L template total for reference (pool rows only, deduped — may differ in direct purchase mode)
+        # Total Costs must match Costs tab (one pool row per P&L category — no double-count)
         pnl_template_total = _pnl_upload_sheet_total(self.db, month_key)
+        total_costs = pnl_template_total
+        total_profit = total_revenue - total_costs
         
-        # Aggregate-level margins on CP basis, using full costs (direct + allocated).
+        # Aggregate-level margins on CP basis, using full costs (direct + allocated) per product.
         overall_margin = ((total_profit / total_full_costs) * 100) if total_full_costs > 0 else 0
         inhouse_margin = ((inhouse_profit / inhouse_full_costs) * 100) if inhouse_full_costs > 0 else 0
         outsourced_margin = ((outsourced_profit / outsourced_full_costs) * 100) if outsourced_full_costs > 0 else 0
@@ -2483,8 +2479,9 @@ class CostAllocationEngine:
             "total_costs": total_costs,
             "total_profit": total_profit,
             "pnl_template_total": pnl_template_total,
-            "total_direct_costs": total_direct,
-            "total_allocated_costs": total_allocated_sum,
+            "total_direct_costs": sum(p.get("direct_cost", 0.0) for p in products_data),
+            "total_allocated_costs": sum(p.get("allocated_costs", 0.0) for p in products_data),
+            "economic_total_costs": total_full_costs,
             "profit_margin": overall_margin,
             "inhouse_summary": {
                 "revenue": inhouse_revenue,
@@ -2744,16 +2741,13 @@ async def get_dashboard_stats(
         else:
             print(f"📊 Dashboard: No costs in system")
     
-    # Dashboard costs: after allocation use economic total (direct + allocated); else P&L template.
+    # Dashboard Total Costs = Costs tab P&L template total (deduped pool rows per category)
     total_full_costs = total_direct_costs + total_shared_costs
     if month_key:
         pnl_total = float(compute_template_cost_summary(db, month_key).get("total") or 0.0)
     else:
         pnl_total = _pnl_upload_sheet_total(db)
-    if allocations_exist:
-        total_costs = total_full_costs
-    else:
-        total_costs = float(pnl_total or 0.0)
+    total_costs = float(pnl_total or 0.0)
     total_profit = net_revenue - total_costs
     profit_margin = (total_profit / total_costs * 100) if total_costs > 0 else 0.0
     revenue_margin = (total_profit / net_revenue * 100) if net_revenue > 0 else 0.0
