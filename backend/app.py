@@ -789,23 +789,14 @@ def _to_month_key(value: Any) -> str:
 
 def _pnl_upload_sheet_total(db: Session, month: Optional[str] = None) -> float:
     """
-    P&L sheet total for dashboard/reference: uploaded pool costs only.
-
-    Includes normal cost-sheet rows and FC-II split rows (which may have been
-    created via split UI as manual rows in older data), while excluding
-    variable_cost_item detail lines to avoid pool double-counting.
+    P&L sheet total for dashboard/reference: one pool row per template category (no double-count).
+    Uses compute_template_cost_summary so FC-II parent + bucket rows are not summed twice.
     """
-    q = db.query(func.sum(Cost.amount)).filter(
-        Cost.category != "variable_cost_item",
-        or_(
-            Cost.source_file == "cost_sheet_upload",
-            Cost.name.like("FIXED COST CAT - II -%"),
-        ),
-    )
-    if month:
-        q = q.filter(Cost.month == month)
-    total = q.scalar()
-    return float(total or 0.0)
+    month_key = _to_month_key(month) if month else _latest_cost_month(db)
+    if not month_key:
+        return 0.0
+    summary = compute_template_cost_summary(db, month_key)
+    return float(summary.get("total") or 0.0)
 
 
 def _pool_key_for_cost(cost) -> Optional[str]:
@@ -2329,10 +2320,19 @@ class CostAllocationEngine:
         return max(0.0, gross - float(sale.wastage or 0.0))
     
     def _generate_monthly_report(self, month: str, product_map: Dict, sales_map: Dict) -> Dict[str, Any]:
-        """Generate comprehensive report with enhanced analytics (ignores month)"""
+        """Generate comprehensive report with enhanced analytics for the selected month."""
         
-        # Get all allocations (ignore month)
-        allocations = self.db.query(Allocation).all()
+        month_key = _to_month_key(month)
+        # Allocations for this month only (avoid stale rows from other months)
+        allocations = (
+            self.db.query(Allocation)
+            .filter(Allocation.month == month_key)
+            .all()
+        )
+        if not allocations:
+            allocations = self.db.query(Allocation).join(MonthlySale).filter(
+                MonthlySale.month == month_key
+            ).all()
         
         # Group allocations by product
         product_allocations = {}
@@ -2360,7 +2360,6 @@ class CostAllocationEngine:
         outsourced_profit = 0.0      # Profit after BOTH direct + P&L
         
         cost_breakdown = {}
-        month_key = _to_month_key(month)
         # Standard ("direct") mode: each outsourced product's direct_cost is the purchase_value
         # stored on the sales row (= what was paid, from the upload).  No pool redistribution.
         # "sales_kg" mode: PURCHASE ACCOUNTS pool is allocated by sold kg; direct_cost zeroed.
@@ -2436,11 +2435,7 @@ class CostAllocationEngine:
             
             products_data.append(product_data)
             total_revenue += revenue
-
-            # Aggregated P&L-only costs (for alignment with P&L Total Expenses)
-            total_costs += total_allocated
             total_full_costs += total_cost
-            total_profit += profit
             
             if product.source == "inhouse":
                 inhouse_revenue += revenue
@@ -2451,6 +2446,7 @@ class CostAllocationEngine:
                 outsourced_revenue += revenue
                 outsourced_costs += total_allocated
                 outsourced_full_costs += total_cost
+                outsourced_profit += profit
         
         # Sort products by profit (DSA optimization)
         products_data.sort(key=lambda x: x["profit"], reverse=True)
@@ -2458,15 +2454,19 @@ class CostAllocationEngine:
         # Calculate top products
         top_products = products_data[:5]  # Top 5 by profit
         
-        # Aggregate-level margins on CP basis, using full costs (direct + P&L).
+        # Economic totals: direct purchase + allocated overhead (matches per-product rows)
+        total_direct = sum(p.get("direct_cost", 0.0) for p in products_data)
+        total_allocated_sum = sum(p.get("allocated_costs", 0.0) for p in products_data)
+        total_costs = total_full_costs
+        total_profit = total_revenue - total_costs
+
+        # P&L template total for reference (pool rows only, deduped — may differ in direct purchase mode)
+        pnl_template_total = _pnl_upload_sheet_total(self.db, month_key)
+        
+        # Aggregate-level margins on CP basis, using full costs (direct + allocated).
         overall_margin = ((total_profit / total_full_costs) * 100) if total_full_costs > 0 else 0
         inhouse_margin = ((inhouse_profit / inhouse_full_costs) * 100) if inhouse_full_costs > 0 else 0
         outsourced_margin = ((outsourced_profit / outsourced_full_costs) * 100) if outsourced_full_costs > 0 else 0
-        
-        # IMPORTANT: "total_costs" at the report level should line up with the
-        # P&L Total Expenses from the uploaded sheet (pool rows only — excludes
-        # variable_cost_item detail lines which duplicate parent VARIABLE COST pools).
-        total_costs = float(_pnl_upload_sheet_total(self.db))
         
         purchase_mode_label = (
             "By sales kg — PURCHASE ACCOUNTS pool distributed to outsourced by sold qty (direct_cost = 0)"
@@ -2481,8 +2481,10 @@ class CostAllocationEngine:
             "products": products_data,
             "total_revenue": total_revenue,
             "total_costs": total_costs,
-            # Profit after BOTH direct + allocated P&L costs
             "total_profit": total_profit,
+            "pnl_template_total": pnl_template_total,
+            "total_direct_costs": total_direct,
+            "total_allocated_costs": total_allocated_sum,
             "profit_margin": overall_margin,
             "inhouse_summary": {
                 "revenue": inhouse_revenue,
@@ -2720,9 +2722,16 @@ async def get_dashboard_stats(
     total_direct_costs = sum(s.direct_cost for s in sales)
     
     if allocations_exist:
-        # If allocation has been run, only count allocated costs
-        # Get all allocations and sum their amounts (only valid ones with existing sales)
-        allocations = db.query(Allocation).join(MonthlySale).all()  # Only get allocations with valid sales
+        # Sum allocated costs for the selected month only
+        if month_key:
+            allocations = (
+                db.query(Allocation)
+                .join(MonthlySale)
+                .filter(MonthlySale.month == month_key)
+                .all()
+            )
+        else:
+            allocations = db.query(Allocation).join(MonthlySale).all()
         total_allocated_costs = sum(a.allocated_amount for a in allocations)
         total_shared_costs = total_allocated_costs
         print(f"📊 Dashboard: Using allocated costs (₹{total_allocated_costs:,.2f}) from {len(allocations)} valid allocations")
@@ -2735,14 +2744,16 @@ async def get_dashboard_stats(
         else:
             print(f"📊 Dashboard: No costs in system")
     
-    # Dashboard must match P&L template totals for the selected month.
+    # Dashboard costs: after allocation use economic total (direct + allocated); else P&L template.
     total_full_costs = total_direct_costs + total_shared_costs
     if month_key:
-        summary = compute_template_cost_summary(db, month_key)
-        pnl_total = float(summary.get("total") or 0.0)
+        pnl_total = float(compute_template_cost_summary(db, month_key).get("total") or 0.0)
     else:
         pnl_total = _pnl_upload_sheet_total(db)
-    total_costs = float(pnl_total or 0.0)
+    if allocations_exist:
+        total_costs = total_full_costs
+    else:
+        total_costs = float(pnl_total or 0.0)
     total_profit = net_revenue - total_costs
     profit_margin = (total_profit / total_costs * 100) if total_costs > 0 else 0.0
     revenue_margin = (total_profit / net_revenue * 100) if net_revenue > 0 else 0.0
